@@ -64,7 +64,6 @@ def load_params_from_gs(
         torch.zeros_like(
             pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda"
         )
-        + 0
     )
     try:
         screenspace_points.retain_grad()

@@ -230,7 +230,7 @@ def get_float_array_product(
     arrayC[tid] = arrayA[tid] * arrayB[tid]
 
 
-def torch2warp_quat(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
+def torch2warp_quat(t, copy=False, dtype=warp.float32, dvc="cuda:0"):
     assert t.is_contiguous()
     if t.dtype != torch.float32 and t.dtype != torch.int32:
         raise RuntimeError(
@@ -251,7 +251,7 @@ def torch2warp_quat(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
     return a
 
 
-def torch2warp_float(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
+def torch2warp_float(t, copy=False, dtype=warp.float32, dvc="cuda:0"):
     assert t.is_contiguous()
     if t.dtype != torch.float32 and t.dtype != torch.int32:
         raise RuntimeError(
@@ -259,7 +259,7 @@ def torch2warp_float(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
         )
     a = warp.types.array(
         ptr=t.data_ptr(),
-        dtype=warp.types.float32,
+        dtype=warp.float32,
         shape=t.shape[0],
         copy=False,
         owner=False,
@@ -271,7 +271,7 @@ def torch2warp_float(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
     return a
 
 
-def torch2warp_vec3(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
+def torch2warp_vec3(t, copy=False, dtype=warp.float32, dvc="cuda:0"):
     assert t.is_contiguous()
     if t.dtype != torch.float32 and t.dtype != torch.int32:
         raise RuntimeError(
@@ -283,7 +283,7 @@ def torch2warp_vec3(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
         dtype=wp.vec3,
         shape=t.shape[0],
         copy=False,
-        owner=False,
+        # owner=False,
         requires_grad=t.requires_grad,
         # device=t.device.type)
         device=dvc,
@@ -292,7 +292,7 @@ def torch2warp_vec3(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
     return a
 
 
-def torch2warp_mat33(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
+def torch2warp_mat33(t, copy=False, dtype=warp.float32, dvc="cuda:0"):
     assert t.is_contiguous()
     if t.dtype != torch.float32 and t.dtype != torch.int32:
         raise RuntimeError(

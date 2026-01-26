@@ -7,3 +7,4 @@ output
 *.jpg
 model
 log
+bread-trained/

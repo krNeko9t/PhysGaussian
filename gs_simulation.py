@@ -29,7 +29,7 @@ from mpm_solver_warp.mpm_solver_warp import MPM_Simulator_WARP
 import warp as wp
 
 # Particle filling dependencies
-from particle_filling.filling import *
+from particle_filling.filling_chunk import *
 
 # Utils
 from utils.decode_param import *
