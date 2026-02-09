@@ -237,7 +237,7 @@ def torch2warp_quat(t, copy=False, dtype=warp.float32, dvc="cuda:0"):
             "Error aliasing Torch tensor to Warp array. Torch tensor must be float32 or int32 type"
         )
     assert t.shape[1] == 4
-    a = warp.types.array(
+    a = warp.array(
         ptr=t.data_ptr(),
         dtype=wp.quat,
         shape=t.shape[0],
@@ -257,7 +257,7 @@ def torch2warp_float(t, copy=False, dtype=warp.float32, dvc="cuda:0"):
         raise RuntimeError(
             "Error aliasing Torch tensor to Warp array. Torch tensor must be float32 or int32 type"
         )
-    a = warp.types.array(
+    a = warp.array(
         ptr=t.data_ptr(),
         dtype=warp.float32,
         shape=t.shape[0],
@@ -278,7 +278,7 @@ def torch2warp_vec3(t, copy=False, dtype=warp.float32, dvc="cuda:0"):
             "Error aliasing Torch tensor to Warp array. Torch tensor must be float32 or int32 type"
         )
     assert t.shape[1] == 3
-    a = warp.types.array(
+    a = warp.array(
         ptr=t.data_ptr(),
         dtype=wp.vec3,
         shape=t.shape[0],
@@ -299,7 +299,7 @@ def torch2warp_mat33(t, copy=False, dtype=warp.float32, dvc="cuda:0"):
             "Error aliasing Torch tensor to Warp array. Torch tensor must be float32 or int32 type"
         )
     assert t.shape[1] == 3
-    a = warp.types.array(
+    a = warp.array(
         ptr=t.data_ptr(),
         dtype=wp.mat33,
         shape=t.shape[0],
