@@ -10,25 +10,40 @@ import json
 # Backend names that can appear as top-level override sections in the config.
 _KNOWN_BACKENDS = ("warp_mpm", "newton_mpm")
 
+# Material keys that can be overridden per-object.
+_MATERIAL_KEYS = (
+    "material", "E", "nu", "density", "friction_angle",
+    "yield_stress", "hardening", "rpic_damping", "pic_damping",
+    "xi", "plastic_viscosity", "softening",
+)
+
 
 def decode_param_json(json_file: str):
     """Parse a scene configuration JSON file.
 
     Returns:
         (material_params, bc_params, time_params,
-         preprocessing_params, camera_params, backend_overrides)
+         preprocessing_params, camera_params, backend_overrides,
+         scene_objects)
 
-    ``backend_overrides`` is a dict keyed by backend name, e.g.::
+    ``backend_overrides`` — dict keyed by backend name for per-backend
+    parameter overrides (time stepping, solver options, etc.).
 
-        {
-            "newton_mpm": {
-                "substep_dt": 1e-3,
-                "solver": {"max_iterations": 50, "tolerance": 1e-4}
-            }
-        }
+    ``scene_objects`` — ``None`` for single-object scenes (backward
+    compatible), or a list of dicts for multi-object scenes::
 
-    The pipeline can merge these into the relevant param dicts at runtime
-    based on the selected ``--backend``.
+        [
+            {
+                "name": "sand_pile",
+                "sim_area": [x0, x1, y0, y1, z0, z1],
+                "material": { ... per-object material params ... },
+                "particle_filling": { ... } or None,
+            },
+            ...
+        ]
+
+    Per-object material params inherit from the top-level defaults and
+    can override any key in ``_MATERIAL_KEYS``.
     """
     with open(json_file) as f:
         sim_params = json.load(f)
@@ -126,4 +141,33 @@ def decode_param_json(json_file: str):
         if backend_name in sim_params:
             backend_overrides[backend_name] = sim_params[backend_name]
 
-    return material_params, bc_params, time_params, preprocessing_params, camera_params, backend_overrides
+    # ── Multi-object scene definition ────────────────────────────────
+    # If "objects" is present, each entry defines a distinct physical
+    # object with its own sim_area and (optional) material overrides.
+    # Absent → single-object mode (fully backward compatible).
+    scene_objects = None
+    if "objects" in sim_params:
+        scene_objects = []
+        for i, obj_def in enumerate(sim_params["objects"]):
+            if "sim_area" not in obj_def:
+                raise ValueError(
+                    f"Object {i} ({obj_def.get('name', '?')}) "
+                    "must define 'sim_area'."
+                )
+            # Build per-object material by inheriting top-level defaults
+            obj_material = {}
+            for key in _MATERIAL_KEYS:
+                if key in obj_def:
+                    obj_material[key] = obj_def[key]
+                elif key in material_params:
+                    obj_material[key] = material_params[key]
+            scene_objects.append({
+                "name": obj_def.get("name", f"object_{i}"),
+                "sim_area": obj_def["sim_area"],
+                "material": obj_material,
+                "particle_filling": obj_def.get("particle_filling", None),
+            })
+
+    return (material_params, bc_params, time_params,
+            preprocessing_params, camera_params, backend_overrides,
+            scene_objects)

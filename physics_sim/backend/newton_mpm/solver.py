@@ -20,58 +20,70 @@ from physics_sim.backend.newton_mpm.kernels import compute_cov_from_F, compute_R
 
 
 # ── Material presets ─────────────────────────────────────────────────────
-# Maps the material string used in existing configs to Newton MPM parameters.
-# These are applied *per-particle* via model.mpm.* arrays after finalize().
+# Calibrated against Newton's own MPM examples (example_mpm_multi_material,
+# example_mpm_granular).  Only yield / plasticity parameters differ between
+# presets — young_modulus and poisson_ratio come from the config.
+#
+# Key Newton MPM parameters:
+#   yield_stress      – shear yield threshold (0 = instantly flows)
+#   yield_pressure    – compression yield threshold
+#   friction          – Coulomb friction coefficient
+#   tensile_yield_ratio – tensile strength (0 = no tensile, 1 = full)
+#   hardening         – plastic strain hardening
 
 _MATERIAL_PRESETS: dict[str, dict] = {
-    "jelly": dict(
-        young_modulus=None,       # use config E
-        poisson_ratio=None,       # use config nu
-        friction=0.5,
-        yield_pressure=1.0e12,    # very high → no plastic compression
-        yield_stress=1.0e12,
-        tensile_yield_ratio=0.0,
-        hardening=0.0,
-    ),
+    # Granular: flows freely, friction-dominated (Newton default behaviour)
     "sand": dict(
-        young_modulus=None,
-        poisson_ratio=None,
-        friction=None,            # computed from friction_angle
+        friction=None,            # from friction_angle if given, else 0.68
         yield_pressure=1.0e12,
-        yield_stress=0.0,
+        yield_stress=0.0,         # zero → instantly yields in shear
         tensile_yield_ratio=0.0,
         hardening=0.0,
     ),
+    # Viscoelastic: soft, deforms, slight bounce, settles (jelly/gelatin)
+    # Moderate yield allows some plastic dissipation → no infinite bouncing.
+    # Hardening provides progressive stiffening → mimics viscoelastic damping.
+    "jelly": dict(
+        friction=0.0,
+        yield_pressure=1.0e6,
+        yield_stress=5.0e4,       # high but not infinite → mostly elastic, slight flow
+        tensile_yield_ratio=0.1,
+        hardening=3.0,            # deform more → get stiffer → settles
+    ),
+    # Snow: compressible, soft, hardens under strain (from Newton example)
     "snow": dict(
-        young_modulus=None,
-        poisson_ratio=None,
         friction=0.1,
         yield_pressure=2.0e4,
         yield_stress=1.0e3,
         tensile_yield_ratio=0.05,
         hardening=10.0,
     ),
+    # Mud: viscous, cohesive, no friction (from Newton example)
+    "mud": dict(
+        friction=0.0,
+        yield_pressure=1.0e10,
+        yield_stress=3.0e2,
+        tensile_yield_ratio=1.0,
+        hardening=2.0,
+    ),
+    # Metal: stiff, high yield, minimal plasticity
     "metal": dict(
-        young_modulus=None,
-        poisson_ratio=None,
         friction=0.3,
         yield_pressure=1.0e12,
-        yield_stress=None,        # use config yield_stress
+        yield_stress=1.0e8,
         tensile_yield_ratio=0.0,
         hardening=0.0,
     ),
+    # Foam: soft, compressible
     "foam": dict(
-        young_modulus=None,
-        poisson_ratio=None,
         friction=0.5,
         yield_pressure=1.0e6,
         yield_stress=1.0e4,
         tensile_yield_ratio=0.1,
         hardening=5.0,
     ),
+    # Plasticine: soft, deforms permanently
     "plasticine": dict(
-        young_modulus=None,
-        poisson_ratio=None,
         friction=0.5,
         yield_pressure=1.0e6,
         yield_stress=5.0e3,
@@ -287,6 +299,93 @@ class NewtonMPMBackend(PhysicsBackend):
         # Additional material params for sub-regions (cuboid material overrides)
         if "additional_material_params" in material_params:
             self._apply_additional_materials(material_params["additional_material_params"])
+
+        # ── Per-object material overrides (multi-object mode) ─────
+        # Each entry has "particle_indices" and per-object material keys.
+        # The base material (above) is applied first, then per-object
+        # overrides selectively replace per-particle values.
+        if "per_object" in material_params:
+            self._apply_per_object_materials(material_params["per_object"])
+
+    def _apply_per_object_materials(self, per_object: list[dict]) -> None:
+        """Apply per-object material overrides using Newton's native API.
+
+        Uses the same ``model.mpm.attr[wp_idx].fill_(val)`` pattern as
+        Newton's own ``example_mpm_multi_material.py``.
+        """
+        model = self._model
+
+        for obj in per_object:
+            raw_idx = obj["particle_indices"]
+            if len(raw_idx) == 0:
+                continue
+            mat = obj.get("material", {})
+            name = obj.get("name", "?")
+
+            # Build a warp index array (same approach as Newton's examples)
+            idx_wp = wp.array(
+                np.array(raw_idx, dtype=np.int32), dtype=int, device=self._device
+            )
+
+            # Resolve preset
+            mat_name = mat.get("material", "jelly")
+            preset = _MATERIAL_PRESETS.get(mat_name, _MATERIAL_PRESETS["jelly"])
+
+            # ── Elastic params (from config, per-object) ──────────────
+            if "E" in mat:
+                model.mpm.young_modulus[idx_wp].fill_(float(mat["E"]))
+            if "nu" in mat:
+                model.mpm.poisson_ratio[idx_wp].fill_(float(mat["nu"]))
+
+            # ── Yield / plasticity (from preset, overrideable by config) ─
+            model.mpm.yield_pressure[idx_wp].fill_(
+                float(preset.get("yield_pressure", 1e12)))
+            model.mpm.tensile_yield_ratio[idx_wp].fill_(
+                float(preset.get("tensile_yield_ratio", 0.0)))
+
+            ys = preset.get("yield_stress", 0.0)
+            if "yield_stress" in mat:
+                ys = mat["yield_stress"]
+            model.mpm.yield_stress[idx_wp].fill_(float(ys))
+
+            h = preset.get("hardening", 0.0)
+            if "hardening" in mat:
+                h = mat["hardening"]
+            model.mpm.hardening[idx_wp].fill_(float(h))
+
+            # Friction: preset, or from friction_angle if sand
+            friction = preset.get("friction")
+            if friction is None:
+                # Default for sand when no friction_angle given
+                friction = 0.68
+            if mat_name == "sand" and "friction_angle" in mat:
+                friction = _friction_from_angle(mat["friction_angle"])
+            model.mpm.friction[idx_wp].fill_(float(friction))
+
+            # ── Density → mass ────────────────────────────────────────
+            if "density" in mat:
+                density = float(mat["density"])
+                mass_np = model.particle_mass.numpy()
+                inv_mass_np = model.particle_inv_mass.numpy()
+                for i in raw_idx:
+                    m = self._volumes[i] * density
+                    mass_np[i] = m
+                    inv_mass_np[i] = 1.0 / m if m > 0 else 0.0
+                model.particle_mass.assign(
+                    wp.from_numpy(mass_np.astype(np.float32), dtype=float,
+                                  device=self._device))
+                model.particle_inv_mass.assign(
+                    wp.from_numpy(inv_mass_np.astype(np.float32), dtype=float,
+                                  device=self._device))
+
+            print(
+                f"[NewtonMPM] Object '{name}': {len(raw_idx)} particles, "
+                f"preset={mat_name}, "
+                f"E={mat.get('E','(base)')}, "
+                f"yield_stress={ys}, "
+                f"friction={friction}, "
+                f"density={mat.get('density','(base)')}"
+            )
 
     def _apply_additional_materials(self, additional_params: list) -> None:
         """Apply per-region material overrides (cuboid areas with different E/nu)."""

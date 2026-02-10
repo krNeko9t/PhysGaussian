@@ -141,9 +141,8 @@ def main():
     # ── 1. Load config ───────────────────────────────────────────────
     print("Loading scene config...")
     (material_params, bc_params, time_params,
-     preprocessing_params, camera_params, backend_overrides) = (
-        decode_param_json(args.config)
-    )
+     preprocessing_params, camera_params, backend_overrides,
+     scene_objects) = decode_param_json(args.config)
 
     # Apply backend-specific config overrides (if the selected backend
     # has an override section in the JSON).  This keeps all tuneable
@@ -201,94 +200,264 @@ def main():
     )
     rotated_pos = apply_rotations(init_pos, rotation_matrices)
 
-    # 3c. Select simulation area
-    unselected_pos, unselected_cov, unselected_opacity, unselected_shs = (
-        None, None, None, None,
-    )
-    if preprocessing_params["sim_area"] is not None:
-        boundary = preprocessing_params["sim_area"]
-        assert len(boundary) == 6
-        area_mask = torch.ones(rotated_pos.shape[0], dtype=torch.bool, device="cuda")
-        for i in range(3):
-            area_mask = torch.logical_and(area_mask, rotated_pos[:, i] > boundary[2 * i])
-            area_mask = torch.logical_and(area_mask, rotated_pos[:, i] < boundary[2 * i + 1])
+    # 3c–3g: Select simulation area(s), transform, fill, compute volumes.
+    #
+    # Two code paths:
+    #   scene_objects is None  → single-object (backward compatible)
+    #   scene_objects is list  → multi-object (per-object sim_area & material)
+    #
+    # Both paths produce the same output variables:
+    #   mpm_init_pos, mpm_init_vol, mpm_init_cov  (all particles)
+    #   gs_num                     (GS particle count, for rendering)
+    #   shs, opacity               (GS render attributes)
+    #   scale_origin, original_mean_pos  (coordinate transform params)
+    #   unselected_pos/cov/opacity/shs   (static particles, or None)
+    #   has_unselected             (bool, whether unselected exist)
+    #   per_object_info            (None or list of per-object material+indices)
 
-        unselected_pos = init_pos[~area_mask, :]
-        unselected_cov = init_cov[~area_mask, :]
-        unselected_opacity = init_opacity[~area_mask, :]
-        unselected_shs = init_shs[~area_mask, :]
+    unselected_pos = unselected_cov = unselected_opacity = unselected_shs = None
+    has_unselected = False
+    per_object_info = None
 
-        rotated_pos = rotated_pos[area_mask, :]
-        init_cov = init_cov[area_mask, :]
-        init_opacity = init_opacity[area_mask, :]
-        init_shs = init_shs[area_mask, :]
+    if scene_objects is not None:
+        # ── MULTI-OBJECT PATH ─────────────────────────────────────
+        print(f"  Multi-object mode: {len(scene_objects)} objects")
 
-    if args.debug:
-        _log("=== CHECKPOINT 3: After sim_area selection ===")
-        _log(f"  [DBG] Selected (sim) particles: {rotated_pos.shape[0]}")
-        _dbg("rotated_pos (sim only)", rotated_pos)
-        if unselected_pos is not None:
-            _log(f"  [DBG] Unselected particles: {unselected_pos.shape[0]}")
-
-    # 3d. Transform to MPM domain [0,2]^3
-    transformed_pos, scale_origin, original_mean_pos = transform2origin(
-        rotated_pos, preprocessing_params["scale"]
-    )
-    transformed_pos = shift2center111(transformed_pos)
-
-    init_cov = apply_cov_rotations(init_cov, rotation_matrices)
-    init_cov = scale_origin * scale_origin * init_cov
-
-    if args.debug:
-        _log("=== CHECKPOINT 4: After transform to MPM domain ===")
-        _log(f"  [DBG] scale_origin = {scale_origin.item():.10f}")
-        _dbg("original_mean_pos", original_mean_pos)
-        _dbg("transformed_pos", transformed_pos)
-        _dbg("init_cov (rotated+scaled)", init_cov)
-
-    # 3e. Particle filling
-    gs_num = transformed_pos.shape[0]
-    filling_params = preprocessing_params["particle_filling"]
-
-    if filling_params is not None:
-        print("Filling internal particles...")
-        mpm_init_pos = fill_particles(
-            pos=transformed_pos,
-            opacity=init_opacity,
-            cov=init_cov,
-            grid_n=filling_params["n_grid"],
-            max_samples=filling_params["max_particles_num"],
-            grid_dx=material_params["grid_lim"] / filling_params["n_grid"],
-            density_thres=filling_params["density_threshold"],
-            search_thres=filling_params["search_threshold"],
-            max_particles_per_cell=filling_params["max_partciels_per_cell"],
-            search_exclude_dir=filling_params["search_exclude_direction"],
-            ray_cast_dir=filling_params["ray_cast_direction"],
-            boundary=filling_params["boundary"],
-            smooth=filling_params["smooth"],
-        ).to(device=device)
-    else:
-        mpm_init_pos = transformed_pos.to(device=device)
-
-    # 3f. Compute particle volumes
-    mpm_init_vol = get_particle_volume(
-        mpm_init_pos,
-        material_params["n_grid"],
-        material_params["grid_lim"] / material_params["n_grid"],
-        uniform=material_params["material"] == "sand",
-    ).to(device=device)
-
-    # 3g. Initialise filled-particle attributes
-    if filling_params is not None and filling_params.get("visualize", False):
-        shs, opacity, mpm_init_cov = init_filled_particles(
-            mpm_init_pos[:gs_num], init_shs, init_cov, init_opacity, mpm_init_pos[gs_num:]
+        # 3c. Per-object area selection (in rotated space)
+        obj_data = []
+        all_selected = torch.zeros(
+            rotated_pos.shape[0], dtype=torch.bool, device="cuda"
         )
-        gs_num = mpm_init_pos.shape[0]
-    else:
-        mpm_init_cov = torch.zeros((mpm_init_pos.shape[0], 6), device=device)
+        for obj in scene_objects:
+            boundary = obj["sim_area"]
+            assert len(boundary) == 6, (
+                f"sim_area must have 6 values, got {len(boundary)}"
+            )
+            obj_mask = torch.ones(
+                rotated_pos.shape[0], dtype=torch.bool, device="cuda"
+            )
+            for i in range(3):
+                obj_mask = torch.logical_and(
+                    obj_mask, rotated_pos[:, i] > boundary[2 * i]
+                )
+                obj_mask = torch.logical_and(
+                    obj_mask, rotated_pos[:, i] < boundary[2 * i + 1]
+                )
+            # First-match wins: skip particles already claimed
+            obj_mask = torch.logical_and(obj_mask, ~all_selected)
+            all_selected = torch.logical_or(all_selected, obj_mask)
+
+            n_gs = int(obj_mask.sum().item())
+            obj_data.append({
+                "rotated_pos": rotated_pos[obj_mask],
+                "cov": init_cov[obj_mask],
+                "opacity": init_opacity[obj_mask],
+                "shs": init_shs[obj_mask],
+                "gs_count": n_gs,
+            })
+            print(f"    {obj['name']}: {n_gs} GS particles")
+
+        # Unselected = particles not in any object
+        unsel_mask = ~all_selected
+        if unsel_mask.any():
+            unselected_pos = init_pos[unsel_mask]
+            unselected_cov = init_cov[unsel_mask]
+            unselected_opacity = init_opacity[unsel_mask]
+            unselected_shs = init_shs[unsel_mask]
+            has_unselected = True
+
+        # Concatenate GS particles from all objects
+        rotated_pos = torch.cat([d["rotated_pos"] for d in obj_data], dim=0)
+        init_cov = torch.cat([d["cov"] for d in obj_data], dim=0)
+        init_opacity = torch.cat([d["opacity"] for d in obj_data], dim=0)
+        init_shs = torch.cat([d["shs"] for d in obj_data], dim=0)
+
+        # 3d. Transform to MPM domain [0,2]^3
+        transformed_pos, scale_origin, original_mean_pos = transform2origin(
+            rotated_pos, preprocessing_params["scale"]
+        )
+        transformed_pos = shift2center111(transformed_pos)
+        init_cov = apply_cov_rotations(init_cov, rotation_matrices)
+        init_cov = scale_origin * scale_origin * init_cov
+
+        # 3e. Per-object particle filling
+        gs_num = transformed_pos.shape[0]
+        shared_filling = preprocessing_params["particle_filling"]
+
+        all_filled = []           # filled-particle tensors per object
+        per_object_info = []      # index + material mapping
+        gs_offset = 0
+        filled_offset = gs_num    # filled particles are appended after all GS
+
+        for i, obj in enumerate(scene_objects):
+            n_gs = obj_data[i]["gs_count"]
+            filling = obj.get("particle_filling") or shared_filling
+            n_filled = 0
+
+            if filling is not None:
+                obj_pos = transformed_pos[gs_offset:gs_offset + n_gs]
+                obj_opacity = init_opacity[gs_offset:gs_offset + n_gs]
+                obj_cov = init_cov[gs_offset:gs_offset + n_gs]
+
+                obj_mpm = fill_particles(
+                    pos=obj_pos,
+                    opacity=obj_opacity,
+                    cov=obj_cov,
+                    grid_n=filling["n_grid"],
+                    max_samples=filling["max_particles_num"],
+                    grid_dx=material_params["grid_lim"] / filling["n_grid"],
+                    density_thres=filling["density_threshold"],
+                    search_thres=filling["search_threshold"],
+                    max_particles_per_cell=filling["max_partciels_per_cell"],
+                    search_exclude_dir=filling["search_exclude_direction"],
+                    ray_cast_dir=filling["ray_cast_direction"],
+                    boundary=filling["boundary"],
+                    smooth=filling["smooth"],
+                ).to(device=device)
+
+                obj_filled = obj_mpm[n_gs:]
+                n_filled = obj_filled.shape[0]
+                if n_filled > 0:
+                    all_filled.append(obj_filled)
+
+            # Track per-object particle indices (GS + filled)
+            gs_idx = list(range(gs_offset, gs_offset + n_gs))
+            filled_idx = list(range(filled_offset, filled_offset + n_filled))
+            per_object_info.append({
+                "name": obj["name"],
+                "particle_indices": gs_idx + filled_idx,
+                "material": obj["material"],
+            })
+            print(
+                f"    {obj['name']}: {n_gs} gs + {n_filled} filled "
+                f"= {n_gs + n_filled} total"
+            )
+
+            gs_offset += n_gs
+            filled_offset += n_filled
+
+        # Build final array: [all_gs, all_filled]
+        if all_filled:
+            mpm_init_pos = torch.cat(
+                [transformed_pos.to(device)] + all_filled, dim=0
+            )
+        else:
+            mpm_init_pos = transformed_pos.to(device)
+
+        # 3f. Compute particle volumes (shared grid, non-uniform)
+        mpm_init_vol = get_particle_volume(
+            mpm_init_pos,
+            material_params["n_grid"],
+            material_params["grid_lim"] / material_params["n_grid"],
+            uniform=False,
+        ).to(device=device)
+
+        # 3g. Covariance for all particles (filled get zeros)
+        mpm_init_cov = torch.zeros(
+            (mpm_init_pos.shape[0], 6), device=device
+        )
         mpm_init_cov[:gs_num] = init_cov
         shs = init_shs
         opacity = init_opacity
+
+    else:
+        # ── SINGLE-OBJECT PATH (unchanged) ────────────────────────
+
+        # 3c. Select simulation area
+        if preprocessing_params["sim_area"] is not None:
+            boundary = preprocessing_params["sim_area"]
+            assert len(boundary) == 6
+            area_mask = torch.ones(
+                rotated_pos.shape[0], dtype=torch.bool, device="cuda"
+            )
+            for i in range(3):
+                area_mask = torch.logical_and(
+                    area_mask, rotated_pos[:, i] > boundary[2 * i]
+                )
+                area_mask = torch.logical_and(
+                    area_mask, rotated_pos[:, i] < boundary[2 * i + 1]
+                )
+
+            unselected_pos = init_pos[~area_mask, :]
+            unselected_cov = init_cov[~area_mask, :]
+            unselected_opacity = init_opacity[~area_mask, :]
+            unselected_shs = init_shs[~area_mask, :]
+            has_unselected = True
+
+            rotated_pos = rotated_pos[area_mask, :]
+            init_cov = init_cov[area_mask, :]
+            init_opacity = init_opacity[area_mask, :]
+            init_shs = init_shs[area_mask, :]
+
+        if args.debug:
+            _log("=== CHECKPOINT 3: After sim_area selection ===")
+            _log(f"  [DBG] Selected (sim) particles: {rotated_pos.shape[0]}")
+            _dbg("rotated_pos (sim only)", rotated_pos)
+            if has_unselected:
+                _log(f"  [DBG] Unselected particles: {unselected_pos.shape[0]}")
+
+        # 3d. Transform to MPM domain [0,2]^3
+        transformed_pos, scale_origin, original_mean_pos = transform2origin(
+            rotated_pos, preprocessing_params["scale"]
+        )
+        transformed_pos = shift2center111(transformed_pos)
+
+        init_cov = apply_cov_rotations(init_cov, rotation_matrices)
+        init_cov = scale_origin * scale_origin * init_cov
+
+        if args.debug:
+            _log("=== CHECKPOINT 4: After transform to MPM domain ===")
+            _log(f"  [DBG] scale_origin = {scale_origin.item():.10f}")
+            _dbg("original_mean_pos", original_mean_pos)
+            _dbg("transformed_pos", transformed_pos)
+            _dbg("init_cov (rotated+scaled)", init_cov)
+
+        # 3e. Particle filling
+        gs_num = transformed_pos.shape[0]
+        filling_params = preprocessing_params["particle_filling"]
+
+        if filling_params is not None:
+            print("Filling internal particles...")
+            mpm_init_pos = fill_particles(
+                pos=transformed_pos,
+                opacity=init_opacity,
+                cov=init_cov,
+                grid_n=filling_params["n_grid"],
+                max_samples=filling_params["max_particles_num"],
+                grid_dx=material_params["grid_lim"] / filling_params["n_grid"],
+                density_thres=filling_params["density_threshold"],
+                search_thres=filling_params["search_threshold"],
+                max_particles_per_cell=filling_params["max_partciels_per_cell"],
+                search_exclude_dir=filling_params["search_exclude_direction"],
+                ray_cast_dir=filling_params["ray_cast_direction"],
+                boundary=filling_params["boundary"],
+                smooth=filling_params["smooth"],
+            ).to(device=device)
+        else:
+            mpm_init_pos = transformed_pos.to(device=device)
+
+        # 3f. Compute particle volumes
+        mpm_init_vol = get_particle_volume(
+            mpm_init_pos,
+            material_params["n_grid"],
+            material_params["grid_lim"] / material_params["n_grid"],
+            uniform=material_params["material"] == "sand",
+        ).to(device=device)
+
+        # 3g. Initialise filled-particle attributes
+        if filling_params is not None and filling_params.get("visualize", False):
+            shs, opacity, mpm_init_cov = init_filled_particles(
+                mpm_init_pos[:gs_num], init_shs, init_cov, init_opacity,
+                mpm_init_pos[gs_num:],
+            )
+            gs_num = mpm_init_pos.shape[0]
+        else:
+            mpm_init_cov = torch.zeros(
+                (mpm_init_pos.shape[0], 6), device=device
+            )
+            mpm_init_cov[:gs_num] = init_cov
+            shs = init_shs
+            opacity = init_opacity
 
     if args.debug:
         _log("=== CHECKPOINT 5: Before physics init ===")
@@ -299,6 +468,10 @@ def main():
         _dbg("mpm_init_cov", mpm_init_cov)
         _dbg("shs (for render)", shs)
         _dbg("opacity (for render)", opacity)
+        if per_object_info is not None:
+            for info in per_object_info:
+                _log(f"  [DBG] Object '{info['name']}': "
+                     f"{len(info['particle_indices'])} particles")
 
     # ── 4. Initialise physics backend ─────────────────────────────────
     if args.backend == "newton_mpm":
@@ -313,6 +486,9 @@ def main():
         n_grid=material_params["n_grid"],
         grid_lim=material_params["grid_lim"],
     )
+    # Pass per-object material info to backend (if multi-object)
+    if per_object_info is not None:
+        material_params["per_object"] = per_object_info
     backend.set_material(material_params)
     backend.set_boundary_conditions(bc_params, time_params)
     backend.finalize()  # finalize after set_boundary_conditions
@@ -395,10 +571,10 @@ def main():
             _dbg("pos (world)", pos)
             _dbg("cov3D (world)", cov3D)
 
-        # Merge with unselected particles
+        # Merge with unselected (static) particles
         cur_opacity = opacity_render
         cur_shs = shs_render
-        if preprocessing_params["sim_area"] is not None:
+        if has_unselected:
             pos = torch.cat([pos, unselected_pos], dim=0)
             cov3D = torch.cat([cov3D, unselected_cov], dim=0)
             cur_opacity = torch.cat([opacity_render, unselected_opacity], dim=0)
