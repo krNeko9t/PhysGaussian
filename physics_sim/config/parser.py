@@ -35,15 +35,24 @@ def decode_param_json(json_file: str):
         [
             {
                 "name": "sand_pile",
-                "sim_area": [x0, x1, y0, y1, z0, z1],
+                "sim_area": [x0, x1, y0, y1, z0, z1],  # required if no ply_path
                 "material": { ... per-object material params ... },
                 "particle_filling": { ... } or None,
+                "ply_path": "path/to/other.ply" or None,  # dedicated PLY
+                "position_offset": [dx, dy, dz] or None,  # in rotated space
             },
             ...
         ]
 
     Per-object material params inherit from the top-level defaults and
     can override any key in ``_MATERIAL_KEYS``.
+
+    If ``ply_path`` is given, the object's particles come from that PLY
+    file (loaded independently).  Otherwise they come from the shared
+    ``--ply_path`` and must be selected via ``sim_area``.
+
+    ``position_offset`` shifts the object's particles (in rotated space,
+    after the global rotation is applied) before the MPM transform.
     """
     with open(json_file) as f:
         sim_params = json.load(f)
@@ -145,14 +154,21 @@ def decode_param_json(json_file: str):
     # If "objects" is present, each entry defines a distinct physical
     # object with its own sim_area and (optional) material overrides.
     # Absent → single-object mode (fully backward compatible).
+    #
+    # Each object can optionally specify ``ply_path`` to load particles
+    # from a dedicated PLY file (instead of the shared --ply_path).
+    # Objects without ``ply_path`` MUST define ``sim_area`` to select
+    # particles from the shared PLY.
     scene_objects = None
     if "objects" in sim_params:
         scene_objects = []
         for i, obj_def in enumerate(sim_params["objects"]):
-            if "sim_area" not in obj_def:
+            has_ply = "ply_path" in obj_def
+            has_area = "sim_area" in obj_def
+            if not has_ply and not has_area:
                 raise ValueError(
                     f"Object {i} ({obj_def.get('name', '?')}) "
-                    "must define 'sim_area'."
+                    "must define either 'ply_path' or 'sim_area' (or both)."
                 )
             # Build per-object material by inheriting top-level defaults
             obj_material = {}
@@ -163,9 +179,11 @@ def decode_param_json(json_file: str):
                     obj_material[key] = material_params[key]
             scene_objects.append({
                 "name": obj_def.get("name", f"object_{i}"),
-                "sim_area": obj_def["sim_area"],
+                "sim_area": obj_def.get("sim_area", None),
                 "material": obj_material,
                 "particle_filling": obj_def.get("particle_filling", None),
+                "ply_path": obj_def.get("ply_path", None),
+                "position_offset": obj_def.get("position_offset", None),
             })
 
     return (material_params, bc_params, time_params,

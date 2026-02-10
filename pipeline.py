@@ -223,48 +223,135 @@ def main():
         # ── MULTI-OBJECT PATH ─────────────────────────────────────
         print(f"  Multi-object mode: {len(scene_objects)} objects")
 
-        # 3c. Per-object area selection (in rotated space)
-        obj_data = []
-        all_selected = torch.zeros(
-            rotated_pos.shape[0], dtype=torch.bool, device="cuda"
+        # Do any objects use the shared PLY (no ply_path)?
+        any_uses_shared = any(
+            obj.get("ply_path") is None for obj in scene_objects
         )
+
+        # 3c. Per-object particle collection
+        obj_data = []
+        # Track which shared-PLY particles are claimed (for unselected)
+        all_selected = (
+            torch.zeros(rotated_pos.shape[0], dtype=torch.bool, device="cuda")
+            if any_uses_shared else None
+        )
+
         for obj in scene_objects:
-            boundary = obj["sim_area"]
-            assert len(boundary) == 6, (
-                f"sim_area must have 6 values, got {len(boundary)}"
-            )
-            obj_mask = torch.ones(
-                rotated_pos.shape[0], dtype=torch.bool, device="cuda"
-            )
-            for i in range(3):
-                obj_mask = torch.logical_and(
-                    obj_mask, rotated_pos[:, i] > boundary[2 * i]
-                )
-                obj_mask = torch.logical_and(
-                    obj_mask, rotated_pos[:, i] < boundary[2 * i + 1]
-                )
-            # First-match wins: skip particles already claimed
-            obj_mask = torch.logical_and(obj_mask, ~all_selected)
-            all_selected = torch.logical_or(all_selected, obj_mask)
+            if obj.get("ply_path") is not None:
+                # ── Dedicated PLY ─────────────────────────────────
+                ply_path = obj["ply_path"]
+                print(f"    {obj['name']}: loading {ply_path}...")
+                ply_params = renderer.load_ply(ply_path)
+                obj_pos = ply_params["pos"]
+                obj_cov = ply_params["cov3D_precomp"]
+                obj_opacity = ply_params["opacity"]
+                obj_shs = ply_params["shs"]
 
-            n_gs = int(obj_mask.sum().item())
-            obj_data.append({
-                "rotated_pos": rotated_pos[obj_mask],
-                "cov": init_cov[obj_mask],
-                "opacity": init_opacity[obj_mask],
-                "shs": init_shs[obj_mask],
-                "gs_count": n_gs,
-            })
-            print(f"    {obj['name']}: {n_gs} GS particles")
+                # Opacity filter (same threshold as shared PLY)
+                op_mask = (
+                    obj_opacity[:, 0]
+                    > preprocessing_params["opacity_threshold"]
+                )
+                obj_pos = obj_pos[op_mask]
+                obj_cov = obj_cov[op_mask]
+                obj_opacity = obj_opacity[op_mask]
+                obj_shs = obj_shs[op_mask]
 
-        # Unselected = particles not in any object
-        unsel_mask = ~all_selected
-        if unsel_mask.any():
-            unselected_pos = init_pos[unsel_mask]
-            unselected_cov = init_cov[unsel_mask]
-            unselected_opacity = init_opacity[unsel_mask]
-            unselected_shs = init_shs[unsel_mask]
-            has_unselected = True
+                # Apply shared rotation
+                obj_rotated_pos = apply_rotations(
+                    obj_pos, rotation_matrices
+                )
+
+                # Position offset (in rotated space)
+                offset = obj.get("position_offset")
+                if offset is not None:
+                    obj_rotated_pos = obj_rotated_pos + torch.tensor(
+                        offset, device="cuda", dtype=torch.float32
+                    )
+
+                # Optional sim_area filter (in rotated space)
+                if obj.get("sim_area") is not None:
+                    boundary = obj["sim_area"]
+                    assert len(boundary) == 6
+                    sa_mask = torch.ones(
+                        obj_rotated_pos.shape[0],
+                        dtype=torch.bool,
+                        device="cuda",
+                    )
+                    for i in range(3):
+                        sa_mask = torch.logical_and(
+                            sa_mask,
+                            obj_rotated_pos[:, i] > boundary[2 * i],
+                        )
+                        sa_mask = torch.logical_and(
+                            sa_mask,
+                            obj_rotated_pos[:, i] < boundary[2 * i + 1],
+                        )
+                    obj_rotated_pos = obj_rotated_pos[sa_mask]
+                    obj_cov = obj_cov[sa_mask]
+                    obj_opacity = obj_opacity[sa_mask]
+                    obj_shs = obj_shs[sa_mask]
+
+                n_gs = obj_rotated_pos.shape[0]
+                obj_data.append({
+                    "rotated_pos": obj_rotated_pos,
+                    "cov": obj_cov,
+                    "opacity": obj_opacity,
+                    "shs": obj_shs,
+                    "gs_count": n_gs,
+                })
+                print(f"    {obj['name']}: {n_gs} GS particles (dedicated PLY)")
+
+            else:
+                # ── Shared PLY with sim_area filter ───────────────
+                boundary = obj["sim_area"]
+                assert boundary is not None and len(boundary) == 6, (
+                    f"Object '{obj['name']}' without ply_path must have "
+                    f"sim_area with 6 values"
+                )
+                obj_mask = torch.ones(
+                    rotated_pos.shape[0], dtype=torch.bool, device="cuda"
+                )
+                for i in range(3):
+                    obj_mask = torch.logical_and(
+                        obj_mask, rotated_pos[:, i] > boundary[2 * i]
+                    )
+                    obj_mask = torch.logical_and(
+                        obj_mask, rotated_pos[:, i] < boundary[2 * i + 1]
+                    )
+                # First-match wins: skip particles already claimed
+                obj_mask = torch.logical_and(obj_mask, ~all_selected)
+                all_selected = torch.logical_or(all_selected, obj_mask)
+
+                n_gs = int(obj_mask.sum().item())
+                obj_rotated = rotated_pos[obj_mask]
+
+                # Position offset (in rotated space)
+                offset = obj.get("position_offset")
+                if offset is not None:
+                    obj_rotated = obj_rotated + torch.tensor(
+                        offset, device="cuda", dtype=torch.float32
+                    )
+
+                obj_data.append({
+                    "rotated_pos": obj_rotated,
+                    "cov": init_cov[obj_mask],
+                    "opacity": init_opacity[obj_mask],
+                    "shs": init_shs[obj_mask],
+                    "gs_count": n_gs,
+                })
+                print(f"    {obj['name']}: {n_gs} GS particles (shared PLY)")
+
+        # Unselected = shared-PLY particles not in any object
+        # (only relevant when at least one object uses the shared PLY)
+        if any_uses_shared:
+            unsel_mask = ~all_selected
+            if unsel_mask.any():
+                unselected_pos = init_pos[unsel_mask]
+                unselected_cov = init_cov[unsel_mask]
+                unselected_opacity = init_opacity[unsel_mask]
+                unselected_shs = init_shs[unsel_mask]
+                has_unselected = True
 
         # Concatenate GS particles from all objects
         rotated_pos = torch.cat([d["rotated_pos"] for d in obj_data], dim=0)

@@ -1,0 +1,100 @@
+{
+    "_comment": "Multi-PLY test: wolf (sand) + bread (jelly) as separate PLY files.",
+
+    "opacity_threshold": 0.02,
+    "rotation_degree": [0.0],
+    "rotation_axis": [0],
+
+    "substep_dt": 2e-5,
+    "frame_dt": 4e-2,
+    "frame_num": 50,
+
+    "E": 5e7,
+    "nu": 0.3,
+    "material": "sand",
+    "density": 2000,
+    "g": [0.0, 0.0, -9.8],
+    "friction_angle": 30,
+    "n_grid": 200,
+
+    "particle_filling": {
+        "n_grid": 16,
+        "density_threshold": 100.0,
+        "search_threshold": 1.0,
+        "search_exclude_direction": 2,
+        "ray_cast_direction": 4,
+        "max_particles_num": 200000,
+        "max_partciels_per_cell": 1,
+        "boundary": [0.2, 1.8, 0.2, 1.8, 0.2, 1.8],
+        "smooth": false,
+        "visualize": false
+    },
+
+    "objects": [
+        {
+            "name": "wolf",
+            "ply_path": "model/wolf_whitebg-trained/point_cloud/iteration_30000/point_cloud.ply",
+            "material": "sand",
+            "E": 5e7,
+            "nu": 0.3,
+            "density": 2000,
+            "friction_angle": 30
+        },
+        {
+            "name": "bread",
+            "ply_path": "model/bread-trained/point_cloud/iteration_30000/point_cloud.ply",
+            "position_offset": [0.0, 0.0, 2.0],
+            "material": "jelly",
+            "E": 2e3,
+            "nu": 0.3,
+            "density": 200,
+            "particle_filling": {
+                "n_grid": 16,
+                "density_threshold": 100.0,
+                "search_threshold": 0.2,
+                "search_exclude_direction": -1,
+                "ray_cast_direction": 4,
+                "max_particles_num": 200000,
+                "max_partciels_per_cell": 1,
+                "boundary": [0.2, 1.8, 0.2, 1.8, 0.2, 1.8],
+                "smooth": true,
+                "visualize": false
+            }
+        }
+    ],
+
+    "boundary_conditions": [
+        {
+            "type": "bounding_box"
+        },
+        {
+            "type": "surface_collider",
+            "point": [1, 1, 0.30],
+            "normal": [0.0, 0.0, 1.0],
+            "surface": "sticky",
+            "friction": 0.0,
+            "start_time": 0,
+            "end_time": 1e3
+        }
+    ],
+
+    "newton_mpm": {
+        "substep_dt": 1e-3,
+        "solver": {
+            "max_iterations": 50,
+            "tolerance": 1e-4
+        }
+    },
+
+    "mpm_space_vertical_upward_axis": [0, 0, 1],
+    "mpm_space_viewpoint_center": [1, 1, 0.8],
+    "default_camera_index": -1,
+    "show_hint": false,
+    "init_azimuthm": 90,
+    "init_elevation": 20,
+    "init_radius": 3.0,
+    "move_camera": true,
+    "delta_a": -1.0,
+    "delta_e": 0.0,
+    "delta_r": 0.0
+}
