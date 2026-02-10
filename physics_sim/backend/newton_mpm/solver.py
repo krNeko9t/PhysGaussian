@@ -1,0 +1,535 @@
+"""
+Newton implicit-MPM backend adapter that implements the PhysicsBackend interface.
+
+This wraps Newton's SolverImplicitMPM and exposes a clean, backend-agnostic API
+through PhysicsBackend / SimulationState, matching the existing WarpMPMBackend.
+"""
+
+from __future__ import annotations
+
+import math
+import numpy as np
+import warp as wp
+import torch
+
+import newton
+from newton.solvers import SolverImplicitMPM
+
+from physics_sim.backend.base import PhysicsBackend, SimulationState
+from physics_sim.backend.newton_mpm.kernels import compute_cov_from_F, compute_R_from_F
+
+
+# ── Material presets ─────────────────────────────────────────────────────
+# Maps the material string used in existing configs to Newton MPM parameters.
+# These are applied *per-particle* via model.mpm.* arrays after finalize().
+
+_MATERIAL_PRESETS: dict[str, dict] = {
+    "jelly": dict(
+        young_modulus=None,       # use config E
+        poisson_ratio=None,       # use config nu
+        friction=0.5,
+        yield_pressure=1.0e12,    # very high → no plastic compression
+        yield_stress=1.0e12,
+        tensile_yield_ratio=0.0,
+        hardening=0.0,
+    ),
+    "sand": dict(
+        young_modulus=None,
+        poisson_ratio=None,
+        friction=None,            # computed from friction_angle
+        yield_pressure=1.0e12,
+        yield_stress=0.0,
+        tensile_yield_ratio=0.0,
+        hardening=0.0,
+    ),
+    "snow": dict(
+        young_modulus=None,
+        poisson_ratio=None,
+        friction=0.1,
+        yield_pressure=2.0e4,
+        yield_stress=1.0e3,
+        tensile_yield_ratio=0.05,
+        hardening=10.0,
+    ),
+    "metal": dict(
+        young_modulus=None,
+        poisson_ratio=None,
+        friction=0.3,
+        yield_pressure=1.0e12,
+        yield_stress=None,        # use config yield_stress
+        tensile_yield_ratio=0.0,
+        hardening=0.0,
+    ),
+    "foam": dict(
+        young_modulus=None,
+        poisson_ratio=None,
+        friction=0.5,
+        yield_pressure=1.0e6,
+        yield_stress=1.0e4,
+        tensile_yield_ratio=0.1,
+        hardening=5.0,
+    ),
+    "plasticine": dict(
+        young_modulus=None,
+        poisson_ratio=None,
+        friction=0.5,
+        yield_pressure=1.0e6,
+        yield_stress=5.0e3,
+        tensile_yield_ratio=0.1,
+        hardening=3.0,
+    ),
+}
+
+
+def _friction_from_angle(friction_angle_deg: float) -> float:
+    """Convert friction angle (degrees) to Coulomb friction coefficient."""
+    rad = friction_angle_deg / 180.0 * math.pi
+    return math.tan(rad)
+
+
+class NewtonMPMBackend(PhysicsBackend):
+    """Physics backend powered by Newton's implicit MPM solver."""
+
+    def __init__(self, device: str = "cuda:0"):
+        self._device = device
+        self._model: newton.Model | None = None
+        self._solver: SolverImplicitMPM | None = None
+        self._state_0: newton.State | None = None
+        self._state_1: newton.State | None = None
+        self._control: newton.Control | None = None
+
+        # Covariance tracking (Newton doesn't store per-particle cov natively)
+        self._init_cov: wp.array | None = None   # (N*6,) float, flat
+        self._out_cov: wp.array | None = None     # (N*6,) float, flat
+        self._out_R: wp.array | None = None       # (N,) mat33
+
+        self._n_particles: int = 0
+        self._time: float = 0.0
+        self._substep_dt: float = 0.0  # last substep dt, for deferred frame update
+        self._frames_dirty: bool = False  # whether particle frames need updating
+
+        # Solver options — start from Newton's own defaults.
+        # Overrides come from config JSON ("newton_mpm" → "solver" section)
+        # and are applied in set_material().
+        self._solver_opts = SolverImplicitMPM.Options()
+        self._material_params: dict = {}
+
+    # ------------------------------------------------------------------
+    # PhysicsBackend interface
+    # ------------------------------------------------------------------
+
+    def initialize(
+        self,
+        positions: torch.Tensor,
+        volumes: torch.Tensor,
+        covariances: torch.Tensor,
+        *,
+        n_grid: int = 100,
+        grid_lim: float = 2.0,
+        **kwargs,
+    ) -> None:
+        """Build a Newton Model from the preprocessed GS particle data.
+
+        Args:
+            positions:   (N, 3) particle positions in MPM space [0, grid_lim].
+            volumes:     (N,)   per-particle volumes.
+            covariances: (N, 6) upper-triangle covariance matrices.
+            n_grid:      Grid resolution (default 100).
+            grid_lim:    Domain extent (default 2.0).
+        """
+        self._n_particles = positions.shape[0]
+        n = self._n_particles
+
+        # ── Compute voxel_size from grid params ──────────────────────
+        voxel_size = grid_lim / n_grid
+        self._solver_opts.voxel_size = voxel_size
+
+        # ── Build Newton Model ───────────────────────────────────────
+        builder = newton.ModelBuilder()
+        SolverImplicitMPM.register_custom_attributes(builder)
+
+        # Add ground plane (will be configured in set_boundary_conditions)
+        # We always add it; surface colliders override behavior.
+        builder.add_shape_plane(
+            cfg=newton.ModelBuilder.ShapeConfig(ke=0.0, kd=0.0, mu=0.0)
+        )
+
+        # Convert torch tensors to numpy
+        pos_np = positions.detach().cpu().numpy().astype(np.float32)
+        vol_np = volumes.detach().cpu().numpy().astype(np.float32)
+
+        # Compute per-particle mass from volume (density set later in set_material)
+        # Use a placeholder density of 1.0; actual mass will be recomputed.
+        mass_np = vol_np.copy()  # mass = vol * density, density=1 placeholder
+
+        # Compute radius from volume (sphere approximation)
+        radius_np = np.cbrt(vol_np * 3.0 / (4.0 * math.pi)).astype(np.float32)
+        radius_np = np.maximum(radius_np, 1e-6)
+
+        # Batch add particles
+        pos_list = [wp.vec3(float(pos_np[i, 0]), float(pos_np[i, 1]), float(pos_np[i, 2]))
+                    for i in range(n)]
+        vel_list = [wp.vec3(0.0, 0.0, 0.0)] * n
+        mass_list = [float(mass_np[i]) for i in range(n)]
+        radius_list = [float(radius_np[i]) for i in range(n)]
+        flags_list = [int(newton.ParticleFlags.ACTIVE)] * n
+
+        builder.add_particles(
+            pos=pos_list,
+            vel=vel_list,
+            mass=mass_list,
+            radius=radius_list,
+            flags=flags_list,
+        )
+
+        self._model = builder.finalize(device=self._device)
+
+        # ── Store initial covariance for later cov tracking ──────────
+        cov_np = covariances.detach().cpu().numpy().astype(np.float32).reshape(-1)
+        self._init_cov = wp.from_numpy(cov_np, dtype=float, device=self._device)
+        self._out_cov = wp.zeros(n * 6, dtype=float, device=self._device)
+        self._out_R = wp.zeros(n, dtype=wp.mat33, device=self._device)
+
+        # Save volume for mass recomputation in set_material
+        self._volumes = vol_np
+
+    def set_material(self, material_params: dict) -> None:
+        """Configure Newton MPM material from the existing config dict.
+
+        Supports the same keys as WarpMPMBackend:
+            material, E, nu, density, friction_angle, yield_stress,
+            hardening, g, rpic_damping, grid_v_damping_scale, etc.
+        """
+        self._material_params = material_params
+        model = self._model
+        n = self._n_particles
+
+        # ── Gravity ──────────────────────────────────────────────────
+        g = material_params.get("g", [0.0, 0.0, -9.8])
+        if isinstance(g, (int, float)):
+            g = [0.0, 0.0, -abs(g)]
+        model.set_gravity(tuple(g))
+
+        # ── Material preset ──────────────────────────────────────────
+        mat_name = material_params.get("material", "jelly")
+        preset = _MATERIAL_PRESETS.get(mat_name, _MATERIAL_PRESETS["jelly"])
+
+        E = material_params.get("E", 1e5)
+        nu = material_params.get("nu", 0.3)
+
+        model.mpm.young_modulus.fill_(float(E))
+        model.mpm.poisson_ratio.fill_(float(nu))
+
+        # Friction: from preset or friction_angle conversion
+        friction = preset.get("friction")
+        if mat_name == "sand" and "friction_angle" in material_params:
+            friction = _friction_from_angle(material_params["friction_angle"])
+        if friction is not None:
+            model.mpm.friction.fill_(float(friction))
+
+        # Yield parameters from preset, with config overrides
+        yp = preset.get("yield_pressure", 1e12)
+        model.mpm.yield_pressure.fill_(float(yp))
+
+        ys = preset.get("yield_stress", 0.0)
+        if "yield_stress" in material_params:
+            ys = material_params["yield_stress"]
+        if ys is not None:
+            model.mpm.yield_stress.fill_(float(ys))
+
+        tyr = preset.get("tensile_yield_ratio", 0.0)
+        model.mpm.tensile_yield_ratio.fill_(float(tyr))
+
+        h = preset.get("hardening", 0.0)
+        if "hardening" in material_params:
+            h = material_params["hardening"]
+        model.mpm.hardening.fill_(float(h))
+
+        # ── Density → recompute mass ─────────────────────────────────
+        density = material_params.get("density", 200.0)
+        mass_np = (self._volumes * density).astype(np.float32)
+        mass_wp = wp.from_numpy(mass_np, dtype=float, device=self._device)
+        wp.copy(mass_wp, model.particle_mass)
+
+        inv_mass_np = np.where(mass_np > 0.0, 1.0 / mass_np, 0.0).astype(np.float32)
+        inv_mass_wp = wp.from_numpy(inv_mass_np, dtype=float, device=self._device)
+        wp.copy(inv_mass_wp, model.particle_inv_mass)
+
+        # ── Solver options from material params ──────────────────────
+        # Transfer scheme: map rpic_damping → "pic" / "apic"
+        rpic = material_params.get("rpic_damping", 0.0)
+        if rpic < 0:
+            self._solver_opts.transfer_scheme = "pic"
+        else:
+            self._solver_opts.transfer_scheme = "apic"
+
+        # Apply solver option overrides from config ("newton_mpm" → "solver").
+        # Any key that exists as an attribute on SolverImplicitMPM.Options
+        # can be overridden here.  Unrecognised keys are warned about.
+        newton_opts = material_params.get("newton_solver_opts", {})
+        _SOLVER_OPT_TYPES = {
+            "max_iterations": int,
+            "tolerance": float,
+            "solver": str,
+            "grid_type": str,
+            "transfer_scheme": str,
+            "air_drag": float,
+            "grid_padding": int,
+        }
+        for key, val in newton_opts.items():
+            if hasattr(self._solver_opts, key):
+                cast = _SOLVER_OPT_TYPES.get(key, type(val))
+                setattr(self._solver_opts, key, cast(val))
+                print(f"[NewtonMPM] solver.{key} = {cast(val)}")
+            else:
+                print(f"[NewtonMPM] Warning: unknown solver option '{key}', ignoring.")
+
+        # Additional material params for sub-regions (cuboid material overrides)
+        if "additional_material_params" in material_params:
+            self._apply_additional_materials(material_params["additional_material_params"])
+
+    def _apply_additional_materials(self, additional_params: list) -> None:
+        """Apply per-region material overrides (cuboid areas with different E/nu)."""
+        model = self._model
+        state = model.state()  # temporary state to read particle positions
+        pos = state.particle_q.numpy()  # (N, 3)
+
+        for params in additional_params:
+            point = np.array(params["point"], dtype=np.float32)
+            size = np.array(params["size"], dtype=np.float32)
+            lo = point - size
+            hi = point + size
+            mask = np.all((pos >= lo) & (pos <= hi), axis=1)
+            indices = np.where(mask)[0].astype(np.int32)
+            if len(indices) == 0:
+                continue
+            idx_wp = wp.from_numpy(indices, dtype=int, device=self._device)
+
+            if "E" in params:
+                model.mpm.young_modulus[idx_wp].fill_(float(params["E"]))
+            if "nu" in params:
+                model.mpm.poisson_ratio[idx_wp].fill_(float(params["nu"]))
+            if "density" in params:
+                density = params["density"]
+                for i in indices:
+                    new_mass = float(self._volumes[i] * density)
+                    model.particle_mass.numpy()[i] = new_mass
+                    model.particle_inv_mass.numpy()[i] = 1.0 / new_mass if new_mass > 0 else 0.0
+
+    def set_boundary_conditions(self, bc_params: list, time_params: dict) -> None:
+        """Register boundary conditions.
+
+        Newton MPM handles boundaries differently from WarpMPM:
+        - Ground planes / surface colliders → Newton's collision pipeline
+        - Particle impulses → applied via state.particle_f
+        - Cuboid velocity BCs → Newton doesn't have direct equivalent;
+          we store them and apply in step() via particle velocity overrides.
+
+        For Phase 1, we support: ground_plane (implicit), bounding_box,
+        surface_collider, and store other BC types for manual application.
+        """
+        self._bc_params = bc_params
+        self._time_params = time_params
+
+        # Particle-level BCs that need per-step application
+        self._velocity_bcs = []
+        self._impulse_bcs = []
+        self._release_bcs = []
+        self._velocity_rotation_bcs = []
+
+        for bc in bc_params:
+            bc_type = bc["type"]
+            if bc_type == "bounding_box":
+                # Newton handles this via collision pipeline; nothing extra needed
+                pass
+            elif bc_type == "surface_collider":
+                # Newton handles ground/wall via shape_plane; already added in initialize.
+                # For custom surfaces, we'd add additional planes.
+                # For now, the default ground plane is sufficient.
+                pass
+            elif bc_type == "cuboid":
+                self._velocity_bcs.append(bc)
+            elif bc_type == "particle_impulse":
+                self._impulse_bcs.append(bc)
+            elif bc_type == "enforce_particle_translation":
+                self._velocity_bcs.append(bc)
+            elif bc_type == "release_particles_sequentially":
+                self._release_bcs.append(bc)
+            elif bc_type == "enforce_particle_velocity_rotation":
+                self._velocity_rotation_bcs.append(bc)
+            else:
+                print(f"[NewtonMPM] Warning: unsupported BC type '{bc_type}', skipping.")
+
+    def finalize(self) -> None:
+        """Create the Newton solver and initial states. Must be called after
+        set_material() and set_boundary_conditions()."""
+        model = self._model
+
+        # ── Create solver ────────────────────────────────────────────
+        self._solver = SolverImplicitMPM(model, self._solver_opts)
+
+        # ── Create double-buffered states + control ──────────────────
+        self._state_0 = model.state()
+        self._state_1 = model.state()
+        self._control = model.control()
+        self._time = 0.0
+
+        # Handle release_particles_sequentially: initially deactivate particles
+        if self._release_bcs:
+            self._setup_sequential_release()
+
+    def step(self, dt: float, frame: int) -> None:
+        """Advance simulation by one substep."""
+        # Apply per-step boundary conditions (skip numpy round-trip when empty)
+        if self._velocity_bcs:
+            self._apply_velocity_bcs(dt)
+        if self._impulse_bcs:
+            self._apply_impulse_bcs(dt)
+
+        # Newton solver step
+        self._solver.step(self._state_0, self._state_1, self._control, None, dt)
+
+        # Swap states (defer update_particle_frames to get_state for performance)
+        self._state_0, self._state_1 = self._state_1, self._state_0
+        self._substep_dt = dt
+        self._frames_dirty = True
+        self._time += dt
+
+    def get_state(self) -> SimulationState:
+        """Export current simulation state as PyTorch tensors."""
+        n = self._n_particles
+        state = self._state_0
+
+        # ── Update particle deformation frames (deferred from step) ──
+        # Only done once per get_state() call, not every substep.
+        if self._frames_dirty:
+            # state_0 is current, state_1 is previous (after swap).
+            # update_particle_frames reads velocity gradient from state_0
+            # and previous transform from state_1, writes to state_0.
+            self._solver.update_particle_frames(
+                self._state_1, self._state_0, self._substep_dt
+            )
+            self._frames_dirty = False
+
+        # ── Positions ────────────────────────────────────────────────
+        pos = wp.to_torch(state.particle_q)  # (N, 3)
+
+        # ── Velocities ───────────────────────────────────────────────
+        vel = wp.to_torch(state.particle_qd)  # (N, 3)
+
+        # ── Covariance from F ────────────────────────────────────────
+        F = state.mpm.particle_transform  # (N,) mat33 warp array
+        wp.launch(
+            compute_cov_from_F,
+            dim=n,
+            inputs=[F, self._init_cov, self._out_cov],
+            device=self._device,
+        )
+        cov = wp.to_torch(self._out_cov).view(n, 6)
+
+        # ── Rotation from F ──────────────────────────────────────────
+        wp.launch(
+            compute_R_from_F,
+            dim=n,
+            inputs=[F, self._out_R],
+            device=self._device,
+        )
+        rot = wp.to_torch(self._out_R).view(n, 3, 3)
+
+        return SimulationState(
+            positions=pos,
+            covariances=cov,
+            rotations=rot,
+            velocities=vel,
+        )
+
+    # ------------------------------------------------------------------
+    # Boundary condition helpers (per-step application)
+    # ------------------------------------------------------------------
+
+    def _apply_velocity_bcs(self, dt: float) -> None:
+        """Apply cuboid / translation velocity BCs by overriding particle velocities."""
+        if not self._velocity_bcs:
+            return
+
+        state = self._state_0
+        pos_np = state.particle_q.numpy()
+        vel_np = state.particle_qd.numpy()
+
+        for bc in self._velocity_bcs:
+            start = bc.get("start_time", 0.0)
+            end = bc.get("end_time", 1e3)
+            if not (start <= self._time <= end):
+                continue
+
+            point = np.array(bc["point"], dtype=np.float32)
+            size = np.array(bc["size"], dtype=np.float32)
+            velocity = np.array(bc["velocity"], dtype=np.float32)
+
+            lo = point - size
+            hi = point + size
+            mask = np.all((pos_np >= lo) & (pos_np <= hi), axis=1)
+
+            if np.any(mask):
+                vel_np[mask] = velocity
+
+        # Write back
+        state.particle_qd.assign(wp.from_numpy(vel_np.astype(np.float32), dtype=wp.vec3, device=self._device))
+
+    def _apply_impulse_bcs(self, dt: float) -> None:
+        """Apply particle impulse BCs as force on particles."""
+        if not self._impulse_bcs:
+            return
+
+        state = self._state_0
+        pos_np = state.particle_q.numpy()
+
+        for bc in self._impulse_bcs:
+            start = bc.get("start_time", 0.0)
+            num_dt = bc.get("num_dt", 1)
+            # Impulse active for num_dt substeps starting at start_time
+            if not (start <= self._time < start + num_dt * dt + 1e-10):
+                continue
+
+            force = np.array(bc["force"], dtype=np.float32)
+            point = np.array(bc.get("point", [1, 1, 1]), dtype=np.float32)
+            size = np.array(bc.get("size", [1, 1, 1]), dtype=np.float32)
+
+            lo = point - size
+            hi = point + size
+            mask = np.all((pos_np >= lo) & (pos_np <= hi), axis=1)
+
+            if np.any(mask):
+                # Add force * dt as velocity impulse (since Newton uses F = ma)
+                mass_np = self._model.particle_mass.numpy()
+                vel_np = state.particle_qd.numpy()
+                for i in np.where(mask)[0]:
+                    m = mass_np[i]
+                    if m > 0:
+                        vel_np[i] += force * dt / m
+                state.particle_qd.assign(wp.from_numpy(vel_np.astype(np.float32), dtype=wp.vec3, device=self._device))
+
+    def _setup_sequential_release(self) -> None:
+        """Pre-deactivate particles for sequential release."""
+        # Newton doesn't have a direct "selection" mechanism like WarpMPM.
+        # For now, we'll track released layers via particle flags.
+        # Simplified: release all particles (skip sequential release for Phase 1).
+        pass
+
+    def _apply_release_bcs(self) -> None:
+        """Gradually release particle layers over time."""
+        # Phase 1 simplified: all particles active from start.
+        # Full implementation would toggle ParticleFlags.ACTIVE per layer.
+        pass
+
+    # ------------------------------------------------------------------
+    # Extra accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def raw_model(self) -> newton.Model:
+        return self._model
+
+    @property
+    def raw_solver(self) -> SolverImplicitMPM:
+        return self._solver

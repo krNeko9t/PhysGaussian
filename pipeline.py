@@ -65,6 +65,7 @@ from physics_sim.preprocessing.particle_filling import (
     init_filled_particles,
 )
 from physics_sim.backend.warp_mpm import WarpMPMBackend
+from physics_sim.backend.newton_mpm import NewtonMPMBackend
 from physics_sim.renderer.gs_renderer import GaussianRenderer
 
 
@@ -82,6 +83,9 @@ def main():
     parser.add_argument("--compile_video", action="store_true")
     parser.add_argument("--sh_degree", type=int, default=3,
                         help="SH degree of the PLY model (default: 3)")
+    parser.add_argument("--backend", type=str, default="warp_mpm",
+                        choices=["warp_mpm", "newton_mpm"],
+                        help="Physics backend to use (default: warp_mpm)")
     parser.add_argument("--debug", action="store_true",
                         help="Print intermediate tensor statistics for debugging")
     parser.add_argument(
@@ -128,14 +132,33 @@ def main():
 
     # ── 0. Initialise runtime ────────────────────────────────────────
     wp.init()
-    wp.config.verify_cuda = True
+    if args.backend == "newton_mpm":
+        wp.config.verify_cuda = False  # Newton uses CUDA graph capture internally
+    else:
+        wp.config.verify_cuda = True
     ti.init(arch=ti.cuda, device_memory_GB=8.0)
 
     # ── 1. Load config ───────────────────────────────────────────────
     print("Loading scene config...")
-    material_params, bc_params, time_params, preprocessing_params, camera_params = (
+    (material_params, bc_params, time_params,
+     preprocessing_params, camera_params, backend_overrides) = (
         decode_param_json(args.config)
     )
+
+    # Apply backend-specific config overrides (if the selected backend
+    # has an override section in the JSON).  This keeps all tuneable
+    # numbers in the config file instead of hardcoding them in Python.
+    if args.backend in backend_overrides:
+        overrides = backend_overrides[args.backend]
+        for key in ("substep_dt", "frame_dt", "frame_num"):
+            if key in overrides:
+                old = time_params[key]
+                time_params[key] = overrides[key]
+                print(f"[{args.backend}] Override {key}: {old} -> {overrides[key]}")
+        # Solver-specific options are passed through material_params
+        # so the backend can pick them up in set_material().
+        if "solver" in overrides:
+            material_params["newton_solver_opts"] = overrides["solver"]
 
     # ── 2. Load 3DGS PLY ─────────────────────────────────────────────
     print("Loading 3DGS point cloud...")
@@ -278,8 +301,13 @@ def main():
         _dbg("opacity (for render)", opacity)
 
     # ── 4. Initialise physics backend ─────────────────────────────────
-    print("Initialising physics backend (Warp-MPM)...")
-    backend = WarpMPMBackend(device=device)
+    if args.backend == "newton_mpm":
+        print("Initialising physics backend (Newton-MPM)...")
+        backend = NewtonMPMBackend(device=device)
+    else:
+        print("Initialising physics backend (Warp-MPM)...")
+        backend = WarpMPMBackend(device=device)
+
     backend.initialize(
         mpm_init_pos, mpm_init_vol, mpm_init_cov,
         n_grid=material_params["n_grid"],
@@ -287,7 +315,7 @@ def main():
     )
     backend.set_material(material_params)
     backend.set_boundary_conditions(bc_params, time_params)
-    backend.finalize()  # finalize_mu_lam — must be after set_boundary_conditions
+    backend.finalize()  # finalize after set_boundary_conditions
 
     # ── 5. Camera setup ───────────────────────────────────────────────
     mpm_space_viewpoint_center = (
@@ -312,6 +340,8 @@ def main():
     frame_dt = time_params["frame_dt"]
     frame_num = time_params["frame_num"]
     step_per_frame = int(frame_dt / substep_dt)
+    print(f"  substep_dt={substep_dt:.2e}  frame_dt={frame_dt:.2e}  "
+          f"steps/frame={step_per_frame}  frames={frame_num}")
 
     bg_color = (
         torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda")

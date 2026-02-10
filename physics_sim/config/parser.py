@@ -7,12 +7,28 @@ Reads a JSON config and returns structured parameter dictionaries.
 
 import json
 
+# Backend names that can appear as top-level override sections in the config.
+_KNOWN_BACKENDS = ("warp_mpm", "newton_mpm")
+
 
 def decode_param_json(json_file: str):
     """Parse a scene configuration JSON file.
 
     Returns:
-        (material_params, bc_params, time_params, preprocessing_params, camera_params)
+        (material_params, bc_params, time_params,
+         preprocessing_params, camera_params, backend_overrides)
+
+    ``backend_overrides`` is a dict keyed by backend name, e.g.::
+
+        {
+            "newton_mpm": {
+                "substep_dt": 1e-3,
+                "solver": {"max_iterations": 50, "tolerance": 1e-4}
+            }
+        }
+
+    The pipeline can merge these into the relevant param dicts at runtime
+    based on the selected ``--backend``.
     """
     with open(json_file) as f:
         sim_params = json.load(f)
@@ -102,4 +118,12 @@ def decode_param_json(json_file: str):
         "move_camera": sim_params.get("move_camera", False),
     }
 
-    return material_params, bc_params, time_params, preprocessing_params, camera_params
+    # ── Backend-specific overrides ───────────────────────────────────
+    # Top-level keys whose name matches a backend (e.g. "newton_mpm")
+    # are extracted as override dicts.  The pipeline merges them at runtime.
+    backend_overrides: dict[str, dict] = {}
+    for backend_name in _KNOWN_BACKENDS:
+        if backend_name in sim_params:
+            backend_overrides[backend_name] = sim_params[backend_name]
+
+    return material_params, bc_params, time_params, preprocessing_params, camera_params, backend_overrides

@@ -74,6 +74,14 @@
             "end_time": 1.5
         }
     ],
+    "newton_mpm": {
+        "substep_dt": 1e-3,
+        "solver": {
+            "max_iterations": 50,
+            "tolerance": 1e-4
+        }
+    },
+
     "mpm_space_vertical_upward_axis": [
         0,
         0,

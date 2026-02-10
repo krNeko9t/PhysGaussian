@@ -60,6 +60,14 @@ class PhysicsBackend(ABC):
         """Advance the simulation by one substep of duration *dt*."""
         ...
 
+    def finalize(self) -> None:
+        """Optional post-configuration step (e.g. create solver, compile).
+
+        Called after set_material() and set_boundary_conditions().
+        Subclasses may override; default is a no-op.
+        """
+        pass
+
     @abstractmethod
     def get_state(self) -> SimulationState:
         """Export the current simulation state as PyTorch tensors.
