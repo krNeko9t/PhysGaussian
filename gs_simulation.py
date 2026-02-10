@@ -42,6 +42,29 @@ wp.config.verify_cuda = True
 
 ti.init(arch=ti.cuda, device_memory_GB=8.0)
 
+_debug_log_path = None
+
+
+def _log(msg: str):
+    """Write debug message either to log file (if set) or stdout."""
+    global _debug_log_path
+    if _debug_log_path is None:
+        print(msg)
+    else:
+        os.makedirs(os.path.dirname(_debug_log_path), exist_ok=True)
+        with open(_debug_log_path, "a") as f:
+            f.write(msg + "\n")
+
+
+def _dbg(label, t):
+    """Print summary statistics for a tensor (used in --debug mode)."""
+    t_f = t.float()
+    _log(
+        f"  [DBG] {label:40s} shape={str(list(t.shape)):20s} "
+        f"mean={t_f.mean().item():12.6f}  min={t_f.min().item():12.6f}  "
+        f"max={t_f.max().item():12.6f}  sum={t_f.sum().item():14.4f}"
+    )
+
 
 class PipelineParamsNoparse:
     """Same as PipelineParams but without argument parser."""
@@ -78,7 +101,26 @@ if __name__ == "__main__":
     parser.add_argument("--compile_video", action="store_true")
     parser.add_argument("--white_bg", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--debug_log",
+        type=str,
+        default=None,
+        help="Path to a log file for debug output (used with --debug)",
+    )
     args = parser.parse_args()
+
+    # Configure debug log file (if any)
+    if args.debug:
+        if hasattr(args, "debug_log") and args.debug_log is not None:
+            _debug_log_path = args.debug_log
+        elif args.output_path is not None:
+            _debug_log_path = os.path.join(args.output_path, "debug.log")
+        else:
+            _debug_log_path = os.path.join(".", "debug.log")
+        # Truncate existing log
+        os.makedirs(os.path.dirname(_debug_log_path), exist_ok=True)
+        with open(_debug_log_path, "w"):
+            pass
 
     if not os.path.exists(args.model_path):
         AssertionError("Model path does not exist!")
@@ -119,6 +161,14 @@ if __name__ == "__main__":
     init_opacity = params["opacity"]
     init_shs = params["shs"]
 
+    if args.debug:
+        _log("=== CHECKPOINT 1: After PLY loading ===")
+        _dbg("init_pos", init_pos)
+        _dbg("init_cov", init_cov)
+        _dbg("init_opacity", init_opacity)
+        _dbg("init_shs", init_shs)
+        _log(f"  [DBG] Total particles: {init_pos.shape[0]}")
+
     # throw away low opacity kernels
     mask = init_opacity[:, 0] > preprocessing_params["opacity_threshold"]
     init_pos = init_pos[mask, :]
@@ -126,6 +176,12 @@ if __name__ == "__main__":
     init_opacity = init_opacity[mask, :]
     init_screen_points = init_screen_points[mask, :]
     init_shs = init_shs[mask, :]
+
+    if args.debug:
+        _log(f"=== CHECKPOINT 2: After opacity filter (threshold={preprocessing_params['opacity_threshold']}) ===")
+        _log(f"  [DBG] Particles remaining: {init_pos.shape[0]}")
+        _dbg("init_pos", init_pos)
+        _dbg("init_cov", init_cov)
 
     # rorate and translate object
     if args.debug:
@@ -169,12 +225,26 @@ if __name__ == "__main__":
         init_opacity = init_opacity[mask, :]
         init_shs = init_shs[mask, :]
 
+    if args.debug:
+        _log("=== CHECKPOINT 3: After sim_area selection ===")
+        _log(f"  [DBG] Selected (sim) particles: {rotated_pos.shape[0]}")
+        _dbg("rotated_pos (sim only)", rotated_pos)
+        if unselected_pos is not None:
+            _log(f"  [DBG] Unselected particles: {unselected_pos.shape[0]}")
+
     transformed_pos, scale_origin, original_mean_pos = transform2origin(rotated_pos, preprocessing_params["scale"])
     transformed_pos = shift2center111(transformed_pos)
 
     # modify covariance matrix accordingly
     init_cov = apply_cov_rotations(init_cov, rotation_matrices)
     init_cov = scale_origin * scale_origin * init_cov
+
+    if args.debug:
+        _log("=== CHECKPOINT 4: After transform to MPM domain ===")
+        _log(f"  [DBG] scale_origin = {scale_origin.item():.10f}")
+        _dbg("original_mean_pos", original_mean_pos)
+        _dbg("transformed_pos", transformed_pos)
+        _dbg("init_cov (rotated+scaled)", init_cov)
 
     if args.debug:
         particle_position_tensor_to_ply(
@@ -235,7 +305,15 @@ if __name__ == "__main__":
         opacity = init_opacity
 
     if args.debug:
-        print("check *.ply files to see if it's ready for simulation")
+        _log("=== CHECKPOINT 5: Before physics init ===")
+        _log(f"  [DBG] gs_num = {gs_num}")
+        _log(f"  [DBG] total particles (gs+filled) = {mpm_init_pos.shape[0]}")
+        _dbg("mpm_init_pos", mpm_init_pos)
+        _dbg("mpm_init_vol", mpm_init_vol)
+        _dbg("mpm_init_cov", mpm_init_cov)
+        _dbg("shs (for render)", shs)
+        _dbg("opacity (for render)", opacity)
+        _log("check *.ply files to see if it's ready for simulation")
 
     # set up the mpm solver
     mpm_solver = MPM_Simulator_WARP(10)
@@ -334,6 +412,12 @@ if __name__ == "__main__":
             cov3D = cov3D.view(-1, 6)[:gs_num].to(device)
             rot = rot.view(-1, 3, 3)[:gs_num].to(device)
 
+            if args.debug and frame == 0:
+                _log("=== CHECKPOINT 6: Frame 0 — raw MPM state (before inverse transform) ===")
+                _dbg("pos (from MPM)", pos)
+                _dbg("cov3D (from MPM)", cov3D)
+                _dbg("rot (from MPM)", rot)
+
             pos = apply_inverse_rotations(
                 undotransform2origin(
                     undoshift2center111(pos), scale_origin, original_mean_pos
@@ -342,6 +426,12 @@ if __name__ == "__main__":
             )
             cov3D = cov3D / (scale_origin * scale_origin)
             cov3D = apply_inverse_cov_rotations(cov3D, rotation_matrices)
+
+            if args.debug and frame == 0:
+                _log("=== CHECKPOINT 7: Frame 0 — after inverse transform (world space) ===")
+                _dbg("pos (world)", pos)
+                _dbg("cov3D (world)", cov3D)
+
             opacity = opacity_render
             shs = shs_render
             if preprocessing_params["sim_area"] is not None:
@@ -349,6 +439,14 @@ if __name__ == "__main__":
                 cov3D = torch.cat([cov3D, unselected_cov], dim=0)
                 opacity = torch.cat([opacity_render, unselected_opacity], dim=0)
                 shs = torch.cat([shs_render, unselected_shs], dim=0)
+
+            if args.debug and frame == 0:
+                _log("=== CHECKPOINT 8: Frame 0 — final render inputs ===")
+                _dbg("pos (final)", pos)
+                _dbg("cov3D (final)", cov3D)
+                _dbg("opacity (final)", opacity)
+                _dbg("shs (final)", shs)
+                _log(f"  [DBG] Total render particles: {pos.shape[0]}")
 
             colors_precomp = convert_SH(shs, current_camera, gaussians, pos, rot)
             rendering, raddi = rasterize(

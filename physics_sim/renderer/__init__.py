@@ -1,0 +1,1 @@
+from physics_sim.renderer.gs_renderer import GaussianRenderer
