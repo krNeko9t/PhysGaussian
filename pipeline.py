@@ -66,6 +66,7 @@ from physics_sim.preprocessing.particle_filling import (
 )
 from physics_sim.backend.warp_mpm import WarpMPMBackend
 from physics_sim.backend.newton_mpm import NewtonMPMBackend
+from physics_sim.backend.newton_rigid import NewtonRigidBackend
 from physics_sim.renderer.gs_renderer import GaussianRenderer
 
 
@@ -84,7 +85,7 @@ def main():
     parser.add_argument("--sh_degree", type=int, default=3,
                         help="SH degree of the PLY model (default: 3)")
     parser.add_argument("--backend", type=str, default="warp_mpm",
-                        choices=["warp_mpm", "newton_mpm"],
+                        choices=["warp_mpm", "newton_mpm", "newton_rigid"],
                         help="Physics backend to use (default: warp_mpm)")
     parser.add_argument("--debug", action="store_true",
                         help="Print intermediate tensor statistics for debugging")
@@ -132,7 +133,7 @@ def main():
 
     # ── 0. Initialise runtime ────────────────────────────────────────
     wp.init()
-    if args.backend == "newton_mpm":
+    if args.backend in ("newton_mpm", "newton_rigid"):
         wp.config.verify_cuda = False  # Newton uses CUDA graph capture internally
     else:
         wp.config.verify_cuda = True
@@ -564,6 +565,9 @@ def main():
     if args.backend == "newton_mpm":
         print("Initialising physics backend (Newton-MPM)...")
         backend = NewtonMPMBackend(device=device)
+    elif args.backend == "newton_rigid":
+        print("Initialising physics backend (Newton-Rigid)...")
+        backend = NewtonRigidBackend(device=device)
     else:
         print("Initialising physics backend (Warp-MPM)...")
         backend = WarpMPMBackend(device=device)

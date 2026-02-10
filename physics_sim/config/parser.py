@@ -8,7 +8,7 @@ Reads a JSON config and returns structured parameter dictionaries.
 import json
 
 # Backend names that can appear as top-level override sections in the config.
-_KNOWN_BACKENDS = ("warp_mpm", "newton_mpm")
+_KNOWN_BACKENDS = ("warp_mpm", "newton_mpm", "newton_rigid")
 
 # Material keys that can be overridden per-object.
 _MATERIAL_KEYS = (
