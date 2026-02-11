@@ -15,6 +15,8 @@ _MATERIAL_KEYS = (
     "material", "E", "nu", "density", "friction_angle",
     "yield_stress", "hardening", "rpic_damping", "pic_damping",
     "xi", "plastic_viscosity", "softening",
+    # Rigid body contact parameters (Newton XPBD)
+    "ke", "kd", "mu", "friction",
 )
 
 

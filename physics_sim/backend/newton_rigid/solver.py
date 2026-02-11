@@ -31,6 +31,15 @@ from newton.solvers import SolverXPBD
 from physics_sim.backend.base import PhysicsBackend, SimulationState
 from physics_sim.geometry.convex_hull import compute_convex_hull
 
+# Alpha Shape gives a much tighter collision mesh than a convex hull
+# for organic shapes (animals, food, etc.).  Falls back to convex hull
+# if Open3D is not installed.
+try:
+    from physics_sim.geometry.alpha_shape import compute_alpha_shape
+    _HAS_ALPHA_SHAPE = True
+except ImportError:
+    _HAS_ALPHA_SHAPE = False
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -150,8 +159,29 @@ class NewtonRigidBackend(PhysicsBackend):
         self._n_particles = positions.shape[0]
         self._grid_lim = grid_lim
 
+        # ── Collision geometry config ───────────────────────────────
+        # "alpha_shape" (default, tighter mesh) or "convex_hull" (fallback)
+        self._collision_geo = kwargs.get("collision_geometry", "alpha_shape")
+        # Alpha parameter: None = auto-estimate from bounding box
+        self._alpha = kwargs.get("alpha", None)
+        if self._collision_geo == "alpha_shape" and not _HAS_ALPHA_SHAPE:
+            print(
+                "[NewtonRigid] WARNING: Open3D not available, "
+                "falling back to convex_hull"
+            )
+            self._collision_geo = "convex_hull"
+
         # Create ModelBuilder (bodies & shapes added in set_material)
         self._builder = newton.ModelBuilder()
+        # Contact margin: start detecting contacts before actual penetration.
+        # A small positive margin prevents deep interpenetration that causes
+        # sudden explosive correction forces (Newton example_sdf uses 0.01).
+        contact_margin = kwargs.get("contact_margin", 0.01)
+        self._builder.default_shape_cfg.contact_margin = contact_margin
+        print(
+            f"[NewtonRigid] collision_geometry={self._collision_geo}, "
+            f"alpha={self._alpha}, contact_margin={contact_margin}"
+        )
 
     def set_material(self, material_params: dict) -> None:
         """Create rigid bodies from per-object info (or single body).
@@ -170,14 +200,28 @@ class NewtonRigidBackend(PhysicsBackend):
         # ── Solver options ──────────────────────────────────────────
         solver_opts = material_params.get("newton_solver_opts", {})
         self._solver_iterations = solver_opts.get("iterations", 10)
+        # Relaxation < 1.0 avoids over-correction at contacts (Newton
+        # example_sdf uses 0.8; 1.0 = no damping → can oscillate/explode).
+        self._solver_relaxation = float(solver_opts.get("contact_relaxation", 0.8))
+
+        # ── Contact parameters ────────────────────────────────────────
+        # For XPBD, Newton's default ke/kd work best — only override if
+        # the user explicitly sets them in the config.
+        default_mu = float(material_params.get("mu", 0.5))
+        default_density = float(material_params.get("density", 1000.0))
 
         # ── Default shape config ────────────────────────────────────
+        # Start from Newton's built-in defaults, then layer on config.
         base_cfg = newton.ModelBuilder.ShapeConfig(
-            density=float(material_params.get("density", 1000.0)),
-            mu=0.5,
-            ke=1.0e5,
-            kd=1.0e2,
+            density=default_density,
+            mu=default_mu,
         )
+        # Only override ke/kd if explicitly provided (not with arbitrary
+        # defaults — Newton's own defaults are tuned for XPBD stability).
+        if "ke" in material_params:
+            base_cfg.ke = float(material_params["ke"])
+        if "kd" in material_params:
+            base_cfg.kd = float(material_params["kd"])
 
         # ── Create bodies ───────────────────────────────────────────
         per_object = material_params.get("per_object")
@@ -187,8 +231,14 @@ class NewtonRigidBackend(PhysicsBackend):
                 mat = obj.get("material", {})
                 cfg = copy(base_cfg)
                 cfg.density = float(mat.get("density", cfg.density))
-                if "friction" in mat:
+                if "mu" in mat:
+                    cfg.mu = float(mat["mu"])
+                elif "friction" in mat:
                     cfg.mu = float(mat["friction"])
+                if "ke" in mat:
+                    cfg.ke = float(mat["ke"])
+                if "kd" in mat:
+                    cfg.kd = float(mat["kd"])
                 self._create_body(
                     particle_indices=obj["particle_indices"],
                     shape_cfg=cfg,
@@ -234,9 +284,7 @@ class NewtonRigidBackend(PhysicsBackend):
                 if "friction" in bc:
                     mu = float(bc["friction"])
 
-                plane_cfg = newton.ModelBuilder.ShapeConfig(
-                    ke=1.0e5, kd=1.0e2, mu=mu
-                )
+                plane_cfg = newton.ModelBuilder.ShapeConfig(mu=mu)
                 builder.add_shape_plane(
                     plane=(
                         float(normal[0]),
@@ -255,9 +303,7 @@ class NewtonRigidBackend(PhysicsBackend):
                 # Add 6 planes for [0, grid_lim]^3 bounding box
                 lim = self._grid_lim
                 margin = 0.01  # slight inset to avoid edge cases
-                wall_cfg = newton.ModelBuilder.ShapeConfig(
-                    ke=1.0e5, kd=1.0e2, mu=0.3
-                )
+                wall_cfg = newton.ModelBuilder.ShapeConfig(mu=0.3)
                 # -x, +x, -y, +y, -z, +z
                 planes = [
                     (1.0, 0.0, 0.0, -margin),          # x > 0
@@ -281,13 +327,21 @@ class NewtonRigidBackend(PhysicsBackend):
         self._model.set_gravity(self._gravity)
         print(f"[NewtonRigid] Gravity: {self._gravity}")
 
+        # Limit contact buffer to prevent excessive memory allocation
+        self._model.rigid_contact_max = 100000
+
         # ── Create solver ───────────────────────────────────────────
+        # rigid_contact_relaxation < 1.0 prevents over-correction and
+        # oscillation at contacts (Newton's example_sdf uses 0.8).
+        relaxation = self._solver_relaxation
         self._solver = SolverXPBD(
-            self._model, iterations=self._solver_iterations
+            self._model,
+            iterations=self._solver_iterations,
+            rigid_contact_relaxation=relaxation,
         )
         print(
-            f"[NewtonRigid] SolverXPBD with "
-            f"{self._solver_iterations} iterations"
+            f"[NewtonRigid] SolverXPBD: iterations={self._solver_iterations}, "
+            f"contact_relaxation={relaxation}"
         )
 
         # ── Create double-buffered states + control ─────────────────
@@ -298,7 +352,9 @@ class NewtonRigidBackend(PhysicsBackend):
         # ── Collision pipeline ──────────────────────────────────────
         self._collision_pipeline = (
             newton.CollisionPipelineUnified.from_model(
-                self._model, reduce_contacts=True
+                self._model,
+                reduce_contacts=True,
+                broad_phase_mode=newton.BroadPhaseMode.SAP,
             )
         )
         self._contacts = self._model.collide(
@@ -335,6 +391,18 @@ class NewtonRigidBackend(PhysicsBackend):
           rotation[i] = R  (same for all particles in the body)
         """
         body_q = self._state_0.body_q.numpy()  # (n_bodies, 7)
+
+        # Early NaN detection — if any body has NaN in its pose, the
+        # simulation has blown up (usually from interpenetration).
+        if np.any(np.isnan(body_q)):
+            bad = [
+                i for i in range(body_q.shape[0])
+                if np.any(np.isnan(body_q[i]))
+            ]
+            print(
+                f"[NewtonRigid] WARNING: NaN detected in body poses "
+                f"(bodies {bad}). Simulation may have diverged."
+            )
 
         positions = torch.zeros(
             (self._n_particles, 3),
@@ -408,23 +476,46 @@ class NewtonRigidBackend(PhysicsBackend):
         positions = self._init_positions[idx_t]  # (N, 3)
         center = positions.mean(dim=0)  # (3,)
 
-        # ── Compute convex hull ──────────────────────────────────────
+        # ── Compute collision mesh ────────────────────────────────────
         pos_np = positions.detach().cpu().numpy()
-        try:
-            hull_verts, hull_faces = compute_convex_hull(pos_np)
-        except Exception as e:
-            print(
-                f"[NewtonRigid] WARNING: convex hull failed for '{name}': "
-                f"{e}. Using bounding box fallback."
-            )
-            hull_verts, hull_faces = self._bbox_mesh(pos_np)
+        mesh_verts: np.ndarray
+        mesh_faces: np.ndarray
 
-        # Mesh vertices in body-local frame
+        if self._collision_geo == "alpha_shape":
+            try:
+                mesh_verts, mesh_faces = compute_alpha_shape(
+                    pos_np, alpha=self._alpha
+                )
+            except Exception as e:
+                print(
+                    f"[NewtonRigid] WARNING: alpha shape failed for "
+                    f"'{name}': {e}. Falling back to convex hull."
+                )
+                try:
+                    mesh_verts, mesh_faces = compute_convex_hull(pos_np)
+                except Exception as e2:
+                    print(
+                        f"[NewtonRigid] WARNING: convex hull also failed: "
+                        f"{e2}. Using bounding box."
+                    )
+                    mesh_verts, mesh_faces = self._bbox_mesh(pos_np)
+        else:
+            # convex_hull mode
+            try:
+                mesh_verts, mesh_faces = compute_convex_hull(pos_np)
+            except Exception as e:
+                print(
+                    f"[NewtonRigid] WARNING: convex hull failed for "
+                    f"'{name}': {e}. Using bounding box fallback."
+                )
+                mesh_verts, mesh_faces = self._bbox_mesh(pos_np)
+
+        # Mesh vertices in body-local frame (centered on body origin)
         center_np = center.detach().cpu().numpy()
-        local_hull = hull_verts - center_np
-        mesh = newton.Mesh(
-            local_hull.astype(np.float32),
-            hull_faces.flatten().astype(np.int32),
+        local_verts = mesh_verts - center_np
+        collision_mesh = newton.Mesh(
+            local_verts.astype(np.float32),
+            mesh_faces.flatten().astype(np.int32),
         )
 
         # ── Add body + shape to ModelBuilder ─────────────────────────
@@ -439,7 +530,7 @@ class NewtonRigidBackend(PhysicsBackend):
             ),
             key=name,
         )
-        builder.add_shape_mesh(body_idx, mesh=mesh, cfg=shape_cfg)
+        builder.add_shape_mesh(body_idx, mesh=collision_mesh, cfg=shape_cfg)
 
         # ── Store back-mapping data ──────────────────────────────────
         local_pos = (positions - center).to(self._device)  # (N, 3)
@@ -456,8 +547,8 @@ class NewtonRigidBackend(PhysicsBackend):
         )
         print(
             f"[NewtonRigid] Body '{name}': {len(particle_indices)} particles, "
-            f"hull={hull_verts.shape[0]} verts / {hull_faces.shape[0]} faces, "
-            f"density={shape_cfg.density}"
+            f"mesh({self._collision_geo})={mesh_verts.shape[0]} verts / "
+            f"{mesh_faces.shape[0]} faces, density={shape_cfg.density}"
         )
 
     @staticmethod

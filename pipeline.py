@@ -572,10 +572,23 @@ def main():
         print("Initialising physics backend (Warp-MPM)...")
         backend = WarpMPMBackend(device=device)
 
-    backend.initialize(
-        mpm_init_pos, mpm_init_vol, mpm_init_cov,
+    # Collect backend-specific kwargs for initialize()
+    init_kwargs = dict(
         n_grid=material_params["n_grid"],
         grid_lim=material_params["grid_lim"],
+    )
+    # Newton rigid: pass collision geometry settings from backend overrides
+    if args.backend == "newton_rigid" and args.backend in backend_overrides:
+        rigid_opts = backend_overrides[args.backend]
+        if "collision_geometry" in rigid_opts:
+            init_kwargs["collision_geometry"] = rigid_opts["collision_geometry"]
+        if "alpha" in rigid_opts:
+            init_kwargs["alpha"] = rigid_opts["alpha"]
+        if "contact_margin" in rigid_opts:
+            init_kwargs["contact_margin"] = rigid_opts["contact_margin"]
+
+    backend.initialize(
+        mpm_init_pos, mpm_init_vol, mpm_init_cov, **init_kwargs
     )
     # Pass per-object material info to backend (if multi-object)
     if per_object_info is not None:
