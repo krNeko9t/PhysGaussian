@@ -29,8 +29,8 @@
     ],
 
     "newton_rigid": {
-        "substep_dt": 5e-4,
-        "collision_geometry": "alpha_shape",
+        "substep_dt": 2e-3,
+        "collision_geometry": "obb",
         "solver": {
             "iterations": 10,
             "contact_relaxation": 0.8

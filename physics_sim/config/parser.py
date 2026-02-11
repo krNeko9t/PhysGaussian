@@ -17,6 +17,8 @@ _MATERIAL_KEYS = (
     "xi", "plastic_viscosity", "softening",
     # Rigid body contact parameters (Newton XPBD)
     "ke", "kd", "mu", "friction",
+    # Per-object collision geometry override (Newton rigid)
+    "collision_geometry",
 )
 
 

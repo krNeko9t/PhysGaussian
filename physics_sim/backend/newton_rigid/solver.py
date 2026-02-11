@@ -30,6 +30,7 @@ from newton.solvers import SolverXPBD
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
 from physics_sim.geometry.convex_hull import compute_convex_hull
+from physics_sim.geometry.primitives import fit_obb, fit_ellipsoid
 
 # Alpha Shape gives a much tighter collision mesh than a convex hull
 # for organic shapes (animals, food, etc.).  Falls back to convex hull
@@ -40,8 +41,44 @@ try:
 except ImportError:
     _HAS_ALPHA_SHAPE = False
 
+# Supported collision geometry types
+_COLLISION_GEO_TYPES = ("obb", "ellipsoid", "convex_hull", "alpha_shape")
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _rotmat_to_wp_quat(R: np.ndarray) -> tuple[float, float, float, float]:
+    """Convert a 3×3 rotation matrix to a Warp quaternion (x, y, z, w)."""
+    # Shepperd's method
+    trace = R[0, 0] + R[1, 1] + R[2, 2]
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (R[2, 1] - R[1, 2]) * s
+        y = (R[0, 2] - R[2, 0]) * s
+        z = (R[1, 0] - R[0, 1]) * s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+        w = (R[2, 1] - R[1, 2]) / s
+        x = 0.25 * s
+        y = (R[0, 1] + R[1, 0]) / s
+        z = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+        w = (R[0, 2] - R[2, 0]) / s
+        x = (R[0, 1] + R[1, 0]) / s
+        y = 0.25 * s
+        z = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+        w = (R[1, 0] - R[0, 1]) / s
+        x = (R[0, 2] + R[2, 0]) / s
+        y = (R[1, 2] + R[2, 1]) / s
+        z = 0.25 * s
+    # Normalize
+    norm = np.sqrt(x * x + y * y + z * z + w * w)
+    return (x / norm, y / norm, z / norm, w / norm)
 
 
 def _quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
@@ -160,12 +197,15 @@ class NewtonRigidBackend(PhysicsBackend):
         self._grid_lim = grid_lim
 
         # ── Collision geometry config ───────────────────────────────
-        # "alpha_shape" (default, tighter mesh) or "convex_hull" (fallback)
-        self._collision_geo = kwargs.get("collision_geometry", "alpha_shape")
-        # Alpha parameter: None = auto-estimate from bounding box
+        # Supported: "obb", "ellipsoid", "convex_hull", "alpha_shape"
+        self._collision_geo = kwargs.get("collision_geometry", "obb")
+        if self._collision_geo not in _COLLISION_GEO_TYPES:
+            raise ValueError(
+                f"Unknown collision_geometry={self._collision_geo!r}. "
+                f"Must be one of {_COLLISION_GEO_TYPES}"
+            )
+        # Alpha shape specific: alpha parameter and max triangle count
         self._alpha = kwargs.get("alpha", None)
-        # Max triangles for the collision mesh (decimation target).
-        # Game engines use 100-500; default 300 is a good balance.
         self._max_triangles = int(kwargs.get("max_triangles", 300))
         if self._collision_geo == "alpha_shape" and not _HAS_ALPHA_SHAPE:
             print(
@@ -243,10 +283,13 @@ class NewtonRigidBackend(PhysicsBackend):
                     cfg.ke = float(mat["ke"])
                 if "kd" in mat:
                     cfg.kd = float(mat["kd"])
+                # Per-object collision_geometry override
+                obj_geo = mat.get("collision_geometry", None)
                 self._create_body(
                     particle_indices=obj["particle_indices"],
                     shape_cfg=cfg,
                     name=obj.get("name", "?"),
+                    collision_geo=obj_geo,
                 )
         else:
             # Single body: all particles
@@ -466,10 +509,16 @@ class NewtonRigidBackend(PhysicsBackend):
         particle_indices: list[int],
         shape_cfg: newton.ModelBuilder.ShapeConfig,
         name: str = "body",
+        collision_geo: str | None = None,
     ) -> None:
-        """Create one rigid body from a subset of particles."""
+        """Create one rigid body from a subset of particles.
+
+        ``collision_geo`` overrides the global ``self._collision_geo``
+        for this particular body (enables per-object config).
+        """
         builder = self._builder
         assert builder is not None
+        geo = collision_geo or self._collision_geo
 
         if len(particle_indices) == 0:
             print(f"[NewtonRigid] Skipping empty body '{name}'")
@@ -478,70 +527,84 @@ class NewtonRigidBackend(PhysicsBackend):
         # ── Gather particle positions ────────────────────────────────
         idx_t = torch.tensor(particle_indices, dtype=torch.long)
         positions = self._init_positions[idx_t]  # (N, 3)
-        center = positions.mean(dim=0)  # (3,)
-
-        # ── Compute collision mesh ────────────────────────────────────
         pos_np = positions.detach().cpu().numpy()
-        mesh_verts: np.ndarray
-        mesh_faces: np.ndarray
 
-        if self._collision_geo == "alpha_shape":
-            try:
-                mesh_verts, mesh_faces = compute_alpha_shape(
-                    pos_np,
-                    alpha=self._alpha,
-                    max_triangles=self._max_triangles,
-                )
-            except Exception as e:
-                print(
-                    f"[NewtonRigid] WARNING: alpha shape failed for "
-                    f"'{name}': {e}. Falling back to convex hull."
-                )
-                try:
-                    mesh_verts, mesh_faces = compute_convex_hull(pos_np)
-                except Exception as e2:
-                    print(
-                        f"[NewtonRigid] WARNING: convex hull also failed: "
-                        f"{e2}. Using bounding box."
-                    )
-                    mesh_verts, mesh_faces = self._bbox_mesh(pos_np)
+        # ── Dispatch by collision geometry type ───────────────────────
+        if geo in ("obb", "ellipsoid"):
+            self._create_body_primitive(
+                geo, pos_np, idx_t, positions, particle_indices,
+                shape_cfg, name,
+            )
         else:
-            # convex_hull mode
-            try:
-                mesh_verts, mesh_faces = compute_convex_hull(pos_np)
-            except Exception as e:
-                print(
-                    f"[NewtonRigid] WARNING: convex hull failed for "
-                    f"'{name}': {e}. Using bounding box fallback."
-                )
-                mesh_verts, mesh_faces = self._bbox_mesh(pos_np)
+            self._create_body_mesh(
+                geo, pos_np, idx_t, positions, particle_indices,
+                shape_cfg, name,
+            )
 
-        # Mesh vertices in body-local frame (centered on body origin)
-        center_np = center.detach().cpu().numpy()
-        local_verts = mesh_verts - center_np
-        collision_mesh = newton.Mesh(
-            local_verts.astype(np.float32),
-            mesh_faces.flatten().astype(np.int32),
-        )
+    def _create_body_primitive(
+        self,
+        geo: str,
+        pos_np: np.ndarray,
+        idx_t: torch.Tensor,
+        positions: torch.Tensor,
+        particle_indices: list[int],
+        shape_cfg: newton.ModelBuilder.ShapeConfig,
+        name: str,
+    ) -> None:
+        """Create a rigid body with a primitive shape (OBB or ellipsoid)."""
+        builder = self._builder
+        assert builder is not None
 
-        # ── Add body + shape to ModelBuilder ─────────────────────────
+        if geo == "obb":
+            info = fit_obb(pos_np)
+            hx, hy, hz = (float(v) for v in info["half_extents"])
+        else:  # ellipsoid
+            info = fit_ellipsoid(pos_np)
+
+        center_np = info["center"]
+        axes = info["axes"]  # (3, 3), rows = principal axes
+
+        # Convert PCA axes (rotation matrix) to quaternion for body xform.
+        # axes is row-major (rows=axes), but rotation matrix should have
+        # columns=axes, so transpose.
+        R = axes.T  # columns = principal axes
+        quat = _rotmat_to_wp_quat(R)
+
         body_idx = builder.add_body(
             xform=wp.transform(
-                p=wp.vec3(
-                    float(center_np[0]),
-                    float(center_np[1]),
-                    float(center_np[2]),
-                ),
-                q=wp.quat_identity(),
+                p=wp.vec3(float(center_np[0]), float(center_np[1]),
+                          float(center_np[2])),
+                q=wp.quat(*quat),
             ),
             key=name,
         )
-        builder.add_shape_mesh(body_idx, mesh=collision_mesh, cfg=shape_cfg)
+
+        if geo == "obb":
+            builder.add_shape_box(
+                body_idx, hx=hx, hy=hy, hz=hz, cfg=shape_cfg,
+            )
+            shape_desc = f"box({hx:.3f}, {hy:.3f}, {hz:.3f})"
+        else:
+            sa = info["semi_axes"]
+            a, b, c = (float(v) for v in sa)
+            builder.add_shape_ellipsoid(
+                body_idx, a=a, b=b, c=c, cfg=shape_cfg,
+            )
+            shape_desc = f"ellipsoid({a:.3f}, {b:.3f}, {c:.3f})"
 
         # ── Store back-mapping data ──────────────────────────────────
-        local_pos = (positions - center).to(self._device)  # (N, 3)
-        cov6 = self._init_covariances[idx_t]  # (N, 6)
-        cov_3x3 = _unpack_cov6_to_3x3(cov6)  # (N, 3, 3)
+        # Local positions are in the OBB/ellipsoid frame (PCA axes).
+        center_t = torch.tensor(
+            center_np, device=self._device, dtype=torch.float32
+        )
+        R_t = torch.tensor(R, device=self._device, dtype=torch.float32)
+        # Transform particle positions to body-local frame:
+        #   local_pos = R^T @ (world_pos - center)
+        pos_f32 = positions.float()  # ensure float32
+        local_pos = ((pos_f32 - center_t) @ R_t).to(self._device)
+
+        cov6 = self._init_covariances[idx_t]
+        cov_3x3 = _unpack_cov6_to_3x3(cov6)
 
         self._bodies.append(
             _BodyInfo(
@@ -553,7 +616,87 @@ class NewtonRigidBackend(PhysicsBackend):
         )
         print(
             f"[NewtonRigid] Body '{name}': {len(particle_indices)} particles, "
-            f"mesh({self._collision_geo})={mesh_verts.shape[0]} verts / "
+            f"{shape_desc}, density={shape_cfg.density}"
+        )
+
+    def _create_body_mesh(
+        self,
+        geo: str,
+        pos_np: np.ndarray,
+        idx_t: torch.Tensor,
+        positions: torch.Tensor,
+        particle_indices: list[int],
+        shape_cfg: newton.ModelBuilder.ShapeConfig,
+        name: str,
+    ) -> None:
+        """Create a rigid body with a mesh shape (convex hull or alpha shape)."""
+        builder = self._builder
+        assert builder is not None
+
+        center = positions.mean(dim=0)
+
+        # ── Compute collision mesh ────────────────────────────────────
+        mesh_verts: np.ndarray
+        mesh_faces: np.ndarray
+
+        if geo == "alpha_shape":
+            try:
+                mesh_verts, mesh_faces = compute_alpha_shape(
+                    pos_np,
+                    alpha=self._alpha,
+                    max_triangles=self._max_triangles,
+                )
+            except Exception as e:
+                print(
+                    f"[NewtonRigid] WARNING: alpha shape failed for "
+                    f"'{name}': {e}. Falling back to convex hull."
+                )
+                geo = "convex_hull"  # fall through
+
+        if geo == "convex_hull":
+            try:
+                mesh_verts, mesh_faces = compute_convex_hull(pos_np)
+            except Exception as e:
+                print(
+                    f"[NewtonRigid] WARNING: convex hull failed for "
+                    f"'{name}': {e}. Using bounding box fallback."
+                )
+                mesh_verts, mesh_faces = self._bbox_mesh(pos_np)
+
+        # Mesh vertices in body-local frame
+        center_np = center.detach().cpu().numpy()
+        local_verts = mesh_verts - center_np
+        collision_mesh = newton.Mesh(
+            local_verts.astype(np.float32),
+            mesh_faces.flatten().astype(np.int32),
+        )
+
+        body_idx = builder.add_body(
+            xform=wp.transform(
+                p=wp.vec3(float(center_np[0]), float(center_np[1]),
+                          float(center_np[2])),
+                q=wp.quat_identity(),
+            ),
+            key=name,
+        )
+        builder.add_shape_mesh(body_idx, mesh=collision_mesh, cfg=shape_cfg)
+
+        # ── Store back-mapping data ──────────────────────────────────
+        local_pos = (positions - center).to(self._device)
+        cov6 = self._init_covariances[idx_t]
+        cov_3x3 = _unpack_cov6_to_3x3(cov6)
+
+        self._bodies.append(
+            _BodyInfo(
+                body_idx=body_idx,
+                particle_indices=particle_indices,
+                init_local_pos=local_pos,
+                init_cov_3x3=cov_3x3,
+            )
+        )
+        print(
+            f"[NewtonRigid] Body '{name}': {len(particle_indices)} particles, "
+            f"mesh({geo})={mesh_verts.shape[0]} verts / "
             f"{mesh_faces.shape[0]} faces, density={shape_cfg.density}"
         )
 
