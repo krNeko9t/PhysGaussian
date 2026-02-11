@@ -264,12 +264,8 @@ def main():
                     obj_pos, rotation_matrices
                 )
 
-                # Position offset (in rotated space)
-                offset = obj.get("position_offset")
-                if offset is not None:
-                    obj_rotated_pos = obj_rotated_pos + torch.tensor(
-                        offset, device="cuda", dtype=torch.float32
-                    )
+                # NOTE: position_offset is applied AFTER transform2origin
+                # (see below) to avoid polluting the global scale.
 
                 # Optional sim_area filter (in rotated space)
                 if obj.get("sim_area") is not None:
@@ -328,12 +324,8 @@ def main():
                 n_gs = int(obj_mask.sum().item())
                 obj_rotated = rotated_pos[obj_mask]
 
-                # Position offset (in rotated space)
-                offset = obj.get("position_offset")
-                if offset is not None:
-                    obj_rotated = obj_rotated + torch.tensor(
-                        offset, device="cuda", dtype=torch.float32
-                    )
+                # NOTE: position_offset is applied AFTER transform2origin
+                # (see below) to avoid polluting the global scale.
 
                 obj_data.append({
                     "rotated_pos": obj_rotated,
@@ -368,6 +360,19 @@ def main():
         transformed_pos = shift2center111(transformed_pos)
         init_cov = apply_cov_rotations(init_cov, rotation_matrices)
         init_cov = scale_origin * scale_origin * init_cov
+
+        # 3d'. Apply per-object position_offset in MPM space.
+        # This is done AFTER transform2origin so offsets don't pollute
+        # the global scale/centering computation.
+        gs_ptr = 0
+        for i, obj in enumerate(scene_objects):
+            n = obj_data[i]["gs_count"]
+            offset = obj.get("position_offset")
+            if offset is not None:
+                transformed_pos[gs_ptr:gs_ptr + n] += torch.tensor(
+                    offset, device="cuda", dtype=torch.float32
+                )
+            gs_ptr += n
 
         # 3e. Per-object particle filling
         gs_num = transformed_pos.shape[0]
@@ -594,7 +599,15 @@ def main():
     if args.backend == "newton_vbd" and args.backend in backend_overrides:
         vbd_opts = backend_overrides[args.backend]
         for k in ("collision_geometry", "alpha", "max_triangles",
-                  "contact_margin", "tet_max_volume", "tet_quality"):
+                  "contact_margin",
+                  "debug_soft_no_deformation", "sv_clamp_min",
+                  "sv_clamp_max",
+                  "particle_self_contact",
+                  "particle_self_contact_radius",
+                  "particle_self_contact_margin",
+                  "soft_contact_ke", "soft_contact_kd",
+                  "soft_contact_mu",
+                  "rigid_contact_max"):
             if k in vbd_opts:
                 init_kwargs[k] = vbd_opts[k]
 

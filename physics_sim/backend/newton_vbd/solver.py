@@ -3,16 +3,17 @@ Newton VBD backend — unified rigid + soft body simulation.
 
 Uses a **single** ``ModelBuilder`` and ``SolverVBD`` to handle both
 rigid bodies (``add_body`` + ``add_shape_*``) and FEM soft bodies
-(``add_soft_mesh``) in one scene, with automatic contact handling.
+(``add_soft_grid``) in one scene, with automatic contact handling.
 
 Each object in the config declares ``"physics": "rigid"`` or
 ``"physics": "soft"``.  Rigid bodies reuse the same collision-geometry
-strategies as ``NewtonRigidBackend``.  Soft bodies go through:
+strategies as ``NewtonRigidBackend``.  Soft bodies use a **regular
+tetrahedral grid** (Newton's ``add_soft_grid``) covering the GS
+particle bounding box — this produces uniform, well-conditioned
+elements that Newton's VBD solver is optimized for.
 
-    point cloud → alpha shape → tetgen → ``add_soft_mesh``
-
-GS particles are **embedded** inside the tet mesh via barycentric
-coordinates, so the coarse FEM mesh drives the dense GS point cloud.
+GS particles are **embedded** inside the tet grid via barycentric
+coordinates, so the coarse FEM grid drives the dense GS point cloud.
 
 Lifecycle (called by the pipeline):
     initialize  → store particles, create ModelBuilder
@@ -26,7 +27,7 @@ Lifecycle (called by the pipeline):
 from __future__ import annotations
 
 from copy import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -47,12 +48,6 @@ try:
     _HAS_ALPHA_SHAPE = True
 except ImportError:
     _HAS_ALPHA_SHAPE = False
-
-try:
-    from physics_sim.geometry.tetrahedralize import tetrahedralize
-    _HAS_TETGEN = True
-except ImportError:
-    _HAS_TETGEN = False
 
 
 # ── Shared helpers (same as newton_rigid) ────────────────────────────
@@ -148,11 +143,25 @@ class _SoftInfo:
 
 # ── Embedding: GS particles inside tet mesh ──────────────────────────
 
+# Numerical tolerances for barycentric computation.
+# These are machine-precision-derived values, NOT physics parameters.
+# They should NOT need per-scene tuning.
+
+# Determinant below this → tet is truly singular (flat plane).
+_BARY_DET_SINGULAR = 1e-12
+# Max absolute value of inv(shape_matrix) entries.  Above this the
+# tet is ill-conditioned and barycentric coords are unreliable.
+_BARY_INV_ABS_MAX = 1e6
+# Tolerance for "inside tet" check.  A barycentric coord ≥ -eps is
+# considered non-negative (accounts for floating-point rounding).
+_BARY_INSIDE_EPS = 1e-4
+
+
 def _compute_barycentric(
     points: np.ndarray,
     tet_verts: np.ndarray,
     tet_cells: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     """For each point, find the containing tet and barycentric coords.
 
     Points outside all tets are assigned to the **nearest** tet (by
@@ -164,8 +173,9 @@ def _compute_barycentric(
         tet_cells: (T, 4)
 
     Returns:
-        tet_ids:    (P,) int32   — index of the containing tet
-        bary:       (P, 4) float32 — barycentric coordinates
+        tet_ids:       (P,) int32   — index of the containing tet
+        bary:          (P, 4) float32 — barycentric coordinates
+        outside_count: int — number of particles that were outside all tets
     """
     P = points.shape[0]
     T = tet_cells.shape[0]
@@ -179,20 +189,52 @@ def _compute_barycentric(
     # Columns of the matrix: (v0-v3, v1-v3, v2-v3)
     mat = np.stack([v0 - v3, v1 - v3, v2 - v3], axis=-1)  # (T, 3, 3)
 
-    # Invert each 3×3 matrix
-    # For singular/degenerate tets, use pseudo-inverse
+    # Invert each 3×3 matrix; detect degenerate tets.
+    # Near-singular tets (det ≈ 0) produce inv_mat with huge values,
+    # which would give extreme barycentric coords.  We mark them so
+    # they are **skipped** during the candidate search.
     inv_mat = np.zeros_like(mat)
+    tet_is_degenerate = np.zeros(T, dtype=bool)
+    degenerate_count = 0
     for t in range(T):
+        det_val = np.linalg.det(mat[t])
+        if abs(det_val) < _BARY_DET_SINGULAR:
+            # Truly singular
+            inv_mat[t] = np.eye(3)
+            tet_is_degenerate[t] = True
+            degenerate_count += 1
+            continue
         try:
-            inv_mat[t] = np.linalg.inv(mat[t])
+            inv_t = np.linalg.inv(mat[t])
         except np.linalg.LinAlgError:
-            inv_mat[t] = np.linalg.pinv(mat[t])
+            inv_t = np.eye(3)
+            tet_is_degenerate[t] = True
+            degenerate_count += 1
+            continue
+        if np.abs(inv_t).max() > _BARY_INV_ABS_MAX:
+            # Near-singular: inv has extreme values
+            inv_mat[t] = np.eye(3)
+            tet_is_degenerate[t] = True
+            degenerate_count += 1
+        else:
+            inv_mat[t] = inv_t
+    if degenerate_count > 0:
+        print(
+            f"[Barycentric] WARNING: {degenerate_count}/{T} degenerate "
+            f"(singular/near-singular) tets detected — will be skipped "
+            f"as candidates!"
+        )
 
     # Centroids for nearest-tet fallback
     centroids = (v0 + v1 + v2 + v3) / 4.0  # (T, 3)
 
     tet_ids = np.zeros(P, dtype=np.int32)
     bary = np.zeros((P, 4), dtype=np.float32)
+    outside_count = 0
+
+    # Use more candidates for better surface-particle coverage.
+    # Surface particles may sit in tets whose centroids are far inside.
+    N_CAND = min(128, T)
 
     # Process in batches for memory efficiency
     BATCH = 4096
@@ -201,48 +243,65 @@ def _compute_barycentric(
         pts = points[start:end]  # (B, 3)
         B = pts.shape[0]
 
-        # Compute barycentric for all tets at once:
-        # lam = inv_mat @ (p - v3)   for each tet
-        # Broadcast: (T, 3, 3) @ (B, T, 3, 1)  — too expensive for large T
-        # Instead, find candidate tets first via centroid distance
-
         # For each point, find closest N_CAND tets by centroid
-        N_CAND = min(32, T)
         dists = np.linalg.norm(
             centroids[None, :, :] - pts[:, None, :], axis=2
         )  # (B, T)
-        cand_idx = np.argpartition(dists, N_CAND, axis=1)[:, :N_CAND]  # (B, N_CAND)
+        if N_CAND < T:
+            cand_idx = np.argpartition(
+                dists, N_CAND, axis=1
+            )[:, :N_CAND]  # (B, N_CAND)
+        else:
+            cand_idx = np.tile(np.arange(T), (B, 1))  # full search
 
         for i in range(B):
             found = False
             best_tet = -1
-            best_dist = np.inf
+            best_min_bary = -np.inf  # track "least outside" tet
 
-            for c in range(N_CAND):
+            n_cand = cand_idx.shape[1]
+            for c in range(n_cand):
                 t = cand_idx[i, c]
+                # Skip degenerate tets — their inv_mat is unreliable
+                if tet_is_degenerate[t]:
+                    continue
                 p_local = pts[i] - v3[t]
                 lam = inv_mat[t] @ p_local  # (3,)
                 lam3 = 1.0 - lam[0] - lam[1] - lam[2]
+                min_lam = min(lam[0], lam[1], lam[2], lam3)
                 # Inside tet if all bary coords >= -eps
-                if lam[0] >= -1e-4 and lam[1] >= -1e-4 and lam[2] >= -1e-4 and lam3 >= -1e-4:
+                if min_lam >= -_BARY_INSIDE_EPS:
                     tet_ids[start + i] = t
                     bary[start + i] = [lam[0], lam[1], lam[2], lam3]
                     found = True
                     break
-                # Track nearest centroid for fallback
-                d = dists[i, t]
-                if d < best_dist:
-                    best_dist = d
+                # Track the tet where point is "least outside"
+                if min_lam > best_min_bary:
+                    best_min_bary = min_lam
                     best_tet = t
 
             if not found:
-                # Fallback: project onto nearest tet, clamp bary coords
+                outside_count += 1
+                # Fallback: use the tet where point is least outside
                 t = best_tet
+                if t < 0 or tet_is_degenerate[t]:
+                    # All candidates were degenerate; pick nearest
+                    # non-degenerate tet by centroid distance.
+                    non_degen = np.where(~tet_is_degenerate)[0]
+                    if len(non_degen) > 0:
+                        cd = np.linalg.norm(
+                            centroids[non_degen] - pts[i], axis=1
+                        )
+                        t = non_degen[np.argmin(cd)]
+                    else:
+                        t = 0  # last resort
                 p_local = pts[i] - v3[t]
                 lam = inv_mat[t] @ p_local
                 lam3 = 1.0 - lam[0] - lam[1] - lam[2]
                 # Clamp to [0, 1] and re-normalize
-                raw = np.array([lam[0], lam[1], lam[2], lam3], dtype=np.float32)
+                raw = np.array(
+                    [lam[0], lam[1], lam[2], lam3], dtype=np.float32
+                )
                 raw = np.maximum(raw, 0.0)
                 s = raw.sum()
                 if s > 0:
@@ -252,7 +311,7 @@ def _compute_barycentric(
                 tet_ids[start + i] = t
                 bary[start + i] = raw
 
-    return tet_ids, bary
+    return tet_ids, bary, outside_count
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -285,15 +344,37 @@ class NewtonVBDBackend(PhysicsBackend):
         # Config
         self._gravity = (0.0, 0.0, -9.8)
         self._solver_iterations = 10
-        self._collision_geo = "convex_hull"
+        self._collision_geo = "convex_hull"  # for rigid bodies
         self._alpha = None
         self._max_triangles = 500
-        self._tet_max_volume: Optional[float] = None
-        self._tet_quality = 1.5
         self._grid_lim = 2.0
 
         # Track particle offset for soft bodies
         self._particle_offset = 0
+
+        # Soft body deformation options
+        self._debug_soft_no_deformation = False  # skip F update, only interp pos
+        self._sv_clamp_min = 0.1   # min allowed singular value of F
+        self._sv_clamp_max = 5.0   # max allowed singular value of F
+        self._frame_counter = 0    # for periodic diagnostics
+
+        # Self-contact parameters (default: OFF — enabling with wrong
+        # radius/margin relative to mesh resolution completely blocks
+        # gravity because the solver spends all iterations resolving
+        # self-contact instead of falling).
+        self._particle_self_contact = False
+        self._particle_self_contact_radius = 0.001
+        self._particle_self_contact_margin = 0.002
+
+        # Soft contact stiffness (particle↔rigid shape contact).
+        # Newton official examples use 1e2 for ground contact.
+        # Too high → explosion on impact; too low → penetration.
+        self._soft_contact_ke = 1e2
+        self._soft_contact_kd = 1e-5
+        self._soft_contact_mu = 0.5
+
+        # Max contact buffer size (Newton internal)
+        self._rigid_contact_max = 100_000
 
     # ── PhysicsBackend interface ─────────────────────────────────────
 
@@ -314,9 +395,47 @@ class NewtonVBDBackend(PhysicsBackend):
         self._alpha = kwargs.get("alpha", None)
         self._max_triangles = int(kwargs.get("max_triangles", 500))
 
-        # Tet mesh parameters for soft bodies
-        self._tet_max_volume = kwargs.get("tet_max_volume", None)
-        self._tet_quality = float(kwargs.get("tet_quality", 1.5))
+        # Soft body deformation gradient options
+        self._debug_soft_no_deformation = bool(
+            kwargs.get("debug_soft_no_deformation", False)
+        )
+        self._sv_clamp_min = float(kwargs.get("sv_clamp_min", 0.1))
+        self._sv_clamp_max = float(kwargs.get("sv_clamp_max", 5.0))
+        if self._debug_soft_no_deformation:
+            print(
+                "[NewtonVBD] DEBUG: soft body deformation gradient DISABLED "
+                "(positions only, no cov/rot update)"
+            )
+        else:
+            print(
+                f"[NewtonVBD] F singular value clamp: "
+                f"[{self._sv_clamp_min}, {self._sv_clamp_max}]"
+            )
+
+        # Self-contact parameters
+        self._particle_self_contact = bool(
+            kwargs.get("particle_self_contact", False)
+        )
+        self._particle_self_contact_radius = float(
+            kwargs.get("particle_self_contact_radius", 0.001)
+        )
+        self._particle_self_contact_margin = float(
+            kwargs.get("particle_self_contact_margin", 0.002)
+        )
+        self._soft_contact_ke = float(
+            kwargs.get("soft_contact_ke", 1e2)
+        )
+        self._soft_contact_kd = float(
+            kwargs.get("soft_contact_kd", 1e-5)
+        )
+        self._soft_contact_mu = float(
+            kwargs.get("soft_contact_mu", 0.5)
+        )
+
+        # Max contact buffer
+        self._rigid_contact_max = int(
+            kwargs.get("rigid_contact_max", 100_000)
+        )
 
         # Contact margin
         contact_margin = kwargs.get("contact_margin", 0.01)
@@ -437,25 +556,33 @@ class NewtonVBDBackend(PhysicsBackend):
         self._model.set_gravity(self._gravity)
         print(f"[NewtonVBD] Gravity: {self._gravity}")
 
-        # Soft contact parameters (for particle-shape contacts)
-        self._model.soft_contact_ke = 1.0e5
-        self._model.soft_contact_kd = 1e-5
-        self._model.soft_contact_mu = 0.5
+        # Soft contact parameters (particle-shape and self-contact)
+        self._model.soft_contact_ke = self._soft_contact_ke
+        self._model.soft_contact_kd = self._soft_contact_kd
+        self._model.soft_contact_mu = self._soft_contact_mu
 
         # Limit contact buffer
-        self._model.rigid_contact_max = 100000
+        self._model.rigid_contact_max = self._rigid_contact_max
 
         # Create VBD solver
         self._solver = SolverVBD(
             self._model,
             iterations=self._solver_iterations,
-            particle_enable_self_contact=True,
-            particle_self_contact_radius=0.01,
-            particle_self_contact_margin=0.02,
+            particle_enable_self_contact=self._particle_self_contact,
+            particle_self_contact_radius=self._particle_self_contact_radius,
+            particle_self_contact_margin=self._particle_self_contact_margin,
         )
         print(
-            f"[NewtonVBD] SolverVBD: iterations={self._solver_iterations}"
+            f"[NewtonVBD] SolverVBD: iterations={self._solver_iterations}, "
+            f"self_contact={self._particle_self_contact}"
         )
+        if self._particle_self_contact:
+            print(
+                f"[NewtonVBD]   self_contact_radius="
+                f"{self._particle_self_contact_radius}, "
+                f"margin={self._particle_self_contact_margin}, "
+                f"ke={self._soft_contact_ke}"
+            )
 
         # Double-buffered states
         self._state_0 = self._model.state()
@@ -531,6 +658,10 @@ class NewtonVBDBackend(PhysicsBackend):
         # ── Soft bodies ──────────────────────────────────────────────
         if self._soft_bodies:
             particle_q = self._state_0.particle_q.numpy()  # (total_verts, 3)
+            self._frame_counter += 1
+            do_diag = (self._frame_counter <= 3) or (
+                self._frame_counter % 50 == 0
+            )
 
             for soft in self._soft_bodies:
                 idx = soft.particle_indices
@@ -539,6 +670,23 @@ class NewtonVBDBackend(PhysicsBackend):
                 # Get current tet vertex positions
                 off = soft.vert_offset
                 cur_verts = particle_q[off:off + soft.vert_count]  # (V, 3)
+
+                # ── Diagnostics (lightweight) ──────────────────────
+                if do_diag:
+                    z_min = cur_verts[:, 2].min()
+                    z_max = cur_verts[:, 2].max()
+                    delta = cur_verts - soft.rest_verts
+                    max_delta = np.abs(delta).max()
+                    mean_dz = delta[:, 2].mean()
+                    nan_v = np.isnan(cur_verts).any()
+                    inf_v = np.isinf(cur_verts).any()
+                    print(
+                        f"[VBD-DIAG] frame={self._frame_counter}: "
+                        f"z=[{z_min:.4f},{z_max:.4f}], "
+                        f"max_delta={max_delta:.6f}, "
+                        f"mean_dz={mean_dz:.6f}, "
+                        f"NaN={nan_v}, Inf={inf_v}"
+                    )
 
                 # Interpolate GS positions from barycentric coords
                 tet_idx = soft.tet_ids       # (N,)
@@ -563,8 +711,17 @@ class NewtonVBDBackend(PhysicsBackend):
                     new_pos_np.astype(np.float32)
                 ).to(self._device)
 
-                # Compute deformation gradient F from tet deformation
-                # F = [v0'-v3', v1'-v3', v2'-v3'] @ inv([V0-V3, V1-V3, V2-V3])
+                # ── Debug mode: skip deformation gradient ──────────
+                if self._debug_soft_no_deformation:
+                    # Keep original covariance & identity rotation
+                    covariances[idx] = soft.init_cov_6.to(self._device)
+                    eye = torch.eye(
+                        3, device=self._device, dtype=torch.float32
+                    )
+                    rotations[idx] = eye.unsqueeze(0).expand(N, -1, -1)
+                    continue
+
+                # ── Compute deformation gradient F per-tet ─────────
                 rest = soft.rest_verts
                 rest_cells = cells[tet_idx]
                 r0 = rest[rest_cells[:, 0]]
@@ -573,13 +730,16 @@ class NewtonVBDBackend(PhysicsBackend):
                 r3 = rest[rest_cells[:, 3]]
 
                 # Rest-pose edge matrix columns: (N, 3, 3)
-                D_rest = np.stack([r0 - r3, r1 - r3, r2 - r3], axis=-1)
+                D_rest = np.stack(
+                    [r0 - r3, r1 - r3, r2 - r3], axis=-1
+                )
                 # Current edge matrix
-                D_cur = np.stack([v0 - v3, v1 - v3, v2 - v3], axis=-1)
+                D_cur = np.stack(
+                    [v0 - v3, v1 - v3, v2 - v3], axis=-1
+                )
 
-                # F = D_cur @ inv(D_rest), per tet
+                # F = D_cur @ inv(D_rest), per unique tet
                 F_np = np.zeros((N, 3, 3), dtype=np.float32)
-                # Precompute unique tet inverses
                 unique_tets = np.unique(tet_idx)
                 inv_cache: dict[int, np.ndarray] = {}
                 for ut in unique_tets:
@@ -590,7 +750,9 @@ class NewtonVBDBackend(PhysicsBackend):
                         rest[t_cells[2]] - rest[t_cells[3]],
                     ], axis=-1)
                     try:
-                        inv_cache[ut] = np.linalg.inv(dr).astype(np.float32)
+                        inv_cache[ut] = np.linalg.inv(dr).astype(
+                            np.float32
+                        )
                     except np.linalg.LinAlgError:
                         inv_cache[ut] = np.eye(3, dtype=np.float32)
 
@@ -599,16 +761,40 @@ class NewtonVBDBackend(PhysicsBackend):
 
                 F_t = torch.from_numpy(F_np).to(self._device)
 
-                # Update covariances: cov' = F @ cov_init @ F^T
+                # ── Clamp F via SVD to prevent extreme deformation ─
+                U, S, Vh = torch.linalg.svd(F_t)
+
+                # Diagnostics
+                if do_diag:
+                    s_min = S.min().item()
+                    s_max = S.max().item()
+                    det_F = torch.det(F_t)
+                    n_inv = (det_F < 0).sum().item()
+                    n_nan = torch.isnan(F_t).any(dim=(1, 2)).sum().item()
+                    print(
+                        f"[VBD-DIAG] frame={self._frame_counter}: "
+                        f"F sv_range=[{s_min:.4f}, {s_max:.4f}], "
+                        f"inverted_tets={n_inv}/{N}, "
+                        f"nan_F={n_nan}"
+                    )
+
+                # Clamp singular values
+                S_clamped = S.clamp(
+                    min=self._sv_clamp_min, max=self._sv_clamp_max
+                )
+
+                # Reconstruct clamped F
+                F_clamped = U @ torch.diag_embed(S_clamped) @ Vh
+
+                # Update covariances: cov' = F_clamped @ cov_init @ F_clamped^T
                 init_cov_6 = soft.init_cov_6.to(self._device)
                 init_cov_3x3 = _unpack_cov6_to_3x3(init_cov_6)
-                new_cov_3x3 = F_t @ init_cov_3x3 @ F_t.transpose(1, 2)
+                new_cov_3x3 = (
+                    F_clamped @ init_cov_3x3 @ F_clamped.transpose(1, 2)
+                )
                 covariances[idx] = _pack_cov3x3_to_6(new_cov_3x3)
 
-                # Extract rotation from F via polar decomposition
-                # F = R @ S → R = F @ inv(sqrt(F^T @ F))
-                # Approximate: use SVD  F = U S V^T → R = U V^T
-                U, _, Vh = torch.linalg.svd(F_t)
+                # Extract rotation: R = U @ V^T (from the same SVD)
                 R_batch = U @ Vh
                 # Ensure proper rotation (det > 0)
                 det = torch.det(R_batch)
@@ -795,12 +981,24 @@ class NewtonVBDBackend(PhysicsBackend):
         material: dict,
         name: str,
     ) -> None:
-        if not _HAS_TETGEN:
-            raise ImportError(
-                "tetgen is required for soft body simulation. "
-                "Install with: pip install tetgen"
-            )
+        """Create a soft body using Newton's ``add_soft_grid``.
 
+        Instead of the fragile TetGen pipeline (alpha shape → tet mesh →
+        degenerate filter), we generate a **uniform regular tet grid**
+        covering the GS particle bounding box.  This matches Newton's
+        own examples and produces well-conditioned elements that VBD is
+        optimized for.
+
+        Configurable per-object material keys:
+            cell_size      : float — tet cell size (auto if omitted)
+            grid_resolution: int   — cells per longest axis (default 8,
+                                     only used when cell_size is omitted)
+            grid_padding   : float — padding around bbox (default 0.05)
+            density        : float — mass density   (default 1000)
+            k_mu           : float — shear modulus   (default 1e5)
+            k_lambda       : float — bulk modulus    (default 1e5)
+            k_damp         : float — damping coeff   (default 1e-3)
+        """
         builder = self._builder
         assert builder is not None
 
@@ -808,70 +1006,133 @@ class NewtonVBDBackend(PhysicsBackend):
         pos = self._init_positions[idx_t].float()
         pos_np = pos.detach().cpu().numpy()
 
-        # ── Surface mesh (alpha shape) ───────────────────────────────
-        alpha = material.get("alpha", self._alpha)
-        max_tri = int(material.get("max_triangles", self._max_triangles))
+        # ── Bounding box with padding ──────────────────────────────────
+        bbox_min = pos_np.min(axis=0)
+        bbox_max = pos_np.max(axis=0)
+        padding = float(material.get("grid_padding", 0.05))
+        bbox_min = bbox_min - padding
+        bbox_max = bbox_max + padding
+        extent = bbox_max - bbox_min
 
-        if _HAS_ALPHA_SHAPE:
-            try:
-                surf_v, surf_f = compute_alpha_shape(
-                    pos_np, alpha=alpha, max_triangles=max_tri,
-                )
-            except Exception as e:
-                print(f"[NewtonVBD] Alpha shape failed for '{name}': {e}")
-                surf_v, surf_f = compute_convex_hull(pos_np)
+        # ── Grid parameters ────────────────────────────────────────────
+        # cell_size: explicit value, or auto-compute from grid_resolution.
+        cell_size = material.get("cell_size", None)
+        if cell_size is not None:
+            cell_size = float(cell_size)
         else:
-            surf_v, surf_f = compute_convex_hull(pos_np)
+            grid_res = int(material.get("grid_resolution", 8))
+            cell_size = float(extent.max() / max(grid_res, 1))
 
-        # ── Tetrahedralize ───────────────────────────────────────────
-        max_vol = material.get("tet_max_volume", self._tet_max_volume)
-        quality = float(material.get("tet_quality", self._tet_quality))
+        dim_x = max(1, int(np.ceil(extent[0] / cell_size)))
+        dim_y = max(1, int(np.ceil(extent[1] / cell_size)))
+        dim_z = max(1, int(np.ceil(extent[2] / cell_size)))
 
-        tet_verts, tet_cells = tetrahedralize(
-            surf_v, surf_f,
-            max_volume=max_vol,
-            quality=quality,
-        )
+        # Recalculate per-axis cell sizes to exactly cover the bbox.
+        cell_x = extent[0] / dim_x
+        cell_y = extent[1] / dim_y
+        cell_z = extent[2] / dim_z
 
-        # ── Add to Newton builder ────────────────────────────────────
-        density = float(material.get("density", 500.0))
-        k_mu = float(material.get("k_mu", 1e4))
-        k_lambda = float(material.get("k_lambda", 1e4))
+        # ── Material parameters ────────────────────────────────────────
+        density = float(material.get("density", 1e3))
+        k_mu = float(material.get("k_mu", 1e5))
+        k_lambda = float(material.get("k_lambda", 1e5))
         k_damp = float(material.get("k_damp", 1e-3))
 
-        # Track vertex offset in global particle_q
+        # ── Add regular tet grid via Newton's API ──────────────────────
         vert_offset = self._particle_offset
 
-        builder.add_soft_mesh(
-            pos=wp.vec3(0.0, 0.0, 0.0),
+        builder.add_soft_grid(
+            pos=wp.vec3(
+                float(bbox_min[0]), float(bbox_min[1]), float(bbox_min[2])
+            ),
             rot=wp.quat_identity(),
-            scale=1.0,
             vel=wp.vec3(0.0, 0.0, 0.0),
-            vertices=tet_verts.tolist(),
-            indices=tet_cells.flatten().tolist(),
+            dim_x=dim_x,
+            dim_y=dim_y,
+            dim_z=dim_z,
+            cell_x=cell_x,
+            cell_y=cell_y,
+            cell_z=cell_z,
             density=density,
             k_mu=k_mu,
             k_lambda=k_lambda,
             k_damp=k_damp,
         )
 
-        self._particle_offset += tet_verts.shape[0]
+        vert_count = (dim_x + 1) * (dim_y + 1) * (dim_z + 1)
+        self._particle_offset += vert_count
 
-        # ── Embed GS particles in tet mesh ───────────────────────────
+        # ── Reconstruct grid vertices in numpy ─────────────────────────
+        # Exactly mirrors Newton's add_soft_grid vertex generation order
+        # (z-major, then y, then x) so indices match particle_q layout.
+        grid_verts = np.zeros((vert_count, 3), dtype=np.float64)
+        vi = 0
+        for z in range(dim_z + 1):
+            for y in range(dim_y + 1):
+                for x in range(dim_x + 1):
+                    grid_verts[vi] = [
+                        x * cell_x + bbox_min[0],
+                        y * cell_y + bbox_min[1],
+                        z * cell_z + bbox_min[2],
+                    ]
+                    vi += 1
+
+        # ── Reconstruct tet connectivity ───────────────────────────────
+        # Exactly mirrors Newton's 5-tet alternating decomposition.
+        def grid_index(x, y, z):
+            return (dim_x + 1) * (dim_y + 1) * z + (dim_x + 1) * y + x
+
+        tet_list = []
+        for z in range(dim_z):
+            for y in range(dim_y):
+                for x in range(dim_x):
+                    v0 = grid_index(x, y, z)
+                    v1 = grid_index(x + 1, y, z)
+                    v2 = grid_index(x + 1, y, z + 1)
+                    v3 = grid_index(x, y, z + 1)
+                    v4 = grid_index(x, y + 1, z)
+                    v5 = grid_index(x + 1, y + 1, z)
+                    v6 = grid_index(x + 1, y + 1, z + 1)
+                    v7 = grid_index(x, y + 1, z + 1)
+
+                    if (x & 1) ^ (y & 1) ^ (z & 1):
+                        tet_list.extend([
+                            [v0, v1, v4, v3],
+                            [v2, v3, v6, v1],
+                            [v5, v4, v1, v6],
+                            [v7, v6, v3, v4],
+                            [v4, v1, v6, v3],
+                        ])
+                    else:
+                        tet_list.extend([
+                            [v1, v2, v5, v0],
+                            [v3, v0, v7, v2],
+                            [v4, v7, v0, v5],
+                            [v6, v5, v2, v7],
+                            [v5, v2, v7, v0],
+                        ])
+
+        tet_cells = np.array(tet_list, dtype=np.int32)
+
+        # ── Embed GS particles in tet grid ─────────────────────────────
         print(
             f"[NewtonVBD] Embedding {len(particle_indices)} GS particles "
             f"in {tet_cells.shape[0]} tets..."
         )
-        tet_ids, bary = _compute_barycentric(pos_np, tet_verts, tet_cells)
+        tet_ids, bary, outside_count = _compute_barycentric(
+            pos_np, grid_verts, tet_cells
+        )
 
-        # Check embedding quality
-        outside = np.sum(bary.min(axis=1) < -0.01)
-        if outside > 0:
-            pct = 100.0 * outside / len(particle_indices)
+        if outside_count > 0:
+            pct = 100.0 * outside_count / len(particle_indices)
             print(
-                f"[NewtonVBD] WARNING: {outside}/{len(particle_indices)} "
-                f"({pct:.1f}%) particles outside tet mesh "
-                f"(using nearest-tet fallback)"
+                f"[NewtonVBD] WARNING: {outside_count}/{len(particle_indices)} "
+                f"({pct:.1f}%) GS particles outside grid → clamped"
+            )
+        else:
+            print(
+                f"[NewtonVBD] All {len(particle_indices)} particles "
+                f"inside grid"
             )
 
         cov6 = self._init_covariances[idx_t]
@@ -881,13 +1142,16 @@ class NewtonVBDBackend(PhysicsBackend):
             tet_ids=tet_ids,
             bary_coords=bary,
             vert_offset=vert_offset,
-            vert_count=tet_verts.shape[0],
+            vert_count=vert_count,
             tet_cells=tet_cells,
-            rest_verts=tet_verts.copy(),
+            rest_verts=grid_verts.copy(),
             init_cov_6=cov6,
         ))
         print(
             f"[NewtonVBD] Soft '{name}': {len(particle_indices)} GS particles, "
-            f"{tet_verts.shape[0]} tet verts, {tet_cells.shape[0]} tets, "
-            f"density={density}, k_mu={k_mu:.0e}, k_lambda={k_lambda:.0e}"
+            f"grid {dim_x}x{dim_y}x{dim_z} = {vert_count} verts, "
+            f"{tet_cells.shape[0]} tets, "
+            f"cell=[{cell_x:.4f},{cell_y:.4f},{cell_z:.4f}], "
+            f"density={density}, k_mu={k_mu:.0e}, k_lambda={k_lambda:.0e}, "
+            f"k_damp={k_damp:.0e}"
         )
