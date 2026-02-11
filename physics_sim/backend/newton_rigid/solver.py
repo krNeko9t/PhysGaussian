@@ -164,6 +164,9 @@ class NewtonRigidBackend(PhysicsBackend):
         self._collision_geo = kwargs.get("collision_geometry", "alpha_shape")
         # Alpha parameter: None = auto-estimate from bounding box
         self._alpha = kwargs.get("alpha", None)
+        # Max triangles for the collision mesh (decimation target).
+        # Game engines use 100-500; default 300 is a good balance.
+        self._max_triangles = int(kwargs.get("max_triangles", 300))
         if self._collision_geo == "alpha_shape" and not _HAS_ALPHA_SHAPE:
             print(
                 "[NewtonRigid] WARNING: Open3D not available, "
@@ -180,7 +183,8 @@ class NewtonRigidBackend(PhysicsBackend):
         self._builder.default_shape_cfg.contact_margin = contact_margin
         print(
             f"[NewtonRigid] collision_geometry={self._collision_geo}, "
-            f"alpha={self._alpha}, contact_margin={contact_margin}"
+            f"alpha={self._alpha}, max_triangles={self._max_triangles}, "
+            f"contact_margin={contact_margin}"
         )
 
     def set_material(self, material_params: dict) -> None:
@@ -484,7 +488,9 @@ class NewtonRigidBackend(PhysicsBackend):
         if self._collision_geo == "alpha_shape":
             try:
                 mesh_verts, mesh_faces = compute_alpha_shape(
-                    pos_np, alpha=self._alpha
+                    pos_np,
+                    alpha=self._alpha,
+                    max_triangles=self._max_triangles,
                 )
             except Exception as e:
                 print(

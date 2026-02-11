@@ -7,7 +7,7 @@
 
     "substep_dt": 1e-5,
     "frame_dt": 1e-2,
-    "frame_num": 50,
+    "frame_num": 100,
 
     "E": 1e5,
     "nu": 0.3,
@@ -47,7 +47,7 @@
     ],
 
     "newton_rigid": {
-        "substep_dt": 1e-4,
+        "substep_dt": 2e-3,
         "collision_geometry": "alpha_shape",
         "solver": {
             "iterations": 10,

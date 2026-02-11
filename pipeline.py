@@ -580,12 +580,9 @@ def main():
     # Newton rigid: pass collision geometry settings from backend overrides
     if args.backend == "newton_rigid" and args.backend in backend_overrides:
         rigid_opts = backend_overrides[args.backend]
-        if "collision_geometry" in rigid_opts:
-            init_kwargs["collision_geometry"] = rigid_opts["collision_geometry"]
-        if "alpha" in rigid_opts:
-            init_kwargs["alpha"] = rigid_opts["alpha"]
-        if "contact_margin" in rigid_opts:
-            init_kwargs["contact_margin"] = rigid_opts["contact_margin"]
+        for k in ("collision_geometry", "alpha", "max_triangles", "contact_margin"):
+            if k in rigid_opts:
+                init_kwargs[k] = rigid_opts[k]
 
     backend.initialize(
         mpm_init_pos, mpm_init_vol, mpm_init_cov, **init_kwargs
