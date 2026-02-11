@@ -30,7 +30,9 @@
 
     "newton_rigid": {
         "substep_dt": 2e-3,
-        "collision_geometry": "obb",
+        "collision_geometry": "convex_hull",
+        "use_sdf": true,
+        "sdf_resolution": 64,
         "solver": {
             "iterations": 10,
             "contact_relaxation": 0.8

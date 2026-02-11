@@ -207,6 +207,15 @@ class NewtonRigidBackend(PhysicsBackend):
         # Alpha shape specific: alpha parameter and max triangle count
         self._alpha = kwargs.get("alpha", None)
         self._max_triangles = int(kwargs.get("max_triangles", 300))
+        # SDF collision: Newton auto-generates an SDF from the mesh and
+        # uses distance-field queries instead of triangle intersection.
+        # This makes mesh quality (non-manifold, non-watertight) far less
+        # critical and is the approach used in Newton's own example_sdf.
+        self._use_sdf = bool(kwargs.get("use_sdf", False))
+        self._sdf_resolution = int(kwargs.get("sdf_resolution", 64))
+        self._sdf_narrow_band = kwargs.get(
+            "sdf_narrow_band", (-0.01, 0.01)
+        )
         if self._collision_geo == "alpha_shape" and not _HAS_ALPHA_SHAPE:
             print(
                 "[NewtonRigid] WARNING: Open3D not available, "
@@ -221,10 +230,13 @@ class NewtonRigidBackend(PhysicsBackend):
         # sudden explosive correction forces (Newton example_sdf uses 0.01).
         contact_margin = kwargs.get("contact_margin", 0.01)
         self._builder.default_shape_cfg.contact_margin = contact_margin
+        sdf_str = (
+            f", use_sdf=True (res={self._sdf_resolution})"
+            if self._use_sdf else ""
+        )
         print(
-            f"[NewtonRigid] collision_geometry={self._collision_geo}, "
-            f"alpha={self._alpha}, max_triangles={self._max_triangles}, "
-            f"contact_margin={contact_margin}"
+            f"[NewtonRigid] collision_geometry={self._collision_geo}"
+            f"{sdf_str}, contact_margin={contact_margin}"
         )
 
     def set_material(self, material_params: dict) -> None:
@@ -266,6 +278,12 @@ class NewtonRigidBackend(PhysicsBackend):
             base_cfg.ke = float(material_params["ke"])
         if "kd" in material_params:
             base_cfg.kd = float(material_params["kd"])
+        # SDF collision parameters — Newton generates an SDF from the mesh
+        # internally and uses it for robust distance-field collision.
+        if self._use_sdf:
+            base_cfg.sdf_max_resolution = self._sdf_resolution
+            base_cfg.sdf_narrow_band_range = tuple(self._sdf_narrow_band)
+            base_cfg.contact_margin = 0.01
 
         # ── Create bodies ───────────────────────────────────────────
         per_object = material_params.get("per_object")
