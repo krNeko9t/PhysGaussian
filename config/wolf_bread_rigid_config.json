@@ -22,7 +22,7 @@
         {
             "name": "wolf",
             "ply_path": "model/wolf_whitebg-trained/point_cloud/iteration_30000/point_cloud.ply",
-            "density": 2000,
+            "density": 500,
             "mu": 0.6
         },
         {
@@ -47,9 +47,9 @@
     ],
 
     "newton_rigid": {
-        "substep_dt": 2e-3,
+        "substep_dt": 1e-3,
         "collision_geometry": "convex_hull",
-        "use_sdf": true,
+        "use_sdf": false,
         "sdf_resolution": 64,
         "solver": {
             "iterations": 10,
