@@ -67,6 +67,7 @@ from physics_sim.preprocessing.particle_filling import (
 from physics_sim.backend.warp_mpm import WarpMPMBackend
 from physics_sim.backend.newton_mpm import NewtonMPMBackend
 from physics_sim.backend.newton_rigid import NewtonRigidBackend
+from physics_sim.backend.newton_vbd import NewtonVBDBackend
 from physics_sim.renderer.gs_renderer import GaussianRenderer
 
 
@@ -85,7 +86,7 @@ def main():
     parser.add_argument("--sh_degree", type=int, default=3,
                         help="SH degree of the PLY model (default: 3)")
     parser.add_argument("--backend", type=str, default="warp_mpm",
-                        choices=["warp_mpm", "newton_mpm", "newton_rigid"],
+                        choices=["warp_mpm", "newton_mpm", "newton_rigid", "newton_vbd"],
                         help="Physics backend to use (default: warp_mpm)")
     parser.add_argument("--debug", action="store_true",
                         help="Print intermediate tensor statistics for debugging")
@@ -133,7 +134,7 @@ def main():
 
     # ── 0. Initialise runtime ────────────────────────────────────────
     wp.init()
-    if args.backend in ("newton_mpm", "newton_rigid"):
+    if args.backend in ("newton_mpm", "newton_rigid", "newton_vbd"):
         wp.config.verify_cuda = False  # Newton uses CUDA graph capture internally
     else:
         wp.config.verify_cuda = True
@@ -568,6 +569,9 @@ def main():
     elif args.backend == "newton_rigid":
         print("Initialising physics backend (Newton-Rigid)...")
         backend = NewtonRigidBackend(device=device)
+    elif args.backend == "newton_vbd":
+        print("Initialising physics backend (Newton-VBD)...")
+        backend = NewtonVBDBackend(device=device)
     else:
         print("Initialising physics backend (Warp-MPM)...")
         backend = WarpMPMBackend(device=device)
@@ -585,6 +589,14 @@ def main():
                   "sdf_narrow_band"):
             if k in rigid_opts:
                 init_kwargs[k] = rigid_opts[k]
+
+    # Newton VBD: pass collision + tet mesh settings from backend overrides
+    if args.backend == "newton_vbd" and args.backend in backend_overrides:
+        vbd_opts = backend_overrides[args.backend]
+        for k in ("collision_geometry", "alpha", "max_triangles",
+                  "contact_margin", "tet_max_volume", "tet_quality"):
+            if k in vbd_opts:
+                init_kwargs[k] = vbd_opts[k]
 
     backend.initialize(
         mpm_init_pos, mpm_init_vol, mpm_init_cov, **init_kwargs

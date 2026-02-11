@@ -8,7 +8,7 @@ Reads a JSON config and returns structured parameter dictionaries.
 import json
 
 # Backend names that can appear as top-level override sections in the config.
-_KNOWN_BACKENDS = ("warp_mpm", "newton_mpm", "newton_rigid")
+_KNOWN_BACKENDS = ("warp_mpm", "newton_mpm", "newton_rigid", "newton_vbd")
 
 # Material keys that can be overridden per-object.
 _MATERIAL_KEYS = (
@@ -19,6 +19,9 @@ _MATERIAL_KEYS = (
     "ke", "kd", "mu", "friction",
     # Per-object collision geometry override (Newton rigid)
     "collision_geometry",
+    # VBD soft/rigid physics type and FEM parameters
+    "physics", "k_mu", "k_lambda", "k_damp",
+    "alpha", "max_triangles", "tet_max_volume", "tet_quality",
 )
 
 

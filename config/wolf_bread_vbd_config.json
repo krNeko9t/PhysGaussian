@@ -1,0 +1,75 @@
+{
+    "_comment": "VBD test: wolf (rigid) + bread (soft body) interaction.",
+
+    "opacity_threshold": 0.1,
+    "rotation_degree": [0.0],
+    "rotation_axis": [0],
+
+    "substep_dt": 1e-5,
+    "frame_dt": 1e-2,
+    "frame_num": 100,
+
+    "E": 1e5,
+    "nu": 0.3,
+    "material": "sand",
+    "density": 500,
+    "g": [0.0, 0.0, -9.8],
+    "n_grid": 200,
+
+    "mu": 0.5,
+
+    "objects": [
+        {
+            "name": "wolf",
+            "ply_path": "model/wolf_whitebg-trained/point_cloud/iteration_30000/point_cloud.ply",
+            "physics": "rigid",
+            "collision_geometry": "convex_hull",
+            "density": 500,
+            "mu": 0.5
+        },
+        {
+            "name": "bread",
+            "ply_path": "model/bread-trained/point_cloud/iteration_30000/point_cloud.ply",
+            "physics": "soft",
+            "position_offset": [0.0, 0.0, 0.5],
+            "density": 300,
+            "k_mu": 5e3,
+            "k_lambda": 5e3,
+            "k_damp": 1e-2,
+            "tet_max_volume": 0.01
+        }
+    ],
+
+    "boundary_conditions": [
+        {
+            "type": "surface_collider",
+            "point": [1, 1, 0.20],
+            "normal": [0.0, 0.0, 1.0],
+            "surface": "sticky",
+            "friction": 0.6,
+            "start_time": 0,
+            "end_time": 1e3
+        }
+    ],
+
+    "newton_vbd": {
+        "substep_dt": 1.67e-3,
+        "collision_geometry": "convex_hull",
+        "contact_margin": 0.01,
+        "solver": {
+            "iterations": 10
+        }
+    },
+
+    "mpm_space_vertical_upward_axis": [0, 0, 1],
+    "mpm_space_viewpoint_center": [1, 1, 0.8],
+    "default_camera_index": -1,
+    "show_hint": false,
+    "init_azimuthm": 90,
+    "init_elevation": 20,
+    "init_radius": 3.0,
+    "move_camera": true,
+    "delta_a": -1.0,
+    "delta_e": 0.0,
+    "delta_r": 0.0
+}
