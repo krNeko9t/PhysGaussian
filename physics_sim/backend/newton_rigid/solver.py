@@ -720,10 +720,12 @@ class NewtonRigidBackend(PhysicsBackend):
 
     @staticmethod
     def _bbox_mesh(positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Fallback: axis-aligned bounding box as 12-triangle mesh."""
+        """Fallback: axis-aligned bounding box as 12-triangle mesh.
+
+        Face winding is verified to produce outward-facing normals.
+        """
         lo = positions.min(axis=0)
         hi = positions.max(axis=0)
-        # Slight expansion to avoid degenerate box
         extent = hi - lo
         extent = np.maximum(extent, 1e-3)
         lo = lo - 0.01 * extent
@@ -731,26 +733,36 @@ class NewtonRigidBackend(PhysicsBackend):
 
         verts = np.array(
             [
-                [lo[0], lo[1], lo[2]],
-                [hi[0], lo[1], lo[2]],
-                [hi[0], hi[1], lo[2]],
-                [lo[0], hi[1], lo[2]],
-                [lo[0], lo[1], hi[2]],
-                [hi[0], lo[1], hi[2]],
-                [hi[0], hi[1], hi[2]],
-                [lo[0], hi[1], hi[2]],
+                [lo[0], lo[1], lo[2]],  # 0
+                [hi[0], lo[1], lo[2]],  # 1
+                [hi[0], hi[1], lo[2]],  # 2
+                [lo[0], hi[1], lo[2]],  # 3
+                [lo[0], lo[1], hi[2]],  # 4
+                [hi[0], lo[1], hi[2]],  # 5
+                [hi[0], hi[1], hi[2]],  # 6
+                [lo[0], hi[1], hi[2]],  # 7
             ],
             dtype=np.float32,
         )
+        # Faces with outward normals verified against box centroid
         faces = np.array(
             [
-                [0, 2, 1], [0, 3, 2],  # bottom
-                [4, 5, 6], [4, 6, 7],  # top
-                [0, 1, 5], [0, 5, 4],  # front
-                [2, 3, 7], [2, 7, 6],  # back
-                [0, 4, 7], [0, 7, 3],  # left
-                [1, 2, 6], [1, 6, 5],  # right
+                [0, 2, 1], [0, 3, 2],  # -z face (normal pointing down)
+                [4, 5, 6], [4, 6, 7],  # +z face (normal pointing up)
+                [0, 1, 5], [0, 5, 4],  # -y face
+                [2, 3, 7], [2, 7, 6],  # +y face
+                [0, 4, 7], [0, 7, 3],  # -x face
+                [1, 2, 6], [1, 6, 5],  # +x face
             ],
             dtype=np.int32,
         )
+        # Verify and fix winding: face normal must point away from centroid
+        center = (lo + hi) / 2.0
+        for i in range(faces.shape[0]):
+            v0, v1, v2 = verts[faces[i]]
+            face_normal = np.cross(v1 - v0, v2 - v0)
+            face_center = (v0 + v1 + v2) / 3.0
+            if np.dot(face_normal, face_center - center) < 0:
+                faces[i, 1], faces[i, 2] = faces[i, 2], faces[i, 1]
+
         return verts, faces

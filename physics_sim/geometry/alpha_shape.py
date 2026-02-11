@@ -107,7 +107,10 @@ def compute_alpha_shape(
         mesh.remove_duplicated_vertices()
         mesh.remove_unreferenced_vertices()
 
-    # ── Ensure consistent normals ───────────────────────────────────
+    # ── Ensure consistent outward-facing normals ────────────────────
+    # orient_triangles() makes face winding consistent across the mesh.
+    # Without this, Newton gets mixed inward/outward normals → explosion.
+    mesh.orient_triangles()
     mesh.compute_vertex_normals()
 
     verts = np.asarray(mesh.vertices)
