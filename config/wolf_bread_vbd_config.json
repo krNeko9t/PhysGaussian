@@ -18,6 +18,19 @@
 
     "mu": 0.5,
 
+    "particle_filling": {
+        "n_grid": 128,
+        "density_threshold": 20.0,
+        "search_threshold": 0.2,
+        "search_exclude_direction": -1,
+        "ray_cast_direction": 4,
+        "max_particles_num": 500000,
+        "max_partciels_per_cell": 4,
+        "boundary": [0.2, 1.8, 0.2, 1.8, 0.2, 1.8],
+        "smooth": true,
+        "visualize": false
+    },
+
     "objects": [
         {
             "name": "wolf",
@@ -33,10 +46,21 @@
             "physics": "soft",
             "position_offset": [0.0, 0.0, 1.0],
             "density": 300,
-            "k_mu": 5e3,
-            "k_lambda": 5e3,
-            "k_damp": 1e-2,
-            "tet_max_volume": 0.01
+            "k_mu": 1e5,
+            "k_lambda": 1e5,
+            "k_damp": 1e-3,
+            "particle_filling": {
+                "n_grid": 128,
+                "density_threshold": 20.0,
+                "search_threshold": 0.2,
+                "search_exclude_direction": -1,
+                "ray_cast_direction": 4,
+                "max_particles_num": 500000,
+                "max_partciels_per_cell": 16,
+                "boundary": [0.2, 1.8, 0.2, 1.8, 0.2, 1.8],
+                "smooth": true,
+                "visualize": false
+            }
         }
     ],
 
@@ -53,14 +77,15 @@
     ],
 
     "newton_vbd": {
-        "substep_dt": 1.67e-3,
+        "substep_dt": 2e-3,
         "collision_geometry": "convex_hull",
         "contact_margin": 0.01,
+        "soft_contact_ke": 1e2,
         "debug_soft_no_deformation": true,
         "sv_clamp_min": 0.1,
         "sv_clamp_max": 5.0,
         "solver": {
-            "iterations": 10
+            "iterations": 30
         }
     },
 
