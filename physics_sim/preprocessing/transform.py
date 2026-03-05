@@ -36,6 +36,42 @@ def shift2center111(position_tensor):
     return position_tensor + tensor111
 
 
+def transform_with_reference(position_tensor, scale, original_mean_pos):
+    """Apply a precomputed transform2origin() mapping.
+
+    This is equivalent to the output of transform2origin(position_tensor),
+    but uses a *fixed* (scale, original_mean_pos) computed from a reference
+    point cloud.
+    """
+    return (position_tensor - original_mean_pos) * scale
+
+
+def world_to_mpm_positions(
+    world_positions: torch.Tensor,
+    rotation_matrices,
+    scale_origin: torch.Tensor,
+    original_mean_pos: torch.Tensor,
+):
+    """World-space positions → MPM domain positions.
+
+    Applies: rotation(s) → translate/scale (reference) → shift to [0,2]^3.
+    """
+    rotated = apply_rotations(world_positions, rotation_matrices)
+    transformed = transform_with_reference(rotated, scale_origin, original_mean_pos)
+    return shift2center111(transformed)
+
+
+def world_to_mpm_directions(
+    world_dirs: torch.Tensor,
+    rotation_matrices,
+):
+    """World-space direction vectors (e.g. normals) → MPM-space directions.
+
+    Only rotations are applied. The caller is responsible for normalization.
+    """
+    return apply_rotations(world_dirs, rotation_matrices)
+
+
 def generate_rotation_matrix(degree, axis):
     cos_theta = torch.cos(degree / 180.0 * 3.1415926)
     sin_theta = torch.sin(degree / 180.0 * 3.1415926)
@@ -149,6 +185,18 @@ def undo_all_transforms(input, rotation_matrices, scale_origin, original_mean_po
             undoshift2center111(input), scale_origin, original_mean_pos
         ),
         rotation_matrices,
+    )
+
+
+def mpm_to_world_positions(
+    mpm_positions: torch.Tensor,
+    rotation_matrices,
+    scale_origin: torch.Tensor,
+    original_mean_pos: torch.Tensor,
+):
+    """MPM domain positions → world-space positions."""
+    return undo_all_transforms(
+        mpm_positions, rotation_matrices, scale_origin, original_mean_pos
     )
 
 

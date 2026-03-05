@@ -1,0 +1,92 @@
+{
+  "_comment": "bench_manual demo: toy simulated as rigid body, wall/floor render-only, world-space plane colliders, procedural orbit camera.",
+
+  "opacity_threshold": 0.02,
+  "axis_permutation": "xz-y",
+  "rotation_degree": [0.0],
+  "rotation_axis": [0],
+
+  "transform_reference": "shared_ply",
+
+  "substep_dt": 1e-4,
+  "frame_dt": 1e-2,
+  "frame_num": 120,
+
+  "material": "sand",
+  "density": 800,
+  "g": [0.0, 0.0, -9.8],
+  "mu": 0.5,
+  "n_grid": 200,
+
+  "objects": [
+    {
+      "name": "toy",
+      "mode": "simulate",
+      "ply_path": "bench_manual/toy.ply",
+      "density": 800,
+      "mu": 0.4
+    },
+    {
+      "name": "floor",
+      "mode": "render_only",
+      "ply_path": "bench_manual/floor.ply"
+    },
+    {
+      "name": "wall",
+      "mode": "render_only",
+      "ply_path": "bench_manual/wall.ply"
+    }
+  ],
+
+  "boundary_conditions": [
+    {
+      "type": "surface_collider",
+      "space": "world",
+      "point": [0.0, 0.0, -0.43450654],
+      "normal": [0.0, 0.0, 1.0],
+      "surface": "sticky",
+      "friction": 0.6,
+      "start_time": 0,
+      "end_time": 1e3
+    },
+    {
+      "type": "surface_collider",
+      "space": "world",
+      "point": [0.0, -0.63632774, 0.0],
+      "normal": [0.0, 1.0, 0.0],
+      "surface": "slip",
+      "friction": 0.2,
+      "start_time": 0,
+      "end_time": 1e3
+    }
+  ],
+
+  "newton_rigid": {
+    "substep_dt": 1e-3,
+    "collision_geometry": "obb",
+    "use_sdf": false,
+    "solver": {
+      "iterations": 10,
+      "contact_relaxation": 0.8
+    }
+  },
+
+  "mpm_space_vertical_upward_axis": [0, 0, 1],
+
+  "default_camera_index": -1,
+  "show_hint": false,
+
+  "width": 800,
+  "height": 600,
+  "fovx_deg": 60.0,
+  "fovy_deg": 45.0,
+
+  "init_azimuthm": 160.0,
+  "init_elevation": 20.0,
+  "init_radius": 2.8,
+  "move_camera": true,
+  "delta_a": -0.6,
+  "delta_e": 0.0,
+  "delta_r": 0.0
+}
+

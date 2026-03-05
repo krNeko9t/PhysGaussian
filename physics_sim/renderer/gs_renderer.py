@@ -21,10 +21,6 @@ import numpy as np
 import torch
 from plyfile import PlyData
 
-from diff_gaussian_rasterization import (
-    GaussianRasterizationSettings,
-    GaussianRasterizer,
-)
 
 
 # ── SH constants (from PlenOctree) ───────────────────────────────────────
@@ -126,6 +122,11 @@ def build_covariance(scaling: torch.Tensor, rotation_quat: torch.Tensor,
 
 def focal2fov(focal, pixels):
     return 2 * math.atan(pixels / (2 * focal))
+
+
+def fov2focal(fov, pixels):
+    """Inverse of focal2fov. fov in radians."""
+    return pixels / (2.0 * math.tan(fov * 0.5))
 
 
 def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
@@ -364,7 +365,17 @@ class GaussianRenderer:
         camera: "SimpleCamera",
         bg_color: Optional[torch.Tensor] = None,
         scaling_modifier: float = 1.0,
-    ) -> GaussianRasterizer:
+    ):
+        try:
+            from diff_gaussian_rasterization import (
+                GaussianRasterizationSettings,
+                GaussianRasterizer,
+            )
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "diff_gaussian_rasterization is required for rendering. "
+                "Install it or run pipeline.py with --no_render."
+            ) from e
         if bg_color is None:
             bg_color = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
         tanfovx = math.tan(camera.FoVx * 0.5)
@@ -453,3 +464,152 @@ class GaussianRenderer:
         fovy = focal2fov(raw_camera["fy"], height)
 
         return SimpleCamera(R=R, T=T, FoVx=fovx, FoVy=fovy, width=width, height=height)
+
+    # ── Procedural cameras (no cameras.json required) ─────────────────────
+
+    def build_camera_orbit(
+        self,
+        *,
+        camera_params: dict,
+        center_view_world_space: np.ndarray,
+        observant_coordinates: np.ndarray,
+        current_frame: int = 0,
+    ) -> "SimpleCamera":
+        """Build a camera by orbiting around a view center.
+
+        Requires intrinsics in camera_params:
+          - width, height
+          - either (fx, fy) or (fovx_deg/fovy_deg)
+        And orbit parameters:
+          - init_azimuthm, init_elevation, init_radius
+          - optional delta_a/delta_e/delta_r when move_camera=true
+        """
+        width = camera_params.get("width")
+        height = camera_params.get("height")
+        if width is None or height is None:
+            raise ValueError("Procedural camera requires camera_params.width/height")
+
+        fx = camera_params.get("fx")
+        fy = camera_params.get("fy")
+        if fx is None or fy is None:
+            fovx_deg = camera_params.get("fovx_deg")
+            fovy_deg = camera_params.get("fovy_deg")
+            if fovx_deg is None and fovy_deg is None:
+                raise ValueError(
+                    "Procedural camera requires either fx/fy or fovx_deg/fovy_deg"
+                )
+            if fovx_deg is None:
+                fovy = float(fovy_deg) / 180.0 * math.pi
+                fy = fov2focal(fovy, float(height))
+                fx = fy
+            elif fovy_deg is None:
+                fovx = float(fovx_deg) / 180.0 * math.pi
+                fx = fov2focal(fovx, float(width))
+                fy = fx
+            else:
+                fovx = float(fovx_deg) / 180.0 * math.pi
+                fovy = float(fovy_deg) / 180.0 * math.pi
+                fx = fov2focal(fovx, float(width))
+                fy = fov2focal(fovy, float(height))
+
+        init_a = camera_params.get("init_azimuthm")
+        init_e = camera_params.get("init_elevation")
+        init_r = camera_params.get("init_radius")
+        if init_a is None or init_e is None or init_r is None:
+            raise ValueError(
+                "Procedural orbit camera requires init_azimuthm/init_elevation/init_radius"
+            )
+
+        if camera_params.get("move_camera", False):
+            da = camera_params.get("delta_a", 0) or 0
+            de = camera_params.get("delta_e", 0) or 0
+            dr = camera_params.get("delta_r", 0) or 0
+            az = init_a + current_frame * da
+            el = init_e + current_frame * de
+            rad = init_r + current_frame * dr
+        else:
+            az, el, rad = init_a, init_e, init_r
+
+        position, rot = get_camera_position_and_rotation(
+            az, el, rad, center_view_world_space, observant_coordinates
+        )
+
+        # Match build_camera_from_json math: treat (rot, position) as raw pose.
+        tmp = np.zeros((4, 4))
+        tmp[:3, :3] = rot
+        tmp[:3, 3] = position
+        tmp[3, 3] = 1
+        C2W = np.linalg.inv(tmp)
+        R = C2W[:3, :3].transpose()
+        T = C2W[:3, 3]
+
+        fovx = focal2fov(float(fx), float(width))
+        fovy = focal2fov(float(fy), float(height))
+        return SimpleCamera(
+            R=R, T=T, FoVx=fovx, FoVy=fovy, width=int(width), height=int(height)
+        )
+
+    def build_camera_fixed(
+        self,
+        *,
+        camera_params: dict,
+    ) -> "SimpleCamera":
+        """Build a camera from fixed extrinsics (no cameras.json).
+
+        Expects:
+          - width, height
+          - either (fx, fy) or (fovx_deg/fovy_deg)
+          - fixed_position: [x,y,z]
+          - fixed_rotation: 3x3 matrix
+        """
+        width = camera_params.get("width")
+        height = camera_params.get("height")
+        if width is None or height is None:
+            raise ValueError("Fixed procedural camera requires camera_params.width/height")
+
+        fx = camera_params.get("fx")
+        fy = camera_params.get("fy")
+        if fx is None or fy is None:
+            fovx_deg = camera_params.get("fovx_deg")
+            fovy_deg = camera_params.get("fovy_deg")
+            if fovx_deg is None and fovy_deg is None:
+                raise ValueError(
+                    "Fixed procedural camera requires either fx/fy or fovx_deg/fovy_deg"
+                )
+            if fovx_deg is None:
+                fovy = float(fovy_deg) / 180.0 * math.pi
+                fy = fov2focal(fovy, float(height))
+                fx = fy
+            elif fovy_deg is None:
+                fovx = float(fovx_deg) / 180.0 * math.pi
+                fx = fov2focal(fovx, float(width))
+                fy = fx
+            else:
+                fovx = float(fovx_deg) / 180.0 * math.pi
+                fovy = float(fovy_deg) / 180.0 * math.pi
+                fx = fov2focal(fovx, float(width))
+                fy = fov2focal(fovy, float(height))
+
+        pos = camera_params.get("fixed_position")
+        rot = camera_params.get("fixed_rotation")
+        if pos is None or rot is None:
+            raise ValueError("Fixed procedural camera requires fixed_position/fixed_rotation")
+
+        position = np.array(pos, dtype=np.float32)
+        rotation = np.array(rot, dtype=np.float32)
+        if rotation.shape != (3, 3):
+            raise ValueError(f"fixed_rotation must be 3x3, got shape {rotation.shape}")
+
+        tmp = np.zeros((4, 4), dtype=np.float32)
+        tmp[:3, :3] = rotation
+        tmp[:3, 3] = position
+        tmp[3, 3] = 1.0
+        C2W = np.linalg.inv(tmp)
+        R = C2W[:3, :3].transpose()
+        T = C2W[:3, 3]
+
+        fovx = focal2fov(float(fx), float(width))
+        fovy = focal2fov(float(fy), float(height))
+        return SimpleCamera(
+            R=R, T=T, FoVx=fovx, FoVy=fovy, width=int(width), height=int(height)
+        )

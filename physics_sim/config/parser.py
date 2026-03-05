@@ -116,6 +116,16 @@ def decode_param_json(json_file: str):
         "rotation_axis": sim_params.get("rotation_axis", []),
         "sim_area": sim_params.get("sim_area", None),
         "scale": sim_params.get("scale", 1.0),
+        # Reference used to compute the world→MPM transform for multi-object scenes.
+        #
+        # Backward compatible defaults:
+        # - None / "simulated"  → use simulated particles (legacy behavior)
+        # - "shared_ply"        → use the shared --ply_path point cloud bbox
+        # - {"ply_path": "..."} → use an explicit reference PLY
+        "transform_reference": sim_params.get("transform_reference", None),
+        # Axis permutation applied to all loaded PLY files before any other transform.
+        # Format: 3-char string specifying new axis order, e.g. "xyz" (default), "yxz", "zxy".
+        "axis_permutation": sim_params.get("axis_permutation", "xyz"),
     }
 
     if "particle_filling" in sim_params:
@@ -147,6 +157,19 @@ def decode_param_json(json_file: str):
         "delta_e": sim_params.get("delta_e", None),
         "delta_r": sim_params.get("delta_r", None),
         "move_camera": sim_params.get("move_camera", False),
+        # Optional intrinsics for procedural cameras (when cameras.json is absent).
+        "width": sim_params.get("width", None),
+        "height": sim_params.get("height", None),
+        "fx": sim_params.get("fx", None),
+        "fy": sim_params.get("fy", None),
+        "fovx_deg": sim_params.get("fovx_deg", None),
+        "fovy_deg": sim_params.get("fovy_deg", None),
+        # Optional extrinsics for a fixed procedural camera.
+        # Format matches cameras.json entries:
+        # - fixed_position: [x,y,z]
+        # - fixed_rotation: 3x3 matrix (list of 3 lists)
+        "fixed_position": sim_params.get("fixed_position", None),
+        "fixed_rotation": sim_params.get("fixed_rotation", None),
     }
 
     # ── Backend-specific overrides ───────────────────────────────────
@@ -186,6 +209,11 @@ def decode_param_json(json_file: str):
                     obj_material[key] = material_params[key]
             scene_objects.append({
                 "name": obj_def.get("name", f"object_{i}"),
+                # Object mode:
+                # - "simulate"    → enters physics backend
+                # - "render_only" → only used for rendering composition
+                # - "collider_only" → reserved for future static colliders
+                "mode": obj_def.get("mode", "simulate"),
                 "sim_area": obj_def.get("sim_area", None),
                 "material": obj_material,
                 "particle_filling": obj_def.get("particle_filling", None),
