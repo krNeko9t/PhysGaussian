@@ -104,6 +104,7 @@ class NewtonMPMBackend(PhysicsBackend):
 
     def __init__(self, device: str = "cuda:0"):
         self._device = device
+        self._builder: newton.ModelBuilder | None = None
         self._model: newton.Model | None = None
         self._solver: SolverImplicitMPM | None = None
         self._state_0: newton.State | None = None
@@ -116,6 +117,7 @@ class NewtonMPMBackend(PhysicsBackend):
         self._out_R: wp.array | None = None       # (N,) mat33
 
         self._n_particles: int = 0
+        self._grid_lim: float = 2.0
         self._time: float = 0.0
         self._substep_dt: float = 0.0  # last substep dt, for deferred frame update
         self._frames_dirty: bool = False  # whether particle frames need updating
@@ -125,6 +127,10 @@ class NewtonMPMBackend(PhysicsBackend):
         # and are applied in set_material().
         self._solver_opts = SolverImplicitMPM.Options()
         self._material_params: dict = {}
+        self._cov_np: np.ndarray | None = None
+        self._volumes: np.ndarray | None = None
+        self._bc_params: list = []
+        self._time_params: dict = {}
 
     # ------------------------------------------------------------------
     # PhysicsBackend interface
@@ -151,12 +157,13 @@ class NewtonMPMBackend(PhysicsBackend):
         """
         self._n_particles = positions.shape[0]
         n = self._n_particles
+        self._grid_lim = float(grid_lim)
 
         # ── Compute voxel_size from grid params ──────────────────────
         voxel_size = grid_lim / n_grid
         self._solver_opts.voxel_size = voxel_size
 
-        # ── Build Newton Model ───────────────────────────────────────
+        # ── Build Newton ModelBuilder (finalized in finalize()) ──────
         builder = newton.ModelBuilder()
         SolverImplicitMPM.register_custom_attributes(builder)
 
@@ -194,15 +201,11 @@ class NewtonMPMBackend(PhysicsBackend):
             flags=flags_list,
         )
 
-        self._model = builder.finalize(device=self._device)
-
-        # ── Store initial covariance for later cov tracking ──────────
-        cov_np = covariances.detach().cpu().numpy().astype(np.float32).reshape(-1)
-        self._init_cov = wp.from_numpy(cov_np, dtype=float, device=self._device)
-        self._out_cov = wp.zeros(n * 6, dtype=float, device=self._device)
-        self._out_R = wp.zeros(n, dtype=wp.mat33, device=self._device)
-
-        # Save volume for mass recomputation in set_material
+        # Store builder + arrays; finalize() will create model + solver.
+        self._builder = builder
+        self._cov_np = (
+            covariances.detach().cpu().numpy().astype(np.float32).reshape(-1)
+        )
         self._volumes = vol_np
 
     def set_material(self, material_params: dict) -> None:
@@ -212,9 +215,47 @@ class NewtonMPMBackend(PhysicsBackend):
             material, E, nu, density, friction_angle, yield_stress,
             hardening, g, rpic_damping, grid_v_damping_scale, etc.
         """
+        # Store material params; applied to the finalized model in finalize().
         self._material_params = material_params
+
+        # ── Solver options from material params ──────────────────────
+        # Transfer scheme: map rpic_damping → "pic" / "apic"
+        rpic = material_params.get("rpic_damping", 0.0)
+        if rpic < 0:
+            self._solver_opts.transfer_scheme = "pic"
+        else:
+            self._solver_opts.transfer_scheme = "apic"
+
+        # Apply solver option overrides from config ("newton_mpm" → "solver").
+        # Any key that exists as an attribute on SolverImplicitMPM.Options
+        # can be overridden here.  Unrecognised keys are warned about.
+        newton_opts = material_params.get("newton_solver_opts", {})
+        _SOLVER_OPT_TYPES = {
+            "max_iterations": int,
+            "tolerance": float,
+            "solver": str,
+            "grid_type": str,
+            "transfer_scheme": str,
+            "air_drag": float,
+            "grid_padding": int,
+        }
+        for key, val in newton_opts.items():
+            if hasattr(self._solver_opts, key):
+                cast = _SOLVER_OPT_TYPES.get(key, type(val))
+                setattr(self._solver_opts, key, cast(val))
+                print(f"[NewtonMPM] solver.{key} = {cast(val)}")
+            else:
+                print(f"[NewtonMPM] Warning: unknown solver option '{key}', ignoring.")
+
+        # NOTE: Material fields on the Newton model are not available until
+        # builder.finalize() is called. We apply physical parameters in finalize().
+
+    def _apply_material_to_model(self) -> None:
+        """Apply stored material parameters to the finalized Newton model."""
+        material_params = self._material_params
         model = self._model
-        n = self._n_particles
+        assert model is not None
+        assert self._volumes is not None
 
         # ── Gravity ──────────────────────────────────────────────────
         g = material_params.get("g", [0.0, 0.0, -9.8])
@@ -267,43 +308,11 @@ class NewtonMPMBackend(PhysicsBackend):
         inv_mass_wp = wp.from_numpy(inv_mass_np, dtype=float, device=self._device)
         wp.copy(inv_mass_wp, model.particle_inv_mass)
 
-        # ── Solver options from material params ──────────────────────
-        # Transfer scheme: map rpic_damping → "pic" / "apic"
-        rpic = material_params.get("rpic_damping", 0.0)
-        if rpic < 0:
-            self._solver_opts.transfer_scheme = "pic"
-        else:
-            self._solver_opts.transfer_scheme = "apic"
-
-        # Apply solver option overrides from config ("newton_mpm" → "solver").
-        # Any key that exists as an attribute on SolverImplicitMPM.Options
-        # can be overridden here.  Unrecognised keys are warned about.
-        newton_opts = material_params.get("newton_solver_opts", {})
-        _SOLVER_OPT_TYPES = {
-            "max_iterations": int,
-            "tolerance": float,
-            "solver": str,
-            "grid_type": str,
-            "transfer_scheme": str,
-            "air_drag": float,
-            "grid_padding": int,
-        }
-        for key, val in newton_opts.items():
-            if hasattr(self._solver_opts, key):
-                cast = _SOLVER_OPT_TYPES.get(key, type(val))
-                setattr(self._solver_opts, key, cast(val))
-                print(f"[NewtonMPM] solver.{key} = {cast(val)}")
-            else:
-                print(f"[NewtonMPM] Warning: unknown solver option '{key}', ignoring.")
-
         # Additional material params for sub-regions (cuboid material overrides)
         if "additional_material_params" in material_params:
             self._apply_additional_materials(material_params["additional_material_params"])
 
-        # ── Per-object material overrides (multi-object mode) ─────
-        # Each entry has "particle_indices" and per-object material keys.
-        # The base material (above) is applied first, then per-object
-        # overrides selectively replace per-particle values.
+        # Per-object material overrides (multi-object mode)
         if "per_object" in material_params:
             self._apply_per_object_materials(material_params["per_object"])
 
@@ -436,16 +445,41 @@ class NewtonMPMBackend(PhysicsBackend):
         self._release_bcs = []
         self._velocity_rotation_bcs = []
 
+        builder = self._builder
+        if builder is None:
+            raise RuntimeError("initialize() must be called before set_boundary_conditions().")
+
         for bc in bc_params:
             bc_type = bc["type"]
             if bc_type == "bounding_box":
-                # Newton handles this via collision pipeline; nothing extra needed
-                pass
+                # Add 6 planes for [0, grid_lim]^3
+                lim = float(self._grid_lim)
+                margin = 0.0
+                wall_cfg = newton.ModelBuilder.ShapeConfig(ke=0.0, kd=0.0, mu=0.0)
+                planes = [
+                    (1.0, 0.0, 0.0, -margin),          # x > 0
+                    (-1.0, 0.0, 0.0, lim - margin),    # x < lim
+                    (0.0, 1.0, 0.0, -margin),          # y > 0
+                    (0.0, -1.0, 0.0, lim - margin),    # y < lim
+                    (0.0, 0.0, 1.0, -margin),          # z > 0
+                    (0.0, 0.0, -1.0, lim - margin),    # z < lim
+                ]
+                for p in planes:
+                    builder.add_shape_plane(plane=p, cfg=wall_cfg)
             elif bc_type == "surface_collider":
-                # Newton handles ground/wall via shape_plane; already added in initialize.
-                # For custom surfaces, we'd add additional planes.
-                # For now, the default ground plane is sufficient.
-                pass
+                normal = bc["normal"]
+                point = bc["point"]
+                d = -(
+                    normal[0] * point[0]
+                    + normal[1] * point[1]
+                    + normal[2] * point[2]
+                )
+                mu = float(bc.get("friction", 0.0))
+                cfg = newton.ModelBuilder.ShapeConfig(ke=0.0, kd=0.0, mu=mu)
+                builder.add_shape_plane(
+                    plane=(float(normal[0]), float(normal[1]), float(normal[2]), float(d)),
+                    cfg=cfg,
+                )
             elif bc_type == "cuboid":
                 self._velocity_bcs.append(bc)
             elif bc_type == "particle_impulse":
@@ -462,7 +496,26 @@ class NewtonMPMBackend(PhysicsBackend):
     def finalize(self) -> None:
         """Create the Newton solver and initial states. Must be called after
         set_material() and set_boundary_conditions()."""
+        builder = self._builder
+        if builder is None:
+            raise RuntimeError("initialize() must be called before finalize().")
+        if self._material_params is None:
+            raise RuntimeError("set_material() must be called before finalize().")
+
+        # Finalize model after all shapes are registered.
+        self._model = builder.finalize(device=self._device)
+        self._builder = None
         model = self._model
+
+        # ── Covariance tracking buffers ───────────────────────────────
+        n = self._n_particles
+        assert self._cov_np is not None
+        self._init_cov = wp.from_numpy(self._cov_np, dtype=float, device=self._device)
+        self._out_cov = wp.zeros(n * 6, dtype=float, device=self._device)
+        self._out_R = wp.zeros(n, dtype=wp.mat33, device=self._device)
+
+        # Apply material params now that model exists.
+        self._apply_material_to_model()
 
         # ── Create solver ────────────────────────────────────────────
         self._solver = SolverImplicitMPM(model, self._solver_opts)

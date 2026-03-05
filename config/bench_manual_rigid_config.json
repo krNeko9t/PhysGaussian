@@ -28,38 +28,39 @@
     },
     {
       "name": "floor",
-      "mode": "render_only",
-      "ply_path": "bench_manual/floor.ply"
+      "mode": "collider_only",
+      "ply_path": "bench_manual/floor.ply",
+      "collider": {
+        "type": "plane",
+        "space": "world",
+        "fit": {
+          "method": "svd",
+          "sample_max": 200000,
+          "seed": 0
+        },
+        "surface": "sticky",
+        "friction": 0.6
+      }
     },
     {
       "name": "wall",
-      "mode": "render_only",
-      "ply_path": "bench_manual/wall.ply"
+      "mode": "collider_only",
+      "ply_path": "bench_manual/wall.ply",
+      "collider": {
+        "type": "plane",
+        "space": "world",
+        "fit": {
+          "method": "svd",
+          "sample_max": 200000,
+          "seed": 0
+        },
+        "surface": "slip",
+        "friction": 0.2
+      }
     }
   ],
 
-  "boundary_conditions": [
-    {
-      "type": "surface_collider",
-      "space": "world",
-      "point": [0.0, 0.0, -0.43450654],
-      "normal": [0.0, 0.0, 1.0],
-      "surface": "sticky",
-      "friction": 0.6,
-      "start_time": 0,
-      "end_time": 1e3
-    },
-    {
-      "type": "surface_collider",
-      "space": "world",
-      "point": [0.0, -0.63632774, 0.0],
-      "normal": [0.0, 1.0, 0.0],
-      "surface": "slip",
-      "friction": 0.2,
-      "start_time": 0,
-      "end_time": 1e3
-    }
-  ],
+  "boundary_conditions": [],
 
   "newton_rigid": {
     "substep_dt": 1e-3,

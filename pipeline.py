@@ -124,6 +124,7 @@ from physics_sim.preprocessing.transform import (
 )
 from physics_sim.backend.base import SimulationState
 from physics_sim.renderer.gs_renderer import GaussianRenderer
+from physics_sim.geometry.plane_fit import fit_plane_svd
 
 
 def main():
@@ -365,6 +366,8 @@ def main():
     per_object_info = None
     # Reference cloud (world space) used for procedural camera centering
     reference_world_pos = None
+    # Additional boundary conditions generated from collider-only objects
+    collider_bc_params = []
 
     if scene_objects is not None:
         # ── MULTI-OBJECT PATH ─────────────────────────────────────
@@ -376,9 +379,115 @@ def main():
         render_only_objects = [
             obj for obj in scene_objects if obj.get("mode") == "render_only"
         ]
+        collider_only_objects = [
+            obj for obj in scene_objects if obj.get("mode") == "collider_only"
+        ]
+
+        # 3c(0). Load static particles for rendering (world space)
+        static_chunks = []
+
+        # 3c(0). Convert collider_only objects into surface colliders
+        for obj in collider_only_objects:
+            col = obj.get("collider") or {}
+            col_type = col.get("type", "plane")
+            if col_type != "plane":
+                raise ValueError(
+                    f"collider_only object '{obj.get('name', '?')}' only supports "
+                    f"collider.type='plane' for now (got {col_type!r})"
+                )
+
+            space = col.get("space", "world")
+            surface = col.get("surface", "sticky")
+            friction = float(col.get("friction", 0.0))
+            start_time = col.get("start_time", 0)
+            end_time = col.get("end_time", 1e3)
+
+            # By default, collider_only objects also render (if ply_path exists).
+            # Can be disabled via collider.render=false (or object-level render=false).
+            render_flag = col.get("render", None)
+            if render_flag is None:
+                render_flag = obj.get("render", True)
+            render_flag = bool(render_flag)
+
+            ply_params = None
+            ply_path = obj.get("ply_path")
+            if render_flag and ply_path is not None:
+                print(f"    [collider_only/render] {obj['name']}: loading {ply_path}...")
+                ply_params = renderer.load_ply(ply_path)
+                r_pos = ply_params["pos"]
+                r_cov = ply_params["cov3D_precomp"]
+                r_pos, r_cov = apply_axis_permutation(r_pos, r_cov, axis_perm)
+                r_opacity = ply_params["opacity"]
+                r_shs = ply_params["shs"]
+                op_mask = r_opacity[:, 0] > preprocessing_params["opacity_threshold"]
+                static_chunks.append(
+                    dict(
+                        pos=r_pos[op_mask],
+                        cov=r_cov[op_mask],
+                        opacity=r_opacity[op_mask],
+                        shs=r_shs[op_mask],
+                    )
+                )
+                print(
+                    f"    [collider_only/render] {obj['name']}: "
+                    f"{int(op_mask.sum().item())} GS particles"
+                )
+
+            if col.get("point") is not None and col.get("normal") is not None:
+                point = col["point"]
+                normal = col["normal"]
+            else:
+                if ply_path is None:
+                    raise ValueError(
+                        f"collider_only object '{obj.get('name', '?')}' must provide "
+                        "either collider.point+normal or ply_path for fitting."
+                    )
+                print(f"    [collider_only] {obj['name']}: fitting plane from {ply_path}...")
+                if ply_params is None:
+                    ply_params = renderer.load_ply(ply_path)
+                c_pos = ply_params["pos"]
+                c_cov = ply_params["cov3D_precomp"]
+                c_pos, c_cov = apply_axis_permutation(c_pos, c_cov, axis_perm)
+                c_opacity = ply_params["opacity"]
+                op_mask = c_opacity[:, 0] > preprocessing_params["opacity_threshold"]
+                pts = c_pos[op_mask].detach().cpu().numpy()
+
+                fit = col.get("fit") or {}
+                method = fit.get("method", "svd")
+                if method != "svd":
+                    raise ValueError(
+                        f"collider_only plane fit only supports method='svd' for now "
+                        f"(got {method!r})"
+                    )
+                sample_max = fit.get("sample_max", 200000)
+                prefer_up = col.get("prefer_up", [0.0, 0.0, 1.0])
+                res = fit_plane_svd(
+                    pts,
+                    sample_max=sample_max,
+                    seed=int(fit.get("seed", 0)),
+                    prefer_up=np.asarray(prefer_up, dtype=np.float32),
+                )
+                point = res.point.tolist()
+                normal = res.normal.tolist()
+                print(
+                    f"    [collider_only] {obj['name']}: plane rms={res.rms:.6f}, "
+                    f"point={point}, normal={normal}"
+                )
+
+            collider_bc_params.append(
+                dict(
+                    type="surface_collider",
+                    space=space,
+                    point=point,
+                    normal=normal,
+                    surface=surface,
+                    friction=friction,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+            )
 
         # 3c(1). Load render-only PLYs (kept in world space)
-        static_chunks = []
         for obj in render_only_objects:
             ply_path = obj.get("ply_path")
             if ply_path is None:
@@ -883,10 +992,21 @@ def main():
     backend.set_material(material_params)
 
     # ── 4b. Boundary conditions (optional world→MPM conversion) ────────
-    bc_params_mpm = bc_params
+    # Merge user boundary_conditions with collider_only-generated planes.
+    bc_all = []
     if isinstance(bc_params, list):
+        bc_all.extend(bc_params)
+    elif bc_params not in (None, {}, ""):
+        raise TypeError(
+            f"boundary_conditions must be a list (got {type(bc_params)})."
+        )
+    if collider_bc_params:
+        bc_all.extend(collider_bc_params)
+
+    bc_params_mpm = bc_all
+    if isinstance(bc_all, list):
         bc_params_mpm = []
-        for bc in bc_params:
+        for bc in bc_all:
             if bc.get("space") == "world" and bc.get("type") == "surface_collider":
                 # Convert point+normal from world space to the backend's MPM space.
                 p_w = torch.tensor(bc["point"], device="cuda", dtype=torch.float32).reshape(1, 3)

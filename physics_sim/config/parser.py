@@ -193,13 +193,24 @@ def decode_param_json(json_file: str):
     if "objects" in sim_params:
         scene_objects = []
         for i, obj_def in enumerate(sim_params["objects"]):
+            mode = obj_def.get("mode", "simulate")
             has_ply = "ply_path" in obj_def
             has_area = "sim_area" in obj_def
-            if not has_ply and not has_area:
-                raise ValueError(
-                    f"Object {i} ({obj_def.get('name', '?')}) "
-                    "must define either 'ply_path' or 'sim_area' (or both)."
-                )
+            has_collider = "collider" in obj_def
+            if mode == "collider_only":
+                # Collider-only objects can be specified either by an explicit
+                # collider definition, or by ply_path for automatic fitting.
+                if (not has_collider) and (not has_ply):
+                    raise ValueError(
+                        f"Object {i} ({obj_def.get('name', '?')}) with mode='collider_only' "
+                        "must define either 'collider' or 'ply_path'."
+                    )
+            else:
+                if not has_ply and not has_area:
+                    raise ValueError(
+                        f"Object {i} ({obj_def.get('name', '?')}) "
+                        "must define either 'ply_path' or 'sim_area' (or both)."
+                    )
             # Build per-object material by inheriting top-level defaults
             obj_material = {}
             for key in _MATERIAL_KEYS:
@@ -213,12 +224,14 @@ def decode_param_json(json_file: str):
                 # - "simulate"    → enters physics backend
                 # - "render_only" → only used for rendering composition
                 # - "collider_only" → reserved for future static colliders
-                "mode": obj_def.get("mode", "simulate"),
+                "mode": mode,
                 "sim_area": obj_def.get("sim_area", None),
                 "material": obj_material,
                 "particle_filling": obj_def.get("particle_filling", None),
                 "ply_path": obj_def.get("ply_path", None),
                 "position_offset": obj_def.get("position_offset", None),
+                # Optional collider spec (used when mode == "collider_only")
+                "collider": obj_def.get("collider", None),
             })
 
     return (material_params, bc_params, time_params,
