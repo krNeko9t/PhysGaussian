@@ -22,6 +22,8 @@ _MATERIAL_KEYS = (
     # VBD soft/rigid physics type and FEM parameters
     "physics", "k_mu", "k_lambda", "k_damp",
     "alpha", "max_triangles", "tet_max_volume", "tet_quality",
+    # Initial velocity for rigid/soft bodies [vx, vy, vz]
+    "initial_velocity",
 )
 
 

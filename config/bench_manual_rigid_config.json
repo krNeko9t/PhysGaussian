@@ -1,7 +1,7 @@
 {
   "_comment": "bench_manual demo: toy simulated as rigid body, wall/floor render-only, world-space plane colliders, procedural orbit camera.",
 
-  "opacity_threshold": 0.02,
+  "opacity_threshold": 0.1,
   "axis_permutation": "xz-y",
   "rotation_degree": [0.0],
   "rotation_axis": [0],
@@ -10,7 +10,7 @@
 
   "substep_dt": 1e-4,
   "frame_dt": 1e-2,
-  "frame_num": 120,
+  "frame_num": 30,
 
   "material": "sand",
   "density": 800,
@@ -23,8 +23,10 @@
       "name": "toy",
       "mode": "simulate",
       "ply_path": "bench_manual/toy.ply",
-      "density": 800,
-      "mu": 0.4
+      "position_offset": [0.0, 0.0, 0.1],
+      "density": 300,
+      "mu": 0.4,
+      "initial_velocity": [0.0, 0.0, 2.5]
     },
     {
       "name": "floor",
@@ -64,11 +66,11 @@
 
   "newton_rigid": {
     "substep_dt": 1e-3,
-    "collision_geometry": "obb",
-    "use_sdf": false,
+    "collision_geometry": "convex_hull",
+    "use_sdf": true,
     "solver": {
-      "iterations": 10,
-      "contact_relaxation": 0.8
+      "iterations": 20,
+      "contact_relaxation": 0.5
     }
   },
 

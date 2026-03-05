@@ -138,6 +138,7 @@ class _BodyInfo:
     particle_indices: list[int]
     init_local_pos: torch.Tensor  # (N, 3) positions in body-local frame
     init_cov_3x3: torch.Tensor   # (N, 3, 3) initial covariances
+    initial_velocity: Optional[tuple[float, float, float]] = None  # linear velocity [vx, vy, vz]
 
 
 # ── Backend ──────────────────────────────────────────────────────────────
@@ -303,11 +304,14 @@ class NewtonRigidBackend(PhysicsBackend):
                     cfg.kd = float(mat["kd"])
                 # Per-object collision_geometry override
                 obj_geo = mat.get("collision_geometry", None)
+                # Per-object initial velocity [vx, vy, vz]
+                init_vel = mat.get("initial_velocity", None)
                 self._create_body(
                     particle_indices=obj["particle_indices"],
                     shape_cfg=cfg,
                     name=obj.get("name", "?"),
                     collision_geo=obj_geo,
+                    initial_velocity=init_vel,
                 )
         else:
             # Single body: all particles
@@ -413,6 +417,25 @@ class NewtonRigidBackend(PhysicsBackend):
         self._state_0 = self._model.state()
         self._state_1 = self._model.state()
         self._control = self._model.control()
+
+        # ── Apply initial velocities ──────────────────────────────────
+        # body_qd is (n_bodies, 6): [vx, vy, vz, wx, wy, wz]
+        # Note: .numpy() returns a copy, so we must use .assign() to write back
+        has_initial_vel = any(b.initial_velocity is not None for b in self._bodies)
+        if has_initial_vel:
+            qd_0 = self._state_0.body_qd.numpy()
+            qd_1 = self._state_1.body_qd.numpy()
+            for body in self._bodies:
+                if body.initial_velocity is not None:
+                    vx, vy, vz = body.initial_velocity
+                    qd_0[body.body_idx, :3] = [vx, vy, vz]
+                    qd_1[body.body_idx, :3] = [vx, vy, vz]
+                    print(
+                        f"[NewtonRigid] Set initial velocity for body {body.body_idx}: "
+                        f"({vx}, {vy}, {vz})"
+                    )
+            self._state_0.body_qd.assign(qd_0)
+            self._state_1.body_qd.assign(qd_1)
 
         # ── Collision pipeline ──────────────────────────────────────
         self._collision_pipeline = (
@@ -528,12 +551,19 @@ class NewtonRigidBackend(PhysicsBackend):
         shape_cfg: newton.ModelBuilder.ShapeConfig,
         name: str = "body",
         collision_geo: str | None = None,
+        initial_velocity: list | tuple | None = None,
     ) -> None:
         """Create one rigid body from a subset of particles.
 
         ``collision_geo`` overrides the global ``self._collision_geo``
         for this particular body (enables per-object config).
+
+        ``initial_velocity`` is [vx, vy, vz] in MPM space (applied in finalize).
         """
+        # Convert initial_velocity to tuple for storage
+        init_vel_tuple = None
+        if initial_velocity is not None:
+            init_vel_tuple = tuple(float(v) for v in initial_velocity)
         builder = self._builder
         assert builder is not None
         geo = collision_geo or self._collision_geo
@@ -551,12 +581,12 @@ class NewtonRigidBackend(PhysicsBackend):
         if geo in ("obb", "ellipsoid"):
             self._create_body_primitive(
                 geo, pos_np, idx_t, positions, particle_indices,
-                shape_cfg, name,
+                shape_cfg, name, init_vel_tuple,
             )
         else:
             self._create_body_mesh(
                 geo, pos_np, idx_t, positions, particle_indices,
-                shape_cfg, name,
+                shape_cfg, name, init_vel_tuple,
             )
 
     def _create_body_primitive(
@@ -568,6 +598,7 @@ class NewtonRigidBackend(PhysicsBackend):
         particle_indices: list[int],
         shape_cfg: newton.ModelBuilder.ShapeConfig,
         name: str,
+        initial_velocity: Optional[tuple[float, float, float]] = None,
     ) -> None:
         """Create a rigid body with a primitive shape (OBB or ellipsoid)."""
         builder = self._builder
@@ -630,11 +661,13 @@ class NewtonRigidBackend(PhysicsBackend):
                 particle_indices=particle_indices,
                 init_local_pos=local_pos,
                 init_cov_3x3=cov_3x3,
+                initial_velocity=initial_velocity,
             )
         )
+        vel_str = f", initial_velocity={initial_velocity}" if initial_velocity else ""
         print(
             f"[NewtonRigid] Body '{name}': {len(particle_indices)} particles, "
-            f"{shape_desc}, density={shape_cfg.density}"
+            f"{shape_desc}, density={shape_cfg.density}{vel_str}"
         )
 
     def _create_body_mesh(
@@ -646,6 +679,7 @@ class NewtonRigidBackend(PhysicsBackend):
         particle_indices: list[int],
         shape_cfg: newton.ModelBuilder.ShapeConfig,
         name: str,
+        initial_velocity: Optional[tuple[float, float, float]] = None,
     ) -> None:
         """Create a rigid body with a mesh shape (convex hull or alpha shape)."""
         builder = self._builder
@@ -710,12 +744,14 @@ class NewtonRigidBackend(PhysicsBackend):
                 particle_indices=particle_indices,
                 init_local_pos=local_pos,
                 init_cov_3x3=cov_3x3,
+                initial_velocity=initial_velocity,
             )
         )
+        vel_str = f", initial_velocity={initial_velocity}" if initial_velocity else ""
         print(
             f"[NewtonRigid] Body '{name}': {len(particle_indices)} particles, "
             f"mesh({geo})={mesh_verts.shape[0]} verts / "
-            f"{mesh_faces.shape[0]} faces, density={shape_cfg.density}"
+            f"{mesh_faces.shape[0]} faces, density={shape_cfg.density}{vel_str}"
         )
 
     @staticmethod
