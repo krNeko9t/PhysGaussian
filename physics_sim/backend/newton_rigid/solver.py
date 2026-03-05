@@ -171,6 +171,9 @@ class NewtonRigidBackend(PhysicsBackend):
         # Per-body info
         self._bodies: list[_BodyInfo] = []
 
+        # Freeze-on-divergence: last valid body poses
+        self._last_valid_body_q: Optional[np.ndarray] = None
+
         # Deferred configuration
         self._gravity: tuple = (0.0, 0.0, -9.8)
         self._solver_iterations: int = 10
@@ -477,20 +480,29 @@ class NewtonRigidBackend(PhysicsBackend):
           new_pos[i] = R @ local_pos[i] + body_position
           new_cov[i] = R @ init_cov[i] @ R^T
           rotation[i] = R  (same for all particles in the body)
+
+        If a body's pose contains NaN/Inf, the last valid pose is used
+        instead (freeze-on-divergence).
         """
         body_q = self._state_0.body_q.numpy()  # (n_bodies, 7)
 
-        # Early NaN detection — if any body has NaN in its pose, the
-        # simulation has blown up (usually from interpenetration).
-        if np.any(np.isnan(body_q)):
-            bad = [
-                i for i in range(body_q.shape[0])
-                if np.any(np.isnan(body_q[i]))
-            ]
-            print(
-                f"[NewtonRigid] WARNING: NaN detected in body poses "
-                f"(bodies {bad}). Simulation may have diverged."
-            )
+        # Per-body NaN/Inf detection with freeze-on-divergence.
+        for i in range(body_q.shape[0]):
+            if np.any(~np.isfinite(body_q[i])):
+                if self._last_valid_body_q is not None:
+                    print(
+                        f"[NewtonRigid] WARNING: body {i} pose is "
+                        f"NaN/Inf — freezing at last valid pose."
+                    )
+                    body_q[i] = self._last_valid_body_q[i]
+                else:
+                    print(
+                        f"[NewtonRigid] WARNING: body {i} pose is "
+                        f"NaN/Inf on the very first get_state() call."
+                    )
+
+        # Cache the (possibly corrected) body poses for future fallback.
+        self._last_valid_body_q = body_q.copy()
 
         positions = torch.zeros(
             (self._n_particles, 3),

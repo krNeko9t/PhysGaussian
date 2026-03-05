@@ -1142,6 +1142,17 @@ def main():
         cov3D = state.covariances[:gs_num].to(device)
         rot = state.rotations[:gs_num].to(device)
 
+        # Sanity check: detect NaN/Inf positions and clamp to last valid
+        nan_mask = ~torch.isfinite(pos).all(dim=1)
+        if nan_mask.any():
+            n_bad = int(nan_mask.sum().item())
+            print(
+                f"[WARNING] Frame {frame}: {n_bad}/{gs_num} simulated "
+                f"particles have NaN/Inf positions — clamping to zero."
+            )
+            pos[nan_mask] = 0.0
+            cov3D[nan_mask] = 0.0
+
         if args.debug and frame == 0:
             _log("=== CHECKPOINT 6: Frame 0 — raw MPM state (before inverse transform) ===")
             _dbg("pos (from MPM)", pos)

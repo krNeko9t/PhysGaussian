@@ -23,7 +23,7 @@
       "name": "toy",
       "mode": "simulate",
       "ply_path": "bench_manual/toy.ply",
-      "position_offset": [0.0, 0.0, 0.1],
+      "position_offset": [0.0, 0.0, 0.03],
       "density": 300,
       "mu": 0.4,
       "initial_velocity": [0.0, 0.0, 2.5]
@@ -51,6 +51,7 @@
       "collider": {
         "type": "plane",
         "space": "world",
+        "prefer_up": [0.0, -1.0, 0.0],
         "fit": {
           "method": "svd",
           "sample_max": 200000,
@@ -65,7 +66,7 @@
   "boundary_conditions": [],
 
   "newton_rigid": {
-    "substep_dt": 1e-3,
+    "substep_dt": 1e-4,
     "collision_geometry": "convex_hull",
     "use_sdf": true,
     "solver": {
