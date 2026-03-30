@@ -1101,6 +1101,21 @@ def main():
     print(f"  substep_dt={substep_dt:.2e}  frame_dt={frame_dt:.2e}  "
           f"steps/frame={step_per_frame}  frames={frame_num}")
 
+    # Clean stale frame PNGs from previous runs to prevent ffmpeg
+    # from including old frames when frame_num has been reduced.
+    import glob as _glob
+    stale = sorted(_glob.glob(os.path.join(args.output, "[0-9]*.png")))
+    if stale:
+        expected = {
+            os.path.join(args.output, f"{i:04d}.png")
+            for i in range(frame_num)
+        }
+        to_remove = [p for p in stale if p not in expected]
+        if to_remove:
+            print(f"  Removing {len(to_remove)} stale frame PNG(s) from previous run")
+            for p in to_remove:
+                os.remove(p)
+
     bg_color = (
         torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda")
         if args.white_bg
@@ -1142,16 +1157,43 @@ def main():
         cov3D = state.covariances[:gs_num].to(device)
         rot = state.rotations[:gs_num].to(device)
 
-        # Sanity check: detect NaN/Inf positions and clamp to last valid
+        # ── Per-frame rigid body diagnostics ──────────────────────────
+        if hasattr(backend, "get_diagnostics"):
+            diag = backend.get_diagnostics()
+            for bd in diag["bodies"]:
+                p = bd["pos"]
+                v = bd["vel"]
+                pdists = bd["plane_distances"]
+                nan_flag = " *** NaN! ***" if bd["has_nan"] else ""
+                dist_str = "  ".join(
+                    f"plane{pi}={sd:+.4f}" for pi, sd in pdists
+                )
+                print(
+                    f"  [DIAG] Frame {frame} {bd['name']}: "
+                    f"pos=[{p[0]:.4f},{p[1]:.4f},{p[2]:.4f}] "
+                    f"vel=[{v[0]:.4f},{v[1]:.4f},{v[2]:.4f}] "
+                    f"{dist_str}{nan_flag}"
+                )
+                for pi, sd in pdists:
+                    if sd < 0:
+                        print(
+                            f"  [DIAG] *** Frame {frame}: body PENETRATES "
+                            f"plane {pi} by {-sd:.6f} ***"
+                        )
+
+        # Sanity check: detect NaN/Inf/extreme positions
         nan_mask = ~torch.isfinite(pos).all(dim=1)
-        if nan_mask.any():
-            n_bad = int(nan_mask.sum().item())
+        extreme_mask = (pos.abs() > 10.0).any(dim=1)
+        bad_mask = nan_mask | extreme_mask
+        if bad_mask.any():
+            n_nan = int(nan_mask.sum().item())
+            n_ext = int((extreme_mask & ~nan_mask).sum().item())
             print(
-                f"[WARNING] Frame {frame}: {n_bad}/{gs_num} simulated "
-                f"particles have NaN/Inf positions — clamping to zero."
+                f"[WARNING] Frame {frame}: {n_nan} NaN/Inf + {n_ext} extreme "
+                f"(|pos|>10) out of {gs_num} particles"
             )
-            pos[nan_mask] = 0.0
-            cov3D[nan_mask] = 0.0
+            pos[bad_mask] = 0.0
+            cov3D[bad_mask] = 0.0
 
         if args.debug and frame == 0:
             _log("=== CHECKPOINT 6: Frame 0 — raw MPM state (before inverse transform) ===")

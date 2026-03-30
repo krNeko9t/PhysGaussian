@@ -8,3 +8,4 @@ output
 model
 log
 bread-trained/
+phys_desc.json

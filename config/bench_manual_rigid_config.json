@@ -10,7 +10,7 @@
 
   "substep_dt": 1e-4,
   "frame_dt": 1e-2,
-  "frame_num": 30,
+  "frame_num": 120,
 
   "material": "sand",
   "density": 800,
@@ -26,7 +26,7 @@
       "position_offset": [0.0, 0.0, 0.03],
       "density": 300,
       "mu": 0.4,
-      "initial_velocity": [0.0, 0.0, 2.5]
+      "initial_velocity": [0.0, 2.0, 1.5]
     },
     {
       "name": "floor",

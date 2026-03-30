@@ -178,6 +178,9 @@ class NewtonRigidBackend(PhysicsBackend):
         self._gravity: tuple = (0.0, 0.0, -9.8)
         self._solver_iterations: int = 10
 
+        # Recorded plane equations for diagnostics: list of (normal_3, d)
+        self._plane_equations: list[tuple[list[float], float]] = []
+
     # ── PhysicsBackend interface ─────────────────────────────────────
 
     def initialize(
@@ -357,18 +360,17 @@ class NewtonRigidBackend(PhysicsBackend):
                     mu = float(bc["friction"])
 
                 plane_cfg = newton.ModelBuilder.ShapeConfig(mu=mu)
+                n_list = [float(normal[0]), float(normal[1]), float(normal[2])]
+                d_f = float(d)
                 builder.add_shape_plane(
-                    plane=(
-                        float(normal[0]),
-                        float(normal[1]),
-                        float(normal[2]),
-                        float(d),
-                    ),
+                    plane=(n_list[0], n_list[1], n_list[2], d_f),
                     cfg=plane_cfg,
                 )
+                self._plane_equations.append((n_list, d_f))
                 print(
-                    f"[NewtonRigid] Plane: normal={normal}, "
-                    f"point={point}, mu={mu}"
+                    f"[NewtonRigid] Plane #{len(self._plane_equations)-1}: "
+                    f"normal=[{n_list[0]:.6f}, {n_list[1]:.6f}, {n_list[2]:.6f}], "
+                    f"d={d_f:.6f}, point={point}, mu={mu}"
                 )
 
             elif bc_type == "bounding_box":
@@ -472,6 +474,30 @@ class NewtonRigidBackend(PhysicsBackend):
         )
         # Swap states
         self._state_0, self._state_1 = self._state_1, self._state_0
+
+    def get_diagnostics(self) -> dict:
+        """Return per-body position, velocity, and plane distances for debugging."""
+        body_q = self._state_0.body_q.numpy()   # (n_bodies, 7)
+        body_qd = self._state_0.body_qd.numpy()  # (n_bodies, 6)
+        diag = {"bodies": []}
+        for body in self._bodies:
+            bq = body_q[body.body_idx]
+            bqd = body_qd[body.body_idx]
+            pos = bq[:3].tolist()
+            quat = bq[3:7].tolist()
+            vel = bqd[:3].tolist()
+            ang_vel = bqd[3:6].tolist()
+            plane_dists = []
+            for pi, (n, d) in enumerate(self._plane_equations):
+                signed_dist = n[0] * pos[0] + n[1] * pos[1] + n[2] * pos[2] + d
+                plane_dists.append((pi, signed_dist))
+            diag["bodies"].append(dict(
+                name=f"body_{body.body_idx}",
+                pos=pos, quat=quat, vel=vel, ang_vel=ang_vel,
+                plane_distances=plane_dists,
+                has_nan=bool(np.any(~np.isfinite(bq))),
+            ))
+        return diag
 
     def get_state(self) -> SimulationState:
         """Broadcast rigid-body transforms to all particles.
