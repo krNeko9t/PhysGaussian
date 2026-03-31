@@ -17,11 +17,17 @@ class SimulationState:
 
     All fields are plain PyTorch tensors so that the rest of the pipeline
     (inverse-preprocessing, rendering) is backend-agnostic.
+
+    ``quats`` and ``scales`` are optional outputs used by 2DGS rendering.
+    When the scene is 3DGS these remain None and the renderer uses
+    ``covariances`` instead.
     """
     positions: torch.Tensor        # (N, 3) particle positions
     covariances: torch.Tensor      # (N, 6) upper-triangle covariance
     rotations: torch.Tensor        # (N, 3, 3) rotation matrices
     velocities: Optional[torch.Tensor] = None  # (N, 3) optional
+    quats: Optional[torch.Tensor] = None       # (N, 4) for 2DGS rendering
+    scales: Optional[torch.Tensor] = None      # (N, 2|3) for 2DGS rendering
 
 
 class PhysicsBackend(ABC):

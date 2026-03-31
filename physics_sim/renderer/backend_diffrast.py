@@ -23,11 +23,20 @@ class DiffRastBackend(RasterBackend):
         self,
         camera: SimpleCamera,
         means: torch.Tensor,
-        cov6: torch.Tensor,
         colors: torch.Tensor,
         opacities: torch.Tensor,
         bg_color: torch.Tensor | None = None,
+        *,
+        cov6: torch.Tensor | None = None,
+        quats: torch.Tensor | None = None,
+        scales: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict]:
+        if cov6 is None:
+            raise ValueError(
+                "DiffRastBackend requires cov6.  Native 2DGS (quats+scales) "
+                "is not supported — use the gsplat backend instead."
+            )
+
         try:
             from diff_gaussian_rasterization import (
                 GaussianRasterizationSettings,

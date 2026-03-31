@@ -106,6 +106,123 @@ def apply_axis_permutation(
 
     return pos_new, cov_new
 
+
+def _build_axis_perm_matrix(perm: str, device: torch.device) -> torch.Tensor:
+    """Build a 3×3 signed permutation matrix from an axis permutation string."""
+    if perm == "xyz":
+        return torch.eye(3, device=device, dtype=torch.float32)
+    axis_map = {"x": 0, "y": 1, "z": 2}
+    idx, signs = [], []
+    negate_next = False
+    for c in perm.lower():
+        if c == "-":
+            negate_next = True
+        elif c in axis_map:
+            idx.append(axis_map[c])
+            signs.append(-1.0 if negate_next else 1.0)
+            negate_next = False
+    P = torch.zeros(3, 3, device=device, dtype=torch.float32)
+    for row, (col, s) in enumerate(zip(idx, signs)):
+        P[row, col] = s
+    return P
+
+
+def _rotmat_to_quat_wxyz(R: torch.Tensor) -> torch.Tensor:
+    """3×3 rotation matrix → (4,) quaternion (w, x, y, z).  Batched (N, 3, 3) → (N, 4) also supported."""
+    single = R.dim() == 2
+    if single:
+        R = R.unsqueeze(0)
+    trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
+    N = R.shape[0]
+    q = torch.zeros(N, 4, device=R.device, dtype=R.dtype)
+    # Case 1: trace > 0
+    m1 = trace > 0
+    if m1.any():
+        s = torch.sqrt(trace[m1] + 1.0) * 2.0
+        q[m1, 0] = 0.25 * s
+        q[m1, 1] = (R[m1, 2, 1] - R[m1, 1, 2]) / s
+        q[m1, 2] = (R[m1, 0, 2] - R[m1, 2, 0]) / s
+        q[m1, 3] = (R[m1, 1, 0] - R[m1, 0, 1]) / s
+    # Case 2: R[0,0] max
+    m2 = ~m1 & (R[:, 0, 0] > R[:, 1, 1]) & (R[:, 0, 0] > R[:, 2, 2])
+    if m2.any():
+        s = torch.sqrt(1.0 + R[m2, 0, 0] - R[m2, 1, 1] - R[m2, 2, 2]) * 2.0
+        q[m2, 0] = (R[m2, 2, 1] - R[m2, 1, 2]) / s
+        q[m2, 1] = 0.25 * s
+        q[m2, 2] = (R[m2, 0, 1] + R[m2, 1, 0]) / s
+        q[m2, 3] = (R[m2, 0, 2] + R[m2, 2, 0]) / s
+    # Case 3: R[1,1] max
+    m3 = ~m1 & ~m2 & (R[:, 1, 1] > R[:, 2, 2])
+    if m3.any():
+        s = torch.sqrt(1.0 + R[m3, 1, 1] - R[m3, 0, 0] - R[m3, 2, 2]) * 2.0
+        q[m3, 0] = (R[m3, 0, 2] - R[m3, 2, 0]) / s
+        q[m3, 1] = (R[m3, 0, 1] + R[m3, 1, 0]) / s
+        q[m3, 2] = 0.25 * s
+        q[m3, 3] = (R[m3, 1, 2] + R[m3, 2, 1]) / s
+    # Case 4: R[2,2] max
+    m4 = ~m1 & ~m2 & ~m3
+    if m4.any():
+        s = torch.sqrt(1.0 + R[m4, 2, 2] - R[m4, 0, 0] - R[m4, 1, 1]) * 2.0
+        q[m4, 0] = (R[m4, 1, 0] - R[m4, 0, 1]) / s
+        q[m4, 1] = (R[m4, 0, 2] + R[m4, 2, 0]) / s
+        q[m4, 2] = (R[m4, 1, 2] + R[m4, 2, 1]) / s
+        q[m4, 3] = 0.25 * s
+    q = torch.nn.functional.normalize(q, dim=-1)
+    return q[0] if single else q
+
+
+def _quat_mul_wxyz(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Hamilton product of (w, x, y, z) quaternions.  Supports (4,)*(N,4) → (N,4)."""
+    if a.dim() == 1:
+        a = a.unsqueeze(0)
+    aw, ax, ay, az = a[:, 0:1], a[:, 1:2], a[:, 2:3], a[:, 3:4]
+    bw, bx, by, bz = b[:, 0:1], b[:, 1:2], b[:, 2:3], b[:, 3:4]
+    return torch.cat([
+        aw*bw - ax*bx - ay*by - az*bz,
+        aw*bx + ax*bw + ay*bz - az*by,
+        aw*by - ax*bz + ay*bw + az*bx,
+        aw*bz + ax*by - ay*bx + az*bw,
+    ], dim=-1)
+
+
+def preprocess_quats(
+    quats_wxyz: torch.Tensor,
+    axis_perm: str,
+    rotation_matrices: list[torch.Tensor],
+) -> torch.Tensor:
+    """Apply the same preprocessing rotation chain (axis perm + rotation matrices) to quaternions.
+
+    Returns quaternions in MPM-space (wxyz convention).
+    """
+    device = quats_wxyz.device
+    # Build combined rotation matrix
+    R_combined = _build_axis_perm_matrix(axis_perm, device)
+    if torch.det(R_combined) < 0:
+        R_combined = -R_combined
+    for R in rotation_matrices:
+        R_combined = R @ R_combined
+    q_pre = _rotmat_to_quat_wxyz(R_combined)
+    return _quat_mul_wxyz(q_pre, quats_wxyz)
+
+
+def inverse_preprocess_quats(
+    quats_mpm_wxyz: torch.Tensor,
+    axis_perm: str,
+    rotation_matrices: list[torch.Tensor],
+) -> torch.Tensor:
+    """Undo the preprocessing rotation on quaternions (MPM → world)."""
+    device = quats_mpm_wxyz.device
+    R_combined = _build_axis_perm_matrix(axis_perm, device)
+    if torch.det(R_combined) < 0:
+        R_combined = -R_combined
+    for R in rotation_matrices:
+        R_combined = R @ R_combined
+    q_pre = _rotmat_to_quat_wxyz(R_combined)
+    q_pre_inv = q_pre.clone()
+    q_pre_inv[1:] = -q_pre_inv[1:]  # conjugate = inverse for unit quat
+    return _quat_mul_wxyz(q_pre_inv, quats_mpm_wxyz)
+
+
 # ── physics_sim modules ──────────────────────────────────────────────────
 from physics_sim.config.parser import decode_param_json
 from physics_sim.preprocessing.transform import (
@@ -317,18 +434,25 @@ def main():
         dx = material_params["grid_lim"] / material_params["n_grid"]
         return torch.full((pos.shape[0],), float(dx * dx * dx), device=device)
 
-    # ── 2. Load 3DGS PLY ─────────────────────────────────────────────
-    print("Loading 3DGS point cloud...")
+    # ── 2. Load 3DGS / 2DGS PLY ────────────────────────────────────────
+    print("Loading Gaussian point cloud...")
     raster_be = "gsplat" if args.no_render else args.raster_backend
     renderer = GaussianRenderer(sh_degree=args.sh_degree, raster_backend=raster_be)
     axis_perm = preprocessing_params.get("axis_permutation", "xyz")
     params = renderer.load_ply(args.ply_path)
+
+    gs_type = params["gs_type"]
+    print(f"  Detected PLY type: {gs_type.upper()}")
 
     init_pos = params["pos"]
     init_cov = params["cov3D_precomp"]
     init_pos, init_cov = apply_axis_permutation(init_pos, init_cov, axis_perm)
     init_opacity = params["opacity"]
     init_shs = params["shs"]
+
+    # 2DGS-specific: store original quats and scales for physics + rendering
+    init_ply_quats = params["quats"]   # (N, 4) wxyz
+    init_ply_scales = params["scales"] # (N, 2|3)
 
     if args.debug:
         _log("=== CHECKPOINT 1: After PLY loading ===")
@@ -347,6 +471,8 @@ def main():
     init_cov = init_cov[mask, :]
     init_opacity = init_opacity[mask, :]
     init_shs = init_shs[mask, :]
+    init_ply_quats = init_ply_quats[mask, :]
+    init_ply_scales = init_ply_scales[mask, :]
 
     if args.debug:
         _log(f"=== CHECKPOINT 2: After opacity filter (threshold={preprocessing_params['opacity_threshold']}) ===")
@@ -548,12 +674,16 @@ def main():
                 obj_pos, obj_cov = apply_axis_permutation(obj_pos, obj_cov, axis_perm)
                 obj_opacity = ply_params["opacity"]
                 obj_shs = ply_params["shs"]
+                obj_quats = ply_params["quats"]
+                obj_scales = ply_params["scales"]
 
                 op_mask = obj_opacity[:, 0] > preprocessing_params["opacity_threshold"]
                 obj_pos = obj_pos[op_mask]
                 obj_cov = obj_cov[op_mask]
                 obj_opacity = obj_opacity[op_mask]
                 obj_shs = obj_shs[op_mask]
+                obj_quats = obj_quats[op_mask]
+                obj_scales = obj_scales[op_mask]
 
                 obj_rotated_pos = apply_rotations(obj_pos, rotation_matrices)
 
@@ -579,6 +709,8 @@ def main():
                     obj_cov = obj_cov[sa_mask]
                     obj_opacity = obj_opacity[sa_mask]
                     obj_shs = obj_shs[sa_mask]
+                    obj_quats = obj_quats[sa_mask]
+                    obj_scales = obj_scales[sa_mask]
 
                 n_gs = obj_rotated_pos.shape[0]
                 obj_data.append(
@@ -588,6 +720,8 @@ def main():
                         cov=obj_cov,
                         opacity=obj_opacity,
                         shs=obj_shs,
+                        quats=obj_quats,
+                        scales=obj_scales,
                         gs_count=n_gs,
                     )
                 )
@@ -620,6 +754,8 @@ def main():
                         cov=init_cov[obj_mask],
                         opacity=init_opacity[obj_mask],
                         shs=init_shs[obj_mask],
+                        quats=init_ply_quats[obj_mask],
+                        scales=init_ply_scales[obj_mask],
                         gs_count=n_gs,
                     )
                 )
@@ -653,6 +789,8 @@ def main():
         init_cov_sim = torch.cat([d["cov"] for d in obj_data], dim=0)
         init_opacity_sim = torch.cat([d["opacity"] for d in obj_data], dim=0)
         init_shs_sim = torch.cat([d["shs"] for d in obj_data], dim=0)
+        init_ply_quats = torch.cat([d["quats"] for d in obj_data], dim=0)
+        init_ply_scales = torch.cat([d["scales"] for d in obj_data], dim=0)
 
         # 3d. Compute reference transform (rotated space)
         ref_spec = preprocessing_params.get("transform_reference", None)
@@ -820,6 +958,8 @@ def main():
             init_cov = init_cov[area_mask, :]
             init_opacity = init_opacity[area_mask, :]
             init_shs = init_shs[area_mask, :]
+            init_ply_quats = init_ply_quats[area_mask, :]
+            init_ply_scales = init_ply_scales[area_mask, :]
 
         if args.debug:
             _log("=== CHECKPOINT 3: After sim_area selection ===")
@@ -921,12 +1061,18 @@ def main():
             self._pos = None
             self._cov = None
             self._rot = None
+            self._quats = None
+            self._scales = None
 
         def initialize(self, positions, volumes, covariances, **kwargs):
             self._pos = positions.clone()
             self._cov = covariances.clone()
             n = positions.shape[0]
             self._rot = torch.eye(3, device=self._device, dtype=torch.float32).unsqueeze(0).repeat(n, 1, 1)
+            iq = kwargs.get("init_quats")
+            isc = kwargs.get("init_scales")
+            self._quats = iq.clone() if iq is not None else None
+            self._scales = isc.clone() if isc is not None else None
 
         def set_material(self, material_params: dict) -> None:
             pass
@@ -945,6 +1091,8 @@ def main():
                 positions=self._pos,
                 covariances=self._cov,
                 rotations=self._rot,
+                quats=self._quats,
+                scales=self._scales,
             )
 
     if args.backend == "none":
@@ -1000,6 +1148,13 @@ def main():
                   "rigid_contact_max"):
             if k in vbd_opts:
                 init_kwargs[k] = vbd_opts[k]
+
+    # 2DGS: preprocess quats (apply rotation chain) and pass to backend.
+    # Scales are passed as-is (scale_origin cancels in the round-trip).
+    if gs_type == "2dgs":
+        quats_mpm = preprocess_quats(init_ply_quats, axis_perm, rotation_matrices)
+        init_kwargs["init_quats"] = quats_mpm
+        init_kwargs["init_scales"] = init_ply_scales
 
     backend.initialize(
         mpm_init_pos, mpm_init_vol, mpm_init_cov, **init_kwargs
@@ -1228,6 +1383,15 @@ def main():
         cov3D = cov3D / (scale_origin * scale_origin)
         cov3D = apply_inverse_cov_rotations(cov3D, rotation_matrices)
 
+        # 2DGS: inverse-transform quats (scales need no adjustment)
+        render_quats = None
+        render_scales = None
+        if gs_type == "2dgs" and state.quats is not None:
+            render_quats = inverse_preprocess_quats(
+                state.quats[:gs_num].to(device), axis_perm, rotation_matrices,
+            )
+            render_scales = state.scales[:gs_num].to(device)
+
         if args.debug and frame == 0:
             _log("=== CHECKPOINT 7: Frame 0 — after inverse transform (world space) ===")
             _dbg("pos (world)", pos)
@@ -1252,14 +1416,25 @@ def main():
 
         # Convert SH → RGB and rasterise
         colors_precomp = renderer.convert_sh(cur_shs, camera, pos, rot)
-        rendering, _meta = renderer.render(
-            camera=camera,
-            means=pos,
-            cov6=cov3D,
-            colors=colors_precomp,
-            opacities=cur_opacity,
-            bg_color=bg_color,
-        )
+        if gs_type == "2dgs" and render_quats is not None:
+            rendering, _meta = renderer.render(
+                camera=camera,
+                means=pos,
+                colors=colors_precomp,
+                opacities=cur_opacity,
+                bg_color=bg_color,
+                quats=render_quats,
+                scales=render_scales,
+            )
+        else:
+            rendering, _meta = renderer.render(
+                camera=camera,
+                means=pos,
+                colors=colors_precomp,
+                opacities=cur_opacity,
+                bg_color=bg_color,
+                cov6=cov3D,
+            )
 
         # Save frame
         cv2_img = rendering.permute(1, 2, 0).detach().cpu().numpy()

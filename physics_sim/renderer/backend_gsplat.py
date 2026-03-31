@@ -32,35 +32,45 @@ def _cov6_to_mat3(cov6: torch.Tensor) -> torch.Tensor:
 
 
 class GsplatBackend(RasterBackend):
-    """Wraps ``gsplat.rendering.rasterization`` for 3DGS rendering."""
+    """Wraps ``gsplat.rendering.rasterization`` for 3DGS and 2DGS."""
 
     def render(
+        self,
+        camera: SimpleCamera,
+        means: torch.Tensor,
+        colors: torch.Tensor,
+        opacities: torch.Tensor,
+        bg_color: torch.Tensor | None = None,
+        *,
+        cov6: torch.Tensor | None = None,
+        quats: torch.Tensor | None = None,
+        scales: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict]:
+        if quats is not None and scales is not None:
+            return self._render_2dgs(camera, means, quats, scales,
+                                     colors, opacities, bg_color)
+        if cov6 is not None:
+            return self._render_3dgs(camera, means, cov6,
+                                     colors, opacities, bg_color)
+        raise ValueError("GsplatBackend.render requires either cov6 or quats+scales.")
+
+    # ── 3DGS path (covars mode) ──────────────────────────────────────
+
+    def _render_3dgs(
         self,
         camera: SimpleCamera,
         means: torch.Tensor,
         cov6: torch.Tensor,
         colors: torch.Tensor,
         opacities: torch.Tensor,
-        bg_color: torch.Tensor | None = None,
+        bg_color: torch.Tensor | None,
     ) -> tuple[torch.Tensor, dict]:
-        try:
-            from gsplat.rendering import rasterization
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(
-                "gsplat is required for the 'gsplat' backend. "
-                "Install it (pip install gsplat) or use --raster_backend diffrast."
-            ) from e
+        from gsplat.rendering import rasterization
 
-        covars = _cov6_to_mat3(cov6)  # (N, 3, 3)
-
-        viewmats = camera.viewmat.unsqueeze(0)  # (1, 4, 4)
-        Ks = camera.K.unsqueeze(0)  # (1, 3, 3)
-
-        opacities_1d = opacities.squeeze(-1)  # (N,)
-
-        backgrounds = None
-        if bg_color is not None:
-            backgrounds = bg_color # .unsqueeze(0)  # (1, 3)
+        covars = _cov6_to_mat3(cov6)
+        viewmats = camera.viewmat.unsqueeze(0)
+        Ks = camera.K.unsqueeze(0)
+        opacities_1d = opacities.squeeze(-1)
 
         render_colors, render_alphas, meta = rasterization(
             means=means,
@@ -75,12 +85,47 @@ class GsplatBackend(RasterBackend):
             height=int(camera.image_height),
             near_plane=camera.znear,
             far_plane=camera.zfar,
-            backgrounds=backgrounds,
+            backgrounds=bg_color,
             sh_degree=None,
         )
 
-        # render_colors: (1, H, W, 3) -> (3, H, W)
         rendered = render_colors[0].permute(2, 0, 1)
+        meta["render_alphas"] = render_alphas
+        return rendered, meta
 
+    # ── 2DGS path (quats + scales mode) ──────────────────────────────
+
+    def _render_2dgs(
+        self,
+        camera: SimpleCamera,
+        means: torch.Tensor,
+        quats: torch.Tensor,
+        scales: torch.Tensor,
+        colors: torch.Tensor,
+        opacities: torch.Tensor,
+        bg_color: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, dict]:
+        from gsplat.rendering import rasterization_2dgs
+
+        viewmats = camera.viewmat.unsqueeze(0)
+        Ks = camera.K.unsqueeze(0)
+        opacities_1d = opacities.squeeze(-1)
+
+        render_colors, render_alphas, _, meta = rasterization_2dgs(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opacities_1d,
+            colors=colors,
+            viewmats=viewmats,
+            Ks=Ks,
+            width=int(camera.image_width),
+            height=int(camera.image_height),
+            near_plane=camera.znear,
+            far_plane=camera.zfar,
+            backgrounds=bg_color,
+        )
+
+        rendered = render_colors[0].permute(2, 0, 1)
         meta["render_alphas"] = render_alphas
         return rendered, meta

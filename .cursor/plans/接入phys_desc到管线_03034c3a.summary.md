@@ -24,8 +24,8 @@
 # Step 1: 转换
 python phys_desc_to_config.py \
   --phys_desc phys_desc.json \
-  --ply_dir scene_data/plys/ \
-  --output config/auto_config.json
+  --ply_dir /mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_idmap_split/postprocess/gt_split \
+  --output config/bench_auto_0331.json
 
 # Step 2: 跑管线（backend 自动从 config 读取）
 python pipeline.py \

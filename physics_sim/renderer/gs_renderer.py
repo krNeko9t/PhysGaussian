@@ -269,7 +269,10 @@ class GaussianRenderer:
         self.backend = create_raster_backend(raster_backend, sh_degree)
 
     def load_ply(self, ply_path: str) -> dict:
-        """Load a 3DGS PLY checkpoint and return extracted parameters.
+        """Load a 3DGS or 2DGS PLY checkpoint and return extracted parameters.
+
+        The format is auto-detected from the number of ``scale_*`` properties:
+        3 scales -> 3DGS, 2 scales -> 2DGS.
 
         Returns a dict with keys:
             pos            (N, 3) float32  – positions
@@ -277,6 +280,9 @@ class GaussianRenderer:
             opacity        (N, 1) float32  – activated opacity (sigmoid)
             shs            (N, K, 3) float32 – spherical harmonics features
             screen_points  (N, 3) float32  – zeros placeholder for 2D means
+            gs_type        str  – ``"3dgs"`` or ``"2dgs"``
+            quats          (N, 4) float32  – normalised quaternion rotations
+            scales         (N, 2) or (N, 3) float32  – activated scales (exp)
         """
         plydata = PlyData.read(ply_path)
         vtx = plydata.elements[0]
@@ -312,7 +318,10 @@ class GaussianRenderer:
             [p.name for p in vtx.properties if p.name.startswith("scale_")],
             key=lambda x: int(x.split("_")[-1]),
         )
-        scales = np.zeros((xyz.shape[0], len(scale_names)))
+        num_scales = len(scale_names)
+        gs_type = "2dgs" if num_scales == 2 else "3dgs"
+
+        scales = np.zeros((xyz.shape[0], num_scales))
         for idx, attr_name in enumerate(scale_names):
             scales[:, idx] = np.asarray(vtx[attr_name])
 
@@ -324,19 +333,30 @@ class GaussianRenderer:
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(vtx[attr_name])
 
+        # For 2DGS, pad a near-zero third scale so build_covariance (which
+        # needs 3 scales) produces a valid thin-disc covariance for physics.
+        scales_for_cov = scales
+        if num_scales == 2:
+            scales_for_cov = np.concatenate(
+                [scales, np.full((xyz.shape[0], 1), -16.0, dtype=np.float32)],
+                axis=1,
+            )
+
         # Convert to CUDA tensors
         pos = torch.tensor(xyz, dtype=torch.float32, device="cuda")
         opacity = torch.sigmoid(torch.tensor(opacities, dtype=torch.float32, device="cuda"))
-        scaling = torch.exp(torch.tensor(scales, dtype=torch.float32, device="cuda"))
+        scaling = torch.exp(torch.tensor(scales_for_cov, dtype=torch.float32, device="cuda"))
         rotation_quat = torch.tensor(rots, dtype=torch.float32, device="cuda")
-        # normalize quaternion
         rotation_quat = torch.nn.functional.normalize(rotation_quat, dim=1)
+
+        # Original (non-padded) activated scales for rendering
+        scales_raw = torch.exp(torch.tensor(scales, dtype=torch.float32, device="cuda"))
 
         # features: (N, SH_total, 3) – dc first, then rest
         features_dc_t = torch.tensor(features_dc, dtype=torch.float32, device="cuda")  # (N,3,1)
         features_rest_t = torch.tensor(features_extra, dtype=torch.float32, device="cuda")  # (N,3,SH-1)
         shs = torch.cat([features_dc_t, features_rest_t], dim=2)  # (N, 3, SH_total)
-        shs = shs.transpose(1, 2)  # → (N, SH_total, 3)
+        shs = shs.transpose(1, 2)  # -> (N, SH_total, 3)
 
         cov3D = build_covariance(scaling, rotation_quat)
         screen_points = torch.zeros_like(pos, requires_grad=False)
@@ -347,6 +367,9 @@ class GaussianRenderer:
             "opacity": opacity,
             "shs": shs,
             "screen_points": screen_points,
+            "gs_type": gs_type,
+            "quats": rotation_quat,
+            "scales": scales_raw,
         }
 
     # ── SH → RGB conversion ───────────────────────────────────────────
@@ -381,26 +404,26 @@ class GaussianRenderer:
         self,
         camera: "SimpleCamera",
         means: torch.Tensor,
-        cov6: torch.Tensor,
         colors: torch.Tensor,
         opacities: torch.Tensor,
         bg_color: Optional[torch.Tensor] = None,
+        *,
+        cov6: Optional[torch.Tensor] = None,
+        quats: Optional[torch.Tensor] = None,
+        scales: Optional[torch.Tensor] = None,
     ) -> tuple:
         """Render one frame via the selected rasterization backend.
 
-        Args:
-            camera: SimpleCamera with intrinsics / extrinsics.
-            means: (N, 3) Gaussian centres in world space.
-            cov6: (N, 6) upper-triangle covariance.
-            colors: (N, 3) pre-computed RGB colours.
-            opacities: (N, 1) per-Gaussian opacity.
-            bg_color: (3,) background colour.
+        Pass **either** ``cov6`` (3DGS) **or** ``quats`` + ``scales`` (2DGS).
 
         Returns:
             rendered: (3, H, W) float32 rendered image.
             meta: backend-specific metadata dict.
         """
-        return self.backend.render(camera, means, cov6, colors, opacities, bg_color)
+        return self.backend.render(
+            camera, means, colors, opacities, bg_color,
+            cov6=cov6, quats=quats, scales=scales,
+        )
 
     # ── Camera from cameras.json ──────────────────────────────────────
 

@@ -16,7 +16,11 @@ import newton
 from newton.solvers import SolverImplicitMPM
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
-from physics_sim.backend.newton_mpm.kernels import compute_cov_from_F, compute_R_from_F
+from physics_sim.backend.newton_mpm.kernels import (
+    compute_cov_from_F,
+    compute_R_from_F,
+    compute_R_quats_scales_from_F,
+)
 
 
 # ── Material presets ─────────────────────────────────────────────────────
@@ -116,6 +120,13 @@ class NewtonMPMBackend(PhysicsBackend):
         self._out_cov: wp.array | None = None     # (N*6,) float, flat
         self._out_R: wp.array | None = None       # (N,) mat33
 
+        # 2DGS support: quats + scales output from SVD
+        self._init_quats_wp: wp.array | None = None    # (N,) vec4 wxyz
+        self._init_scales_wp: wp.array | None = None   # (N*S,) float flat
+        self._out_quats_wp: wp.array | None = None     # (N,) vec4 wxyz
+        self._out_scales_wp: wp.array | None = None    # (N*S,) float flat
+        self._num_scales: int = 0
+
         self._n_particles: int = 0
         self._grid_lim: float = 2.0
         self._time: float = 0.0
@@ -207,6 +218,17 @@ class NewtonMPMBackend(PhysicsBackend):
             covariances.detach().cpu().numpy().astype(np.float32).reshape(-1)
         )
         self._volumes = vol_np
+
+        # 2DGS: store initial quats + scales for SVD-based output
+        iq = kwargs.get("init_quats")
+        isc = kwargs.get("init_scales")
+        if iq is not None and isc is not None:
+            self._init_quats_np = iq.detach().cpu().numpy().astype(np.float32)
+            self._init_scales_np = isc.detach().cpu().numpy().astype(np.float32)
+            self._num_scales = isc.shape[1]
+        else:
+            self._init_quats_np = None
+            self._init_scales_np = None
 
     def set_material(self, material_params: dict) -> None:
         """Configure Newton MPM material from the existing config dict.
@@ -514,6 +536,19 @@ class NewtonMPMBackend(PhysicsBackend):
         self._out_cov = wp.zeros(n * 6, dtype=float, device=self._device)
         self._out_R = wp.zeros(n, dtype=wp.mat33, device=self._device)
 
+        # ── 2DGS quats/scales buffers ─────────────────────────────────
+        if self._init_quats_np is not None:
+            self._init_quats_wp = wp.from_numpy(
+                self._init_quats_np.reshape(-1, 4), dtype=wp.vec4, device=self._device,
+            )
+            self._init_scales_wp = wp.from_numpy(
+                self._init_scales_np.reshape(-1), dtype=float, device=self._device,
+            )
+            self._out_quats_wp = wp.zeros(n, dtype=wp.vec4, device=self._device)
+            self._out_scales_wp = wp.zeros(
+                n * self._num_scales, dtype=float, device=self._device,
+            )
+
         # Apply material params now that model exists.
         self._apply_material_to_model()
 
@@ -579,13 +614,34 @@ class NewtonMPMBackend(PhysicsBackend):
         )
         cov = wp.to_torch(self._out_cov).view(n, 6)
 
-        # ── Rotation from F ──────────────────────────────────────────
-        wp.launch(
-            compute_R_from_F,
-            dim=n,
-            inputs=[F, self._out_R],
-            device=self._device,
-        )
+        # ── Rotation (+ quats/scales for 2DGS) from F ────────────────
+        out_quats_t = None
+        out_scales_t = None
+
+        if self._init_quats_wp is not None:
+            wp.launch(
+                compute_R_quats_scales_from_F,
+                dim=n,
+                inputs=[
+                    F,
+                    self._init_quats_wp,
+                    self._init_scales_wp,
+                    self._num_scales,
+                    self._out_R,
+                    self._out_quats_wp,
+                    self._out_scales_wp,
+                ],
+                device=self._device,
+            )
+            out_quats_t = wp.to_torch(self._out_quats_wp).view(n, 4)
+            out_scales_t = wp.to_torch(self._out_scales_wp).view(n, self._num_scales)
+        else:
+            wp.launch(
+                compute_R_from_F,
+                dim=n,
+                inputs=[F, self._out_R],
+                device=self._device,
+            )
         rot = wp.to_torch(self._out_R).view(n, 3, 3)
 
         return SimulationState(
@@ -593,6 +649,8 @@ class NewtonMPMBackend(PhysicsBackend):
             covariances=cov,
             rotations=rot,
             velocities=vel,
+            quats=out_quats_t,
+            scales=out_scales_t,
         )
 
     # ------------------------------------------------------------------

@@ -5,11 +5,13 @@ This wraps the original MPM_Simulator_WARP class and exposes a clean,
 backend-agnostic API through PhysicsBackend / SimulationState.
 """
 
+import numpy as np
 import warp as wp
 import torch
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
 from physics_sim.backend.warp_mpm.mpm_solver_warp import MPM_Simulator_WARP
+from physics_sim.backend.newton_mpm.kernels import compute_R_quats_scales_from_F
 
 
 def _set_boundary_conditions(mpm_solver: MPM_Simulator_WARP, bc_params: list, time_params: dict):
@@ -101,6 +103,14 @@ class WarpMPMBackend(PhysicsBackend):
         self._solver: MPM_Simulator_WARP = None
         self._device = device
 
+        # 2DGS support
+        self._init_quats_wp: wp.array | None = None
+        self._init_scales_wp: wp.array | None = None
+        self._out_quats_wp: wp.array | None = None
+        self._out_scales_wp: wp.array | None = None
+        self._num_scales: int = 0
+        self._out_R_wp: wp.array | None = None
+
     # ------------------------------------------------------------------
     # PhysicsBackend interface
     # ------------------------------------------------------------------
@@ -121,6 +131,26 @@ class WarpMPMBackend(PhysicsBackend):
             n_grid=n_grid, grid_lim=grid_lim, device=self._device,
         )
 
+        # 2DGS: store initial quats + scales
+        iq = kwargs.get("init_quats")
+        isc = kwargs.get("init_scales")
+        if iq is not None and isc is not None:
+            n = positions.shape[0]
+            self._num_scales = isc.shape[1]
+            iq_np = iq.detach().cpu().numpy().astype(np.float32)
+            isc_np = isc.detach().cpu().numpy().astype(np.float32)
+            self._init_quats_wp = wp.from_numpy(
+                iq_np.reshape(-1, 4), dtype=wp.vec4, device=self._device,
+            )
+            self._init_scales_wp = wp.from_numpy(
+                isc_np.reshape(-1), dtype=float, device=self._device,
+            )
+            self._out_quats_wp = wp.zeros(n, dtype=wp.vec4, device=self._device)
+            self._out_scales_wp = wp.zeros(
+                n * self._num_scales, dtype=float, device=self._device,
+            )
+            self._out_R_wp = wp.zeros(n, dtype=wp.mat33, device=self._device)
+
     def set_material(self, material_params: dict) -> None:
         self._solver.set_parameters_dict(material_params, device=self._device)
         # NOTE: finalize_mu_lam must be called AFTER set_boundary_conditions
@@ -140,12 +170,41 @@ class WarpMPMBackend(PhysicsBackend):
     def get_state(self) -> SimulationState:
         pos = self._solver.export_particle_x_to_torch()
         cov = self._solver.export_particle_cov_to_torch(device=self._device)
-        rot = self._solver.export_particle_R_to_torch(device=self._device)
+        vel = self._solver.export_particle_v_to_torch()
+
+        out_quats_t = None
+        out_scales_t = None
+
+        if self._init_quats_wp is not None:
+            n = self._solver.n_particles
+            F = self._solver.mpm_state.particle_F_trial
+            wp.launch(
+                compute_R_quats_scales_from_F,
+                dim=n,
+                inputs=[
+                    F,
+                    self._init_quats_wp,
+                    self._init_scales_wp,
+                    self._num_scales,
+                    self._out_R_wp,
+                    self._out_quats_wp,
+                    self._out_scales_wp,
+                ],
+                device=self._device,
+            )
+            rot = wp.to_torch(self._out_R_wp).reshape(-1, 9)
+            out_quats_t = wp.to_torch(self._out_quats_wp).view(n, 4)
+            out_scales_t = wp.to_torch(self._out_scales_wp).view(n, self._num_scales)
+        else:
+            rot = self._solver.export_particle_R_to_torch(device=self._device)
+
         return SimulationState(
             positions=pos,
             covariances=cov.view(-1, 6),
             rotations=rot.view(-1, 3, 3),
-            velocities=self._solver.export_particle_v_to_torch(),
+            velocities=vel,
+            quats=out_quats_t,
+            scales=out_scales_t,
         )
 
     # ------------------------------------------------------------------

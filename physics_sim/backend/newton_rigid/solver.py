@@ -97,6 +97,26 @@ def _quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
     return R
 
 
+def _compose_body_quat_wxyz(
+    body_quat_xyzw: torch.Tensor,
+    init_quats_wxyz: torch.Tensor,
+) -> torch.Tensor:
+    """Compose a single body quaternion with per-particle initial quaternions.
+
+    ``body_quat_xyzw`` is a single (4,) quaternion in Newton's xyzw convention.
+    ``init_quats_wxyz`` is (N, 4) in 3DGS wxyz convention.
+    Returns (N, 4) in wxyz convention: ``q_body * q_init`` (Hamilton product).
+    """
+    bx, by, bz, bw = body_quat_xyzw[0], body_quat_xyzw[1], body_quat_xyzw[2], body_quat_xyzw[3]
+    iw, ix, iy, iz = init_quats_wxyz[:, 0], init_quats_wxyz[:, 1], init_quats_wxyz[:, 2], init_quats_wxyz[:, 3]
+    ow = bw * iw - bx * ix - by * iy - bz * iz
+    ox = bw * ix + bx * iw + by * iz - bz * iy
+    oy = bw * iy - bx * iz + by * iw + bz * ix
+    oz = bw * iz + bx * iy - by * ix + bz * iw
+    out = torch.stack([ow, ox, oy, oz], dim=1)
+    return torch.nn.functional.normalize(out, dim=1)
+
+
 def _unpack_cov6_to_3x3(cov6: torch.Tensor) -> torch.Tensor:
     """(N, 6) upper-triangle → (N, 3, 3) symmetric matrix."""
     N = cov6.shape[0]
@@ -139,6 +159,8 @@ class _BodyInfo:
     init_local_pos: torch.Tensor  # (N, 3) positions in body-local frame
     init_cov_3x3: torch.Tensor   # (N, 3, 3) initial covariances
     initial_velocity: Optional[tuple[float, float, float]] = None  # linear velocity [vx, vy, vz]
+    init_quats: Optional[torch.Tensor] = None   # (N, 4) wxyz — for 2DGS
+    init_scales: Optional[torch.Tensor] = None   # (N, 2|3) — for 2DGS
 
 
 # ── Backend ──────────────────────────────────────────────────────────────
@@ -202,6 +224,12 @@ class NewtonRigidBackend(PhysicsBackend):
         self._init_covariances = covariances.clone().to(self._device)
         self._n_particles = positions.shape[0]
         self._grid_lim = grid_lim
+
+        # 2DGS support: store per-particle quats & scales for direct output
+        iq = kwargs.get("init_quats")
+        self._init_quats = iq.clone().to(self._device) if iq is not None else None
+        isc = kwargs.get("init_scales")
+        self._init_scales = isc.clone().to(self._device) if isc is not None else None
 
         # ── Collision geometry config ───────────────────────────────
         # Supported: "obb", "ellipsoid", "convex_hull", "alpha_shape"
@@ -546,6 +574,16 @@ class NewtonRigidBackend(PhysicsBackend):
             dtype=torch.float32,
         )
 
+        has_2dgs = self._init_quats is not None
+        if has_2dgs:
+            out_quats = torch.zeros(
+                (self._n_particles, 4), device=self._device, dtype=torch.float32,
+            )
+            out_scales = torch.zeros(
+                (self._n_particles, self._init_scales.shape[1]),
+                device=self._device, dtype=torch.float32,
+            )
+
         for body in self._bodies:
             t = body_q[body.body_idx]
             body_pos = torch.tensor(
@@ -575,10 +613,16 @@ class NewtonRigidBackend(PhysicsBackend):
             covariances[idx] = new_cov_6
             rotations[idx] = R_expand
 
+            if has_2dgs and body.init_quats is not None:
+                out_quats[idx] = _compose_body_quat_wxyz(body_quat, body.init_quats)
+                out_scales[idx] = body.init_scales
+
         return SimulationState(
             positions=positions,
             covariances=covariances,
             rotations=rotations,
+            quats=out_quats if has_2dgs else None,
+            scales=out_scales if has_2dgs else None,
         )
 
     # ── Internal helpers ─────────────────────────────────────────────
@@ -693,6 +737,9 @@ class NewtonRigidBackend(PhysicsBackend):
         cov6 = self._init_covariances[idx_t]
         cov_3x3 = _unpack_cov6_to_3x3(cov6)
 
+        iq = self._init_quats[idx_t] if self._init_quats is not None else None
+        isc = self._init_scales[idx_t] if self._init_scales is not None else None
+
         self._bodies.append(
             _BodyInfo(
                 body_idx=body_idx,
@@ -700,6 +747,8 @@ class NewtonRigidBackend(PhysicsBackend):
                 init_local_pos=local_pos,
                 init_cov_3x3=cov_3x3,
                 initial_velocity=initial_velocity,
+                init_quats=iq,
+                init_scales=isc,
             )
         )
         vel_str = f", initial_velocity={initial_velocity}" if initial_velocity else ""
@@ -776,6 +825,9 @@ class NewtonRigidBackend(PhysicsBackend):
         cov6 = self._init_covariances[idx_t]
         cov_3x3 = _unpack_cov6_to_3x3(cov6)
 
+        iq = self._init_quats[idx_t] if self._init_quats is not None else None
+        isc = self._init_scales[idx_t] if self._init_scales is not None else None
+
         self._bodies.append(
             _BodyInfo(
                 body_idx=body_idx,
@@ -783,6 +835,8 @@ class NewtonRigidBackend(PhysicsBackend):
                 init_local_pos=local_pos,
                 init_cov_3x3=cov_3x3,
                 initial_velocity=initial_velocity,
+                init_quats=iq,
+                init_scales=isc,
             )
         )
         vel_str = f", initial_velocity={initial_velocity}" if initial_velocity else ""
