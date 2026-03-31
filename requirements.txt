@@ -13,3 +13,4 @@ torch==2.0.0
 torchvision==0.15.1
 tqdm==4.66.1
 warp_lang==0.10.1
+gsplat

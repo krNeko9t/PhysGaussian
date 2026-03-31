@@ -8,9 +8,12 @@ Usage:
         --config    config/wolf_config.json  \
         --output    output/wolf              \
         --cameras_json path/to/cameras.json  \
+        [--raster_backend gsplat|diffrast]   \
         [--white_bg] [--compile_video]
 
 Only depends on ``physics_sim/`` — no gaussian-splatting submodule needed.
+Rendering uses gsplat by default; pass ``--raster_backend diffrast`` for the
+original diff_gaussian_rasterization backend.
 """
 
 import argparse
@@ -149,10 +152,15 @@ def main():
     parser.add_argument(
         "--no_render",
         action="store_true",
-        help="Run physics but skip rendering (no diff_gaussian_rasterization needed).",
+        help="Run physics but skip rendering (no rasterization backend needed).",
     )
     parser.add_argument("--sh_degree", type=int, default=3,
                         help="SH degree of the PLY model (default: 3)")
+    parser.add_argument(
+        "--raster_backend", type=str, default="gsplat",
+        choices=["gsplat", "diffrast"],
+        help="Rasterization backend: gsplat (default) or diffrast",
+    )
     parser.add_argument("--backend", type=str, default="auto",
                         choices=["auto", "none", "warp_mpm", "newton_mpm", "newton_rigid", "newton_vbd"],
                         help="Physics backend (default: auto — read from config JSON, fallback warp_mpm)")
@@ -311,7 +319,8 @@ def main():
 
     # ── 2. Load 3DGS PLY ─────────────────────────────────────────────
     print("Loading 3DGS point cloud...")
-    renderer = GaussianRenderer(sh_degree=args.sh_degree)
+    raster_be = "gsplat" if args.no_render else args.raster_backend
+    renderer = GaussianRenderer(sh_degree=args.sh_degree, raster_backend=raster_be)
     axis_perm = preprocessing_params.get("axis_permutation", "xyz")
     params = renderer.load_ply(args.ply_path)
 
@@ -1154,7 +1163,6 @@ def main():
             )
         else:
             camera = renderer.build_camera_fixed(camera_params=camera_params)
-        rasterize = renderer.build_rasterizer(camera, bg_color)
 
         # Substep simulation
         for step in range(step_per_frame):
@@ -1244,16 +1252,13 @@ def main():
 
         # Convert SH → RGB and rasterise
         colors_precomp = renderer.convert_sh(cur_shs, camera, pos, rot)
-        screen_points = torch.zeros((pos.shape[0], 3), device="cuda")
-        rendering, radii = rasterize(
-            means3D=pos,
-            means2D=screen_points,
-            shs=None,
-            colors_precomp=colors_precomp,
+        rendering, _meta = renderer.render(
+            camera=camera,
+            means=pos,
+            cov6=cov3D,
+            colors=colors_precomp,
             opacities=cur_opacity,
-            scales=None,
-            rotations=None,
-            cov3D_precomp=cov3D,
+            bg_color=bg_color,
         )
 
         # Save frame

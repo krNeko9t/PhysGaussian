@@ -6,10 +6,11 @@ by reimplementing just the subset of logic needed for rendering:
   - PLY loading (positions, SH features, scaling, rotation, opacity)
   - Covariance computation from scaling + rotation
   - Spherical-harmonics → RGB conversion
-  - Rasterisation via diff_gaussian_rasterization (still required as a pip dep)
+  - Rasterisation via pluggable backend (gsplat or diff_gaussian_rasterization)
   - Camera construction from cameras.json
 
-The only external CUDA dependency is ``diff_gaussian_rasterization``.
+Rasterization is delegated to a ``RasterBackend`` (see ``backend_base.py``).
+Supported backends: ``gsplat`` (default), ``diffrast``.
 """
 
 import math
@@ -174,9 +175,14 @@ class SimpleCamera:
         self.znear = 0.01
         self.zfar = 100.0
 
-        self.world_view_transform = (
-            torch.tensor(getWorld2View2(R, T)).transpose(0, 1).cuda()
-        )
+        w2v = getWorld2View2(R, T)
+
+        # Row-major world-to-camera 4x4 (used by gsplat)
+        self.viewmat = torch.tensor(w2v, dtype=torch.float32).cuda()
+
+        # Column-major variant (used by diff_gaussian_rasterization)
+        self.world_view_transform = self.viewmat.transpose(0, 1).contiguous()
+
         self.projection_matrix = (
             getProjectionMatrix(self.znear, self.zfar, FoVx, FoVy).transpose(0, 1).cuda()
         )
@@ -186,6 +192,15 @@ class SimpleCamera:
             ).squeeze(0)
         )
         self.camera_center = self.world_view_transform.inverse()[3, :3]
+
+        # 3x3 intrinsic matrix (used by gsplat)
+        fx = fov2focal(FoVx, float(width))
+        fy = fov2focal(FoVy, float(height))
+        self.K = torch.tensor([
+            [fx, 0.0, width * 0.5],
+            [0.0, fy, height * 0.5],
+            [0.0, 0.0, 1.0],
+        ], dtype=torch.float32).cuda()
 
 
 def generate_camera_rotation_matrix(camera_to_object, object_vertical_downward):
@@ -239,17 +254,19 @@ class GaussianRenderer:
 
     Usage::
 
-        renderer = GaussianRenderer(sh_degree=3)
+        renderer = GaussianRenderer(sh_degree=3, raster_backend="gsplat")
         params = renderer.load_ply("path/to/point_cloud.ply")
-        # params contains: pos, cov3D_precomp, opacity, shs, screen_points
 
         cam = renderer.build_camera_from_json("cameras.json", camera_params, ...)
-        rasterizer = renderer.build_rasterizer(cam)
-        image, radii = rasterizer(means3D=..., means2D=..., ...)
+        colors = renderer.convert_sh(shs, cam, pos, rot)
+        image, meta = renderer.render(cam, pos, cov3D, colors, opacity, bg)
     """
 
-    def __init__(self, sh_degree: int = 3):
+    def __init__(self, sh_degree: int = 3, raster_backend: str = "gsplat"):
+        from physics_sim.renderer.backend_base import create_raster_backend
+
         self.sh_degree = sh_degree
+        self.backend = create_raster_backend(raster_backend, sh_degree)
 
     def load_ply(self, ply_path: str) -> dict:
         """Load a 3DGS PLY checkpoint and return extracted parameters.
@@ -358,43 +375,32 @@ class GaussianRenderer:
         sh2rgb = eval_sh(self.sh_degree, shs_view, dir_pp_normalized)
         return torch.clamp_min(sh2rgb + 0.5, 0.0)
 
-    # ── Rasteriser builder ─────────────────────────────────────────────
+    # ── Render (delegates to backend) ────────────────────────────────────
 
-    def build_rasterizer(
+    def render(
         self,
         camera: "SimpleCamera",
+        means: torch.Tensor,
+        cov6: torch.Tensor,
+        colors: torch.Tensor,
+        opacities: torch.Tensor,
         bg_color: Optional[torch.Tensor] = None,
-        scaling_modifier: float = 1.0,
-    ):
-        try:
-            from diff_gaussian_rasterization import (
-                GaussianRasterizationSettings,
-                GaussianRasterizer,
-            )
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(
-                "diff_gaussian_rasterization is required for rendering. "
-                "Install it or run pipeline.py with --no_render."
-            ) from e
-        if bg_color is None:
-            bg_color = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
-        tanfovx = math.tan(camera.FoVx * 0.5)
-        tanfovy = math.tan(camera.FoVy * 0.5)
-        settings = GaussianRasterizationSettings(
-            image_height=int(camera.image_height),
-            image_width=int(camera.image_width),
-            tanfovx=tanfovx,
-            tanfovy=tanfovy,
-            bg=bg_color,
-            scale_modifier=scaling_modifier,
-            viewmatrix=camera.world_view_transform,
-            projmatrix=camera.full_proj_transform,
-            sh_degree=self.sh_degree,
-            campos=camera.camera_center,
-            prefiltered=False,
-            debug=False,
-        )
-        return GaussianRasterizer(raster_settings=settings)
+    ) -> tuple:
+        """Render one frame via the selected rasterization backend.
+
+        Args:
+            camera: SimpleCamera with intrinsics / extrinsics.
+            means: (N, 3) Gaussian centres in world space.
+            cov6: (N, 6) upper-triangle covariance.
+            colors: (N, 3) pre-computed RGB colours.
+            opacities: (N, 1) per-Gaussian opacity.
+            bg_color: (3,) background colour.
+
+        Returns:
+            rendered: (3, H, W) float32 rendered image.
+            meta: backend-specific metadata dict.
+        """
+        return self.backend.render(camera, means, cov6, colors, opacities, bg_color)
 
     # ── Camera from cameras.json ──────────────────────────────────────
 
