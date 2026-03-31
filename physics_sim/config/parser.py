@@ -33,7 +33,7 @@ def decode_param_json(json_file: str):
     Returns:
         (material_params, bc_params, time_params,
          preprocessing_params, camera_params, backend_overrides,
-         scene_objects)
+         scene_objects, config_backend)
 
     ``backend_overrides`` — dict keyed by backend name for per-backend
     parameter overrides (time stepping, solver options, etc.).
@@ -236,6 +236,9 @@ def decode_param_json(json_file: str):
                 "collider": obj_def.get("collider", None),
             })
 
+    # Optional top-level "backend" field (written by phys_desc_to_config.py).
+    config_backend = sim_params.get("backend", None)
+
     return (material_params, bc_params, time_params,
             preprocessing_params, camera_params, backend_overrides,
-            scene_objects)
+            scene_objects, config_backend)

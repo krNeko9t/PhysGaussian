@@ -1,0 +1,31 @@
+{
+  "_comment": "Geometry form to collision geometry mapping. Maps phys_desc.json geometry_form values to Newton backend collision shape parameters. All values are editable.",
+
+  "solid": {
+    "collision_geometry": "convex_hull",
+    "use_sdf": true
+  },
+  "hollow": {
+    "collision_geometry": "alpha_shape",
+    "use_sdf": true,
+    "alpha": 0.05
+  },
+  "thin_sheet": {
+    "collision_geometry": "alpha_shape",
+    "use_sdf": false,
+    "alpha": 0.02
+  },
+  "stuffed": {
+    "collision_geometry": "convex_hull",
+    "use_sdf": false
+  },
+  "filamentary": {
+    "collision_geometry": "alpha_shape",
+    "use_sdf": false,
+    "alpha": 0.03
+  },
+  "uncertain": {
+    "collision_geometry": "convex_hull",
+    "use_sdf": true
+  }
+}

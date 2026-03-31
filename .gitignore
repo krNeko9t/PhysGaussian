@@ -9,3 +9,4 @@ model
 log
 bread-trained/
 phys_desc.json
+gen_pmt.txt

@@ -1,0 +1,51 @@
+{
+  "_comment": "Material parameter lookup table. Maps phys_desc.json semantic descriptors to numerical physics parameters. All values are editable defaults — tune them to match your simulation needs.",
+
+  "prototypes": {
+    "rigid_plastic":    {"density": 1050, "E": 2e9,   "nu": 0.35, "mu": 0.40},
+    "metal":            {"density": 7800, "E": 2e11,  "nu": 0.30, "mu": 0.30},
+    "wood":             {"density":  600, "E": 1e10,  "nu": 0.35, "mu": 0.50},
+    "rubber":           {"density": 1100, "E": 1e7,   "nu": 0.48, "mu": 0.80},
+    "organic_soft":     {"density":  950, "E": 1e5,   "nu": 0.45, "mu": 0.50},
+    "fabric":           {"density":  300, "E": 1e6,   "nu": 0.30, "mu": 0.60},
+    "foam":             {"density":   50, "E": 5e4,   "nu": 0.30, "mu": 0.50},
+    "brittle_mineral":  {"density": 2500, "E": 5e10,  "nu": 0.25, "mu": 0.60},
+    "flexible_plastic": {"density":  950, "E": 5e8,   "nu": 0.40, "mu": 0.45},
+    "paper_fiber":      {"density":  700, "E": 3e9,   "nu": 0.30, "mu": 0.50},
+    "leather":          {"density":  860, "E": 1e8,   "nu": 0.40, "mu": 0.55},
+    "liquid":           {"density": 1000, "E": 0,     "nu": 0.49, "mu": 0.00},
+    "granular":         {"density": 1500, "E": 1e6,   "nu": 0.30, "mu": 0.60},
+    "unknown":          {"density":  500, "E": 1e7,   "nu": 0.35, "mu": 0.40}
+  },
+
+  "bin_scales": {
+    "heaviness_bin": {
+      "very_light": 0.3,
+      "light":      0.6,
+      "medium":     1.0,
+      "heavy":      2.0,
+      "very_heavy": 5.0,
+      "unknown":    1.0
+    },
+    "stiffness_bin": {
+      "very_soft": 0.1,
+      "soft":      0.3,
+      "medium":    1.0,
+      "stiff":     3.0,
+      "very_stiff":10.0,
+      "unknown":   1.0
+    },
+    "surface_friction_bin": {
+      "low":     0.5,
+      "medium":  1.0,
+      "high":    1.5,
+      "unknown": 1.0
+    }
+  },
+
+  "bin_targets": {
+    "heaviness_bin":       "density",
+    "stiffness_bin":       "E",
+    "surface_friction_bin": "mu"
+  }
+}

@@ -4,25 +4,25 @@ overview: 写一个转换器，将 phys_desc.json 的语义级物理描述转换
 todos:
   - id: material-lut
     content: 新建 physics_sim/config/material_lut.json：14种材质原型的数值参数 + bin 缩放因子，作为可编辑的外部配置文件
-    status: pending
+    status: completed
   - id: geometry-lut
     content: 新建 physics_sim/config/geometry_lut.json：geometry_form -> collision_geometry 映射 + 关联参数（use_sdf/alpha 等），同样作为可编辑的外部配置文件
-    status: pending
+    status: completed
   - id: converter-core
     content: 新建 phys_desc_to_config.py：读取 phys_desc.json + 两个 LUT，推断 backend，生成含 backend 字段的完整 config JSON
-    status: pending
+    status: completed
   - id: collider-auto
     content: 在转换器中实现 static 物体的碰撞体自动配置：PCA 判断平面朝向、自动设置 fit/prefer_up/surface/friction
-    status: pending
+    status: completed
   - id: pipeline-backend-field
     content: pipeline.py 适配：当 CLI 未指定 --backend 时，从 config JSON 的 backend 字段读取
-    status: pending
+    status: completed
   - id: scene-defaults
     content: 提供合理的场景级默认参数（gravity/time/camera/axis），允许用户通过 CLI 参数或额外 JSON 覆盖
-    status: pending
+    status: completed
   - id: integration-test
     content: 用 phys_desc.json 实际生成 config 并跑通 pipeline，验证端到端流程
-    status: pending
+    status: completed
 isProject: false
 ---
 

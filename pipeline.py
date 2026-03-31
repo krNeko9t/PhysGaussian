@@ -153,9 +153,9 @@ def main():
     )
     parser.add_argument("--sh_degree", type=int, default=3,
                         help="SH degree of the PLY model (default: 3)")
-    parser.add_argument("--backend", type=str, default="warp_mpm",
-                        choices=["none", "warp_mpm", "newton_mpm", "newton_rigid", "newton_vbd"],
-                        help="Physics backend to use (default: warp_mpm)")
+    parser.add_argument("--backend", type=str, default="auto",
+                        choices=["auto", "none", "warp_mpm", "newton_mpm", "newton_rigid", "newton_vbd"],
+                        help="Physics backend (default: auto — read from config JSON, fallback warp_mpm)")
     parser.add_argument("--debug", action="store_true",
                         help="Print intermediate tensor statistics for debugging")
     parser.add_argument(
@@ -236,7 +236,16 @@ def main():
     print("Loading scene config...")
     (material_params, bc_params, time_params,
      preprocessing_params, camera_params, backend_overrides,
-     scene_objects) = decode_param_json(args.config)
+     scene_objects, config_backend) = decode_param_json(args.config)
+
+    # Resolve backend: CLI "auto" defers to the config JSON's "backend" field.
+    if args.backend == "auto":
+        if config_backend:
+            args.backend = config_backend
+            print(f"Backend from config: {args.backend}")
+        else:
+            args.backend = "warp_mpm"
+            print("No backend in config, defaulting to warp_mpm")
 
     # Apply backend-specific config overrides (if the selected backend
     # has an override section in the JSON).  This keeps all tuneable
