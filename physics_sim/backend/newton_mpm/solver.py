@@ -160,32 +160,34 @@ class NewtonMPMBackend(PhysicsBackend):
         """Build a Newton Model from the preprocessed GS particle data.
 
         Args:
-            positions:   (N, 3) particle positions in MPM space [0, grid_lim].
-            volumes:     (N,)   per-particle volumes.
+            positions:   (N, 3) particle positions in rotated world space.
+            volumes:     (N,)   per-particle volumes (used for mass).
             covariances: (N, 6) upper-triangle covariance matrices.
             n_grid:      Grid resolution (default 100).
-            grid_lim:    Domain extent (default 2.0).
+            grid_lim:    Ignored (kept for interface compat).  voxel_size
+                         is computed from particle bounding box / n_grid.
         """
         self._n_particles = positions.shape[0]
         n = self._n_particles
-        self._grid_lim = float(grid_lim)
 
-        # ── Compute voxel_size from grid params ──────────────────────
-        voxel_size = grid_lim / n_grid
+        # ── Compute voxel_size from particle bounding box ────────────
+        pos_np = positions.detach().cpu().numpy().astype(np.float32)
+        lo = pos_np.min(axis=0)
+        hi = pos_np.max(axis=0)
+        max_extent = float((hi - lo).max())
+        if max_extent < 1e-8:
+            max_extent = 1.0
+        voxel_size = max_extent / max(n_grid, 1)
+        self._grid_lim = max_extent
+        self._bbox_lo = lo.tolist()
+        self._bbox_hi = hi.tolist()
         self._solver_opts.voxel_size = voxel_size
+        print(f"[NewtonMPM] bbox extent={max_extent:.4f}, voxel_size={voxel_size:.6f}")
 
         # ── Build Newton ModelBuilder (finalized in finalize()) ──────
         builder = newton.ModelBuilder()
         SolverImplicitMPM.register_custom_attributes(builder)
 
-        # Add ground plane (will be configured in set_boundary_conditions)
-        # We always add it; surface colliders override behavior.
-        builder.add_shape_plane(
-            cfg=newton.ModelBuilder.ShapeConfig(ke=0.0, kd=0.0, mu=0.0)
-        )
-
-        # Convert torch tensors to numpy
-        pos_np = positions.detach().cpu().numpy().astype(np.float32)
         vol_np = volumes.detach().cpu().numpy().astype(np.float32)
 
         # Compute per-particle mass from volume (density set later in set_material)
@@ -474,17 +476,18 @@ class NewtonMPMBackend(PhysicsBackend):
         for bc in bc_params:
             bc_type = bc["type"]
             if bc_type == "bounding_box":
-                # Add 6 planes for [0, grid_lim]^3
-                lim = float(self._grid_lim)
-                margin = 0.0
+                # Add 6 planes enclosing the particle bounding box with margin
+                margin = self._solver_opts.voxel_size * 2.0
                 wall_cfg = newton.ModelBuilder.ShapeConfig(ke=0.0, kd=0.0, mu=0.0)
+                lo = self._bbox_lo
+                hi = self._bbox_hi
                 planes = [
-                    (1.0, 0.0, 0.0, -margin),          # x > 0
-                    (-1.0, 0.0, 0.0, lim - margin),    # x < lim
-                    (0.0, 1.0, 0.0, -margin),          # y > 0
-                    (0.0, -1.0, 0.0, lim - margin),    # y < lim
-                    (0.0, 0.0, 1.0, -margin),          # z > 0
-                    (0.0, 0.0, -1.0, lim - margin),    # z < lim
+                    (1.0, 0.0, 0.0, -(lo[0] - margin)),
+                    (-1.0, 0.0, 0.0, (hi[0] + margin)),
+                    (0.0, 1.0, 0.0, -(lo[1] - margin)),
+                    (0.0, -1.0, 0.0, (hi[1] + margin)),
+                    (0.0, 0.0, 1.0, -(lo[2] - margin)),
+                    (0.0, 0.0, -1.0, (hi[2] + margin)),
                 ]
                 for p in planes:
                     builder.add_shape_plane(plane=p, cfg=wall_cfg)

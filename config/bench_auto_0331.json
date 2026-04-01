@@ -39,7 +39,7 @@
   "delta_a": -0.6,
   "delta_e": 0.0,
   "delta_r": 0.0,
-  "backend": "newton_rigid",
+  "backend": "newton_vbd",
   "newton_vbd": {
     "substep_dt": 0.0001,
     "collision_geometry": "convex_hull",

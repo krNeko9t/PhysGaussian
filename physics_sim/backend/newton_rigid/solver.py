@@ -223,7 +223,10 @@ class NewtonRigidBackend(PhysicsBackend):
         self._init_positions = positions.clone().to(self._device)
         self._init_covariances = covariances.clone().to(self._device)
         self._n_particles = positions.shape[0]
-        self._grid_lim = grid_lim
+        # Compute bounding box from actual particle positions (not grid_lim)
+        pos_np = positions.detach().cpu().numpy()
+        self._bbox_lo = pos_np.min(axis=0)
+        self._bbox_hi = pos_np.max(axis=0)
 
         # 2DGS support: store per-particle quats & scales for direct output
         iq = kwargs.get("init_quats")
@@ -402,22 +405,25 @@ class NewtonRigidBackend(PhysicsBackend):
                 )
 
             elif bc_type == "bounding_box":
-                # Add 6 planes for [0, grid_lim]^3 bounding box
-                lim = self._grid_lim
-                margin = 0.01  # slight inset to avoid edge cases
+                margin = 0.01
                 wall_cfg = newton.ModelBuilder.ShapeConfig(mu=0.3)
-                # -x, +x, -y, +y, -z, +z
+                lo = self._bbox_lo
+                hi = self._bbox_hi
                 planes = [
-                    (1.0, 0.0, 0.0, -margin),          # x > 0
-                    (-1.0, 0.0, 0.0, lim - margin),    # x < lim
-                    (0.0, 1.0, 0.0, -margin),           # y > 0
-                    (0.0, -1.0, 0.0, lim - margin),     # y < lim
-                    (0.0, 0.0, 1.0, -margin),           # z > 0
-                    (0.0, 0.0, -1.0, lim - margin),     # z < lim
+                    (1.0, 0.0, 0.0, -(lo[0] - margin)),
+                    (-1.0, 0.0, 0.0, (hi[0] + margin)),
+                    (0.0, 1.0, 0.0, -(lo[1] - margin)),
+                    (0.0, -1.0, 0.0, (hi[1] + margin)),
+                    (0.0, 0.0, 1.0, -(lo[2] - margin)),
+                    (0.0, 0.0, -1.0, (hi[2] + margin)),
                 ]
                 for p in planes:
                     builder.add_shape_plane(plane=p, cfg=wall_cfg)
-                print(f"[NewtonRigid] Bounding box [0, {lim}]^3")
+                print(
+                    f"[NewtonRigid] Bounding box "
+                    f"[{lo[0]:.2f},{lo[1]:.2f},{lo[2]:.2f}] – "
+                    f"[{hi[0]:.2f},{hi[1]:.2f},{hi[2]:.2f}]"
+                )
 
     def finalize(self) -> None:
         """Finalize the Newton model and create solver + states."""

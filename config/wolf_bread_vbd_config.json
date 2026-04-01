@@ -7,7 +7,7 @@
 
     "substep_dt": 1e-5,
     "frame_dt": 1e-2,
-    "frame_num": 100,
+    "frame_num": 600,
 
     "E": 1e5,
     "nu": 0.3,
@@ -95,7 +95,7 @@
     "show_hint": false,
     "init_azimuthm": 90,
     "init_elevation": 20,
-    "init_radius": 3.0,
+    "init_radius": 8.0,
     "move_camera": true,
     "delta_a": -1.0,
     "delta_e": 0.0,

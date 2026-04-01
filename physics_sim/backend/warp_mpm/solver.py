@@ -3,6 +3,12 @@ Warp-MPM backend adapter that implements the PhysicsBackend interface.
 
 This wraps the original MPM_Simulator_WARP class and exposes a clean,
 backend-agnostic API through PhysicsBackend / SimulationState.
+
+Normalization note: Warp-MPM requires positions in a fixed [0, grid_lim]^3
+domain.  All coordinate normalization (transform2origin, shift2center111,
+covariance scaling, particle filling, volume computation) is performed
+*inside* this backend so that the pipeline can operate entirely in rotated
+world space.
 """
 
 import numpy as np
@@ -12,6 +18,23 @@ import torch
 from physics_sim.backend.base import PhysicsBackend, SimulationState
 from physics_sim.backend.warp_mpm.mpm_solver_warp import MPM_Simulator_WARP
 from physics_sim.backend.newton_mpm.kernels import compute_R_quats_scales_from_F
+
+from physics_sim.preprocessing.transform import (
+    transform2origin,
+    transform_with_reference,
+    shift2center111,
+    undoshift2center111,
+    undotransform2origin,
+)
+
+try:
+    from physics_sim.preprocessing.particle_filling import (
+        fill_particles as _fill_particles,
+        get_particle_volume as _get_particle_volume,
+    )
+except ImportError:
+    _fill_particles = None
+    _get_particle_volume = None
 
 
 def _set_boundary_conditions(mpm_solver: MPM_Simulator_WARP, bc_params: list, time_params: dict):
@@ -97,11 +120,26 @@ def _set_boundary_conditions(mpm_solver: MPM_Simulator_WARP, bc_params: list, ti
 
 
 class WarpMPMBackend(PhysicsBackend):
-    """Physics backend powered by Warp-MPM (Material Point Method)."""
+    """Physics backend powered by Warp-MPM (Material Point Method).
+
+    Unlike Newton-based backends, Warp-MPM operates in a normalised
+    [0, grid_lim]^3 domain.  This class transparently handles:
+
+    * Forward normalisation in ``initialize()`` (positions, covariances)
+    * Particle filling and volume computation
+    * Inverse normalisation in ``get_state()``
+    * BC point conversion in ``set_boundary_conditions()``
+
+    The pipeline only needs to pass rotated world-space data.
+    """
 
     def __init__(self, device: str = "cuda:0"):
         self._solver: MPM_Simulator_WARP = None
         self._device = device
+
+        # Normalisation bookkeeping (set in initialize)
+        self._scale_origin: torch.Tensor | None = None
+        self._original_mean_pos: torch.Tensor | None = None
 
         # 2DGS support
         self._init_quats_wp: wp.array | None = None
@@ -125,17 +163,90 @@ class WarpMPMBackend(PhysicsBackend):
         grid_lim: float = 2.0,
         **kwargs,
     ) -> None:
+        """Build and load the Warp-MPM solver from rotated world-space data.
+
+        The method internally normalises positions to [0, grid_lim]^3,
+        optionally fills interior particles, and computes per-particle
+        volumes.  The caller does NOT need to pre-normalise.
+
+        Extra kwargs consumed here (ignored by other backends):
+            scale (float):  Preprocessing scale factor (default 1.0).
+            opacity (Tensor | None):  (N, 1) per-particle opacity for filling.
+            filling_params (dict | None):  Particle filling configuration.
+            material_grid_lim (float):  grid_lim used for fill dx (default grid_lim).
+        """
+        scale = kwargs.get("scale", 1.0)
+        opacity = kwargs.get("opacity")
+        filling_params = kwargs.get("filling_params")
+
+        # ── 1. Normalise positions to MPM domain ─────────────────────
+        transformed_pos, scale_origin, original_mean_pos = transform2origin(
+            positions, scale
+        )
+        transformed_pos = shift2center111(transformed_pos)
+
+        self._scale_origin = scale_origin
+        self._original_mean_pos = original_mean_pos
+
+        # ── 2. Scale covariances ─────────────────────────────────────
+        scaled_cov = (scale_origin * scale_origin * covariances).to(self._device)
+
+        # ── 3. Particle filling (optional) ───────────────────────────
+        gs_num = transformed_pos.shape[0]
+        if filling_params is not None and opacity is not None:
+            if _fill_particles is None:
+                raise ModuleNotFoundError(
+                    "Particle filling requires Taichi (physics_sim.preprocessing."
+                    "particle_filling).  Install taichi or disable particle_filling."
+                )
+            fill_grid_dx = grid_lim / filling_params["n_grid"]
+            mpm_pos = _fill_particles(
+                pos=transformed_pos,
+                opacity=opacity,
+                cov=scaled_cov[:gs_num],
+                grid_n=filling_params["n_grid"],
+                max_samples=filling_params["max_particles_num"],
+                grid_dx=fill_grid_dx,
+                density_thres=filling_params["density_threshold"],
+                search_thres=filling_params["search_threshold"],
+                max_particles_per_cell=filling_params["max_partciels_per_cell"],
+                search_exclude_dir=filling_params["search_exclude_direction"],
+                ray_cast_dir=filling_params["ray_cast_direction"],
+                boundary=filling_params["boundary"],
+                smooth=filling_params["smooth"],
+            ).to(device=self._device)
+            print(f"[WarpMPM] Filled: {gs_num} gs + {mpm_pos.shape[0] - gs_num} interior")
+        else:
+            mpm_pos = transformed_pos.to(device=self._device)
+
+        # ── 4. Compute volumes ───────────────────────────────────────
+        if _get_particle_volume is not None:
+            dx = grid_lim / n_grid
+            mpm_vol = _get_particle_volume(
+                mpm_pos, n_grid, dx, uniform=False,
+            ).to(device=self._device)
+        else:
+            dx = grid_lim / n_grid
+            mpm_vol = torch.full(
+                (mpm_pos.shape[0],), float(dx ** 3), device=self._device,
+            )
+
+        # ── 5. Build full covariance array (gs + filled zeros) ───────
+        mpm_cov = torch.zeros((mpm_pos.shape[0], 6), device=self._device)
+        mpm_cov[:gs_num] = scaled_cov[:gs_num]
+
+        # ── 6. Create raw solver ─────────────────────────────────────
         self._solver = MPM_Simulator_WARP(10)
         self._solver.load_initial_data_from_torch(
-            positions, volumes, covariances,
+            mpm_pos, mpm_vol, mpm_cov,
             n_grid=n_grid, grid_lim=grid_lim, device=self._device,
         )
 
-        # 2DGS: store initial quats + scales
+        # ── 7. 2DGS quats / scales ──────────────────────────────────
         iq = kwargs.get("init_quats")
         isc = kwargs.get("init_scales")
         if iq is not None and isc is not None:
-            n = positions.shape[0]
+            n = mpm_pos.shape[0]
             self._num_scales = isc.shape[1]
             iq_np = iq.detach().cpu().numpy().astype(np.float32)
             isc_np = isc.detach().cpu().numpy().astype(np.float32)
@@ -153,12 +264,38 @@ class WarpMPMBackend(PhysicsBackend):
 
     def set_material(self, material_params: dict) -> None:
         self._solver.set_parameters_dict(material_params, device=self._device)
-        # NOTE: finalize_mu_lam must be called AFTER set_boundary_conditions
-        # (same order as original gs_simulation.py). Call finalize() separately.
         self._material_set = True
 
     def set_boundary_conditions(self, bc_params: list, time_params: dict) -> None:
-        _set_boundary_conditions(self._solver, bc_params, time_params)
+        """Convert BCs from rotated world space to MPM space, then register."""
+        converted = []
+        for bc in bc_params:
+            bc_new = dict(bc)
+            # Convert position-valued fields to MPM space
+            if "point" in bc and bc.get("type") != "bounding_box":
+                p = torch.tensor(bc["point"], device="cuda", dtype=torch.float32).reshape(1, 3)
+                p_mpm = shift2center111(
+                    transform_with_reference(p, self._scale_origin, self._original_mean_pos)
+                )[0]
+                bc_new["point"] = [float(x) for x in p_mpm.cpu().tolist()]
+            if "size" in bc:
+                s = torch.tensor(bc["size"], device="cuda", dtype=torch.float32)
+                s_mpm = s * self._scale_origin
+                bc_new["size"] = [float(x) for x in s_mpm.cpu().tolist()]
+            if "start_position" in bc:
+                p = torch.tensor(bc["start_position"], device="cuda", dtype=torch.float32).reshape(1, 3)
+                p_mpm = shift2center111(
+                    transform_with_reference(p, self._scale_origin, self._original_mean_pos)
+                )[0]
+                bc_new["start_position"] = [float(x) for x in p_mpm.cpu().tolist()]
+            if "end_position" in bc:
+                p = torch.tensor(bc["end_position"], device="cuda", dtype=torch.float32).reshape(1, 3)
+                p_mpm = shift2center111(
+                    transform_with_reference(p, self._scale_origin, self._original_mean_pos)
+                )[0]
+                bc_new["end_position"] = [float(x) for x in p_mpm.cpu().tolist()]
+            converted.append(bc_new)
+        _set_boundary_conditions(self._solver, converted, time_params)
 
     def finalize(self) -> None:
         """Finalize material parameters (mu, lam). Must be called after set_boundary_conditions."""
@@ -168,9 +305,19 @@ class WarpMPMBackend(PhysicsBackend):
         self._solver.p2g2p(frame, dt, device=self._device)
 
     def get_state(self) -> SimulationState:
+        """Export state with positions/covariances converted back to rotated world space."""
         pos = self._solver.export_particle_x_to_torch()
         cov = self._solver.export_particle_cov_to_torch(device=self._device)
         vel = self._solver.export_particle_v_to_torch()
+
+        # ── Inverse normalisation: MPM → rotated world space ─────────
+        pos = undotransform2origin(
+            undoshift2center111(pos),
+            self._scale_origin,
+            self._original_mean_pos,
+        )
+        s2 = self._scale_origin * self._scale_origin
+        cov = cov.view(-1, 6) / s2
 
         out_quats_t = None
         out_scales_t = None
@@ -200,7 +347,7 @@ class WarpMPMBackend(PhysicsBackend):
 
         return SimulationState(
             positions=pos,
-            covariances=cov.view(-1, 6),
+            covariances=cov,
             rotations=rot.view(-1, 3, 3),
             velocities=vel,
             quats=out_quats_t,

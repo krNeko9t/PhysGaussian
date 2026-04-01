@@ -246,18 +246,12 @@ from physics_sim.preprocessing.transform import (
     generate_rotation_matrices,
     apply_rotations,
     apply_cov_rotations,
-    transform2origin,
-    transform_with_reference,
-    shift2center111,
-    undoshift2center111,
-    undotransform2origin,
     apply_inverse_rotations,
     apply_inverse_cov_rotations,
-    get_center_view_worldspace_and_observant_coordinate,
     generate_local_coord,
-    world_to_mpm_positions,
-    world_to_mpm_directions,
-    mpm_to_world_positions,
+    # Legacy MPM-space helpers — only used for camera json mode backward compat
+    transform2origin,
+    get_center_view_worldspace_and_observant_coordinate,
 )
 from physics_sim.backend.base import SimulationState
 from physics_sim.renderer.gs_renderer import GaussianRenderer
@@ -404,52 +398,16 @@ def main():
         if "solver" in overrides:
             material_params["newton_solver_opts"] = overrides["solver"]
 
-    # ── Optional Taichi-based preprocessing (particle filling / volumes) ──
-    # Taichi is not required for rigid-body or render-only pipelines, and may
-    # be unavailable in some environments. We import it only when needed.
-    fill_particles = None
-    get_particle_volume = None
-    init_filled_particles = None
-
-    needs_particle_filling = preprocessing_params.get("particle_filling") is not None
-    if scene_objects is not None:
-        needs_particle_filling = needs_particle_filling or any(
-            (obj.get("particle_filling") is not None)
-            for obj in scene_objects
-            if obj.get("mode", "simulate") == "simulate"
-        )
-
-    # Backends that require per-particle volumes for mass computation.
-    needs_volumes = args.backend in ("warp_mpm", "newton_mpm", "newton_vbd")
-
-    if needs_particle_filling or needs_volumes:
-        try:
-            from physics_sim.preprocessing.particle_filling import (
-                fill_particles as _fill_particles,
-                get_particle_volume as _get_particle_volume,
-                init_filled_particles as _init_filled_particles,
-            )
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(
-                "Taichi-based preprocessing is required by your configuration/backend, "
-                "but Taichi is not installed. Install taichi or disable particle_filling "
-                "and use a backend that doesn't require volumes (e.g. newton_rigid)."
-            ) from e
-        fill_particles = _fill_particles
-        get_particle_volume = _get_particle_volume
-        init_filled_particles = _init_filled_particles
-
-    def _compute_volumes(pos: torch.Tensor, uniform: bool) -> torch.Tensor:
-        if get_particle_volume is not None:
-            return get_particle_volume(
-                pos,
-                material_params["n_grid"],
-                material_params["grid_lim"] / material_params["n_grid"],
-                uniform=uniform,
-            ).to(device=device)
-        # Fallback: uniform voxel volume (acceptable for rigid-only / render-only)
-        dx = material_params["grid_lim"] / material_params["n_grid"]
-        return torch.full((pos.shape[0],), float(dx * dx * dx), device=device)
+    def _estimate_volumes(pos: torch.Tensor) -> torch.Tensor:
+        """Estimate per-particle volumes from bounding box extent / n_grid."""
+        lo = pos.min(dim=0)[0]
+        hi = pos.max(dim=0)[0]
+        extent = (hi - lo).max().item()
+        if extent < 1e-8:
+            extent = 1.0
+        n_grid = material_params.get("n_grid", 100)
+        dx = extent / max(n_grid, 1)
+        return torch.full((pos.shape[0],), float(dx ** 3), device=pos.device)
 
     # ── 2. Load 3DGS / 2DGS PLY ────────────────────────────────────────
     print("Loading Gaussian point cloud...")
@@ -504,17 +462,16 @@ def main():
     )
     rotated_pos = apply_rotations(init_pos, rotation_matrices)
 
-    # 3c–3g: Select simulation area(s), transform, fill, compute volumes.
+    # 3c–3e: Select simulation area(s), rotate covariances.
     #
     # Two code paths:
     #   scene_objects is None  → single-object (backward compatible)
     #   scene_objects is list  → multi-object (per-object sim_area & material)
     #
-    # Both paths produce the same output variables:
-    #   mpm_init_pos, mpm_init_vol, mpm_init_cov  (all particles)
+    # Both paths produce the same output variables (rotated world space):
+    #   sim_init_pos, sim_init_vol, sim_init_cov  (all particles)
     #   gs_num                     (GS particle count, for rendering)
     #   shs, opacity               (GS render attributes)
-    #   scale_origin, original_mean_pos  (coordinate transform params)
     #   static_pos/cov/opacity/shs/quats/scales (static particles, or None)
     #   has_static                 (bool, whether static particles exist)
     #   per_object_info            (None or list of per-object material+indices)
@@ -818,15 +775,13 @@ def main():
         init_ply_quats = torch.cat([d["quats"] for d in obj_data], dim=0)
         init_ply_scales = torch.cat([d["scales"] for d in obj_data], dim=0)
 
-        # 3d. Compute reference transform (rotated space)
+        # 3d. Determine reference world positions (for procedural camera centering)
         ref_spec = preprocessing_params.get("transform_reference", None)
-        ref_rotated_pos = None
         if isinstance(ref_spec, str):
             if ref_spec == "shared_ply":
                 reference_world_pos = init_pos
-                ref_rotated_pos = rotated_pos
             elif ref_spec in ("simulated", "", None):
-                ref_rotated_pos = None
+                pass
             else:
                 raise ValueError(
                     f"Unknown transform_reference string: {ref_spec!r}. "
@@ -842,116 +797,53 @@ def main():
             ref_opacity = ref_params["opacity"]
             op_mask = ref_opacity[:, 0] > preprocessing_params["opacity_threshold"]
             reference_world_pos = ref_pos[op_mask]
-            ref_rotated_pos = apply_rotations(reference_world_pos, rotation_matrices)
-        elif ref_spec is None:
-            ref_rotated_pos = None
-        else:
+        elif ref_spec is not None:
             raise ValueError(
                 f"Invalid transform_reference: {ref_spec!r}. "
                 "Expected None, 'shared_ply', 'simulated', or {'ply_path': ...}."
             )
 
-        if ref_rotated_pos is None:
-            ref_rotated_pos = rotated_pos_sim
-            reference_world_pos = init_pos if reference_world_pos is None else reference_world_pos
+        if reference_world_pos is None:
+            reference_world_pos = init_pos
 
-        _, scale_origin, original_mean_pos = transform2origin(
-            ref_rotated_pos, preprocessing_params["scale"]
-        )
-
-        # Transform simulated particles to MPM domain [0,2]^3 (using reference)
-        transformed_pos = transform_with_reference(
-            rotated_pos_sim, scale_origin, original_mean_pos
-        )
-        transformed_pos = shift2center111(transformed_pos)
+        # 3d. Rotate covariances (no normalisation — backends handle that)
         init_cov_sim = apply_cov_rotations(init_cov_sim, rotation_matrices)
-        init_cov_sim = scale_origin * scale_origin * init_cov_sim
 
-        # Apply per-object position_offset in MPM space (post-reference transform)
+        # Apply per-object position_offset in rotated world space
         gs_ptr = 0
         for d in obj_data:
             obj = d["obj"]
             n = d["gs_count"]
             offset = obj.get("position_offset")
             if offset is not None:
-                transformed_pos[gs_ptr:gs_ptr + n] += torch.tensor(
+                rotated_pos_sim[gs_ptr:gs_ptr + n] += torch.tensor(
                     offset, device="cuda", dtype=torch.float32
                 )
             gs_ptr += n
 
-        # 3e. Per-object particle filling (simulate objects only)
-        gs_num = transformed_pos.shape[0]
-        shared_filling = preprocessing_params["particle_filling"]
-
-        all_filled = []
+        # 3e. Build per-object info (no filling — backends handle that if needed)
+        gs_num = rotated_pos_sim.shape[0]
         per_object_info = []
         gs_offset = 0
-        filled_offset = gs_num
-
         for d in obj_data:
             obj = d["obj"]
             n_gs = d["gs_count"]
-            filling = obj.get("particle_filling") or shared_filling
-            n_filled = 0
-
-            if filling is not None and n_gs > 0:
-                if fill_particles is None:
-                    raise ModuleNotFoundError(
-                        "particle_filling was requested but Taichi-based fill_particles "
-                        "is unavailable. Install taichi or disable particle_filling."
-                    )
-                obj_pos = transformed_pos[gs_offset:gs_offset + n_gs]
-                obj_opacity = init_opacity_sim[gs_offset:gs_offset + n_gs]
-                obj_cov = init_cov_sim[gs_offset:gs_offset + n_gs]
-
-                obj_mpm = fill_particles(
-                    pos=obj_pos,
-                    opacity=obj_opacity,
-                    cov=obj_cov,
-                    grid_n=filling["n_grid"],
-                    max_samples=filling["max_particles_num"],
-                    grid_dx=material_params["grid_lim"] / filling["n_grid"],
-                    density_thres=filling["density_threshold"],
-                    search_thres=filling["search_threshold"],
-                    max_particles_per_cell=filling["max_partciels_per_cell"],
-                    search_exclude_dir=filling["search_exclude_direction"],
-                    ray_cast_dir=filling["ray_cast_direction"],
-                    boundary=filling["boundary"],
-                    smooth=filling["smooth"],
-                ).to(device=device)
-
-                obj_filled = obj_mpm[n_gs:]
-                n_filled = obj_filled.shape[0]
-                if n_filled > 0:
-                    all_filled.append(obj_filled)
-
             gs_idx = list(range(gs_offset, gs_offset + n_gs))
-            filled_idx = list(range(filled_offset, filled_offset + n_filled))
             per_object_info.append(
                 dict(
                     name=obj["name"],
-                    particle_indices=gs_idx + filled_idx,
+                    particle_indices=gs_idx,
                     material=obj["material"],
                 )
             )
-            print(
-                f"    [simulate] {obj['name']}: {n_gs} gs + {n_filled} filled "
-                f"= {n_gs + n_filled} total"
-            )
-
+            print(f"    [simulate] {obj['name']}: {n_gs} GS particles")
             gs_offset += n_gs
-            filled_offset += n_filled
 
-        # Build final array: [all_gs, all_filled]
-        if all_filled:
-            mpm_init_pos = torch.cat([transformed_pos.to(device)] + all_filled, dim=0)
-        else:
-            mpm_init_pos = transformed_pos.to(device)
-
-        mpm_init_vol = _compute_volumes(mpm_init_pos, uniform=False)
-
-        mpm_init_cov = torch.zeros((mpm_init_pos.shape[0], 6), device=device)
-        mpm_init_cov[:gs_num] = init_cov_sim
+        # Build simulation arrays (rotated world space)
+        sim_init_pos = rotated_pos_sim.to(device)
+        sim_init_vol = _estimate_volumes(sim_init_pos)
+        sim_init_cov = torch.zeros((sim_init_pos.shape[0], 6), device=device)
+        sim_init_cov[:gs_num] = init_cov_sim
         shs = init_shs_sim
         opacity = init_opacity_sim
 
@@ -996,83 +888,30 @@ def main():
             if has_static:
                 _log(f"  [DBG] Static render particles: {static_pos.shape[0]}")
 
-        # 3d. Transform to MPM domain [0,2]^3
-        transformed_pos, scale_origin, original_mean_pos = transform2origin(
-            rotated_pos, preprocessing_params["scale"]
-        )
-        transformed_pos = shift2center111(transformed_pos)
-
+        # 3d. Rotate covariances (no normalisation — backends handle that)
         init_cov = apply_cov_rotations(init_cov, rotation_matrices)
-        init_cov = scale_origin * scale_origin * init_cov
 
         if args.debug:
-            _log("=== CHECKPOINT 4: After transform to MPM domain ===")
-            _log(f"  [DBG] scale_origin = {scale_origin.item():.10f}")
-            _dbg("original_mean_pos", original_mean_pos)
-            _dbg("transformed_pos", transformed_pos)
-            _dbg("init_cov (rotated+scaled)", init_cov)
+            _log("=== CHECKPOINT 4: After cov rotation (rotated world space) ===")
+            _dbg("rotated_pos", rotated_pos)
+            _dbg("init_cov (rotated)", init_cov)
 
-        # 3e. Particle filling
-        gs_num = transformed_pos.shape[0]
-        filling_params = preprocessing_params["particle_filling"]
-
-        if filling_params is not None:
-            if fill_particles is None:
-                raise ModuleNotFoundError(
-                    "particle_filling was requested but Taichi-based fill_particles "
-                    "is unavailable. Install taichi or disable particle_filling."
-                )
-            print("Filling internal particles...")
-            mpm_init_pos = fill_particles(
-                pos=transformed_pos,
-                opacity=init_opacity,
-                cov=init_cov,
-                grid_n=filling_params["n_grid"],
-                max_samples=filling_params["max_particles_num"],
-                grid_dx=material_params["grid_lim"] / filling_params["n_grid"],
-                density_thres=filling_params["density_threshold"],
-                search_thres=filling_params["search_threshold"],
-                max_particles_per_cell=filling_params["max_partciels_per_cell"],
-                search_exclude_dir=filling_params["search_exclude_direction"],
-                ray_cast_dir=filling_params["ray_cast_direction"],
-                boundary=filling_params["boundary"],
-                smooth=filling_params["smooth"],
-            ).to(device=device)
-        else:
-            mpm_init_pos = transformed_pos.to(device=device)
-
-        # 3f. Compute particle volumes
-        mpm_init_vol = _compute_volumes(
-            mpm_init_pos, uniform=material_params["material"] == "sand"
-        )
-
-        # 3g. Initialise filled-particle attributes
-        if filling_params is not None and filling_params.get("visualize", False):
-            if init_filled_particles is None:
-                raise ModuleNotFoundError(
-                    "particle_filling.visualize was requested but Taichi-based "
-                    "init_filled_particles is unavailable. Install taichi or disable visualize."
-                )
-            shs, opacity, mpm_init_cov = init_filled_particles(
-                mpm_init_pos[:gs_num], init_shs, init_cov, init_opacity,
-                mpm_init_pos[gs_num:],
-            )
-            gs_num = mpm_init_pos.shape[0]
-        else:
-            mpm_init_cov = torch.zeros(
-                (mpm_init_pos.shape[0], 6), device=device
-            )
-            mpm_init_cov[:gs_num] = init_cov
-            shs = init_shs
-            opacity = init_opacity
+        # 3e. Build simulation arrays (rotated world space, no filling)
+        gs_num = rotated_pos.shape[0]
+        sim_init_pos = rotated_pos.to(device=device)
+        sim_init_vol = _estimate_volumes(sim_init_pos)
+        sim_init_cov = torch.zeros((sim_init_pos.shape[0], 6), device=device)
+        sim_init_cov[:gs_num] = init_cov
+        shs = init_shs
+        opacity = init_opacity
 
     if args.debug:
-        _log("=== CHECKPOINT 5: Before physics init ===")
+        _log("=== CHECKPOINT 5: Before physics init (rotated world space) ===")
         _log(f"  [DBG] gs_num = {gs_num}")
-        _log(f"  [DBG] total particles (gs+filled) = {mpm_init_pos.shape[0]}")
-        _dbg("mpm_init_pos", mpm_init_pos)
-        _dbg("mpm_init_vol", mpm_init_vol)
-        _dbg("mpm_init_cov", mpm_init_cov)
+        _log(f"  [DBG] total particles = {sim_init_pos.shape[0]}")
+        _dbg("sim_init_pos", sim_init_pos)
+        _dbg("sim_init_vol", sim_init_vol)
+        _dbg("sim_init_cov", sim_init_cov)
         _dbg("shs (for render)", shs)
         _dbg("opacity (for render)", opacity)
         if per_object_info is not None:
@@ -1082,7 +921,7 @@ def main():
 
     # ── 4. Initialise physics backend ─────────────────────────────────
     class _NoPhysicsBackend:
-        """Render-only backend: keeps particles static in MPM space."""
+        """Render-only backend: keeps particles static in rotated world space."""
 
         def __init__(self, device: str):
             self._device = device
@@ -1178,22 +1017,32 @@ def main():
                 init_kwargs[k] = vbd_opts[k]
 
     # 2DGS: preprocess quats (apply rotation chain) and pass to backend.
-    # Scales are passed as-is (scale_origin cancels in the round-trip).
     if gs_type == "2dgs":
-        quats_mpm = preprocess_quats(init_ply_quats, axis_perm, rotation_matrices)
-        init_kwargs["init_quats"] = quats_mpm
+        quats_sim = preprocess_quats(init_ply_quats, axis_perm, rotation_matrices)
+        init_kwargs["init_quats"] = quats_sim
         init_kwargs["init_scales"] = init_ply_scales
 
+    # Warp-MPM: pass extra data so it can normalise + fill internally
+    if args.backend == "warp_mpm":
+        init_kwargs["scale"] = preprocessing_params.get("scale", 1.0)
+        init_kwargs["opacity"] = opacity
+        filling_params = preprocessing_params.get("particle_filling")
+        if filling_params is not None:
+            init_kwargs["filling_params"] = filling_params
+
     backend.initialize(
-        mpm_init_pos, mpm_init_vol, mpm_init_cov, **init_kwargs
+        sim_init_pos, sim_init_vol, sim_init_cov, **init_kwargs
     )
     # Pass per-object material info to backend (if multi-object)
     if per_object_info is not None:
         material_params["per_object"] = per_object_info
     backend.set_material(material_params)
 
-    # ── 4b. Boundary conditions (optional world→MPM conversion) ────────
+    # ── 4b. Boundary conditions ──────────────────────────────────────
     # Merge user boundary_conditions with collider_only-generated planes.
+    # "world" space BCs are rotated into the backend's operating space
+    # (rotated world space).  Backend-specific further conversion (e.g.
+    # Warp-MPM normalisation) is handled inside the backend itself.
     bc_all = []
     if isinstance(bc_params, list):
         bc_all.extend(bc_params)
@@ -1204,28 +1053,23 @@ def main():
     if collider_bc_params:
         bc_all.extend(collider_bc_params)
 
-    bc_params_mpm = bc_all
-    if isinstance(bc_all, list):
-        bc_params_mpm = []
-        for bc in bc_all:
-            if bc.get("space") == "world" and bc.get("type") == "surface_collider":
-                # Convert point+normal from world space to the backend's MPM space.
-                p_w = torch.tensor(bc["point"], device="cuda", dtype=torch.float32).reshape(1, 3)
-                n_w = torch.tensor(bc["normal"], device="cuda", dtype=torch.float32).reshape(1, 3)
-                p_m = world_to_mpm_positions(
-                    p_w, rotation_matrices, scale_origin, original_mean_pos
-                )[0]
-                n_m = world_to_mpm_directions(n_w, rotation_matrices)[0]
-                n_m = n_m / (torch.norm(n_m) + 1e-12)
-                bc_new = dict(bc)
-                bc_new["point"] = [float(x) for x in p_m.detach().cpu().numpy().tolist()]
-                bc_new["normal"] = [float(x) for x in n_m.detach().cpu().numpy().tolist()]
-                bc_new.pop("space", None)
-                bc_params_mpm.append(bc_new)
-            else:
-                bc_params_mpm.append(bc)
+    bc_converted = []
+    for bc in bc_all:
+        if bc.get("space") == "world" and bc.get("type") == "surface_collider":
+            p_w = torch.tensor(bc["point"], device="cuda", dtype=torch.float32).reshape(1, 3)
+            n_w = torch.tensor(bc["normal"], device="cuda", dtype=torch.float32).reshape(1, 3)
+            p_r = apply_rotations(p_w, rotation_matrices)[0]
+            n_r = apply_rotations(n_w, rotation_matrices)[0]
+            n_r = n_r / (torch.norm(n_r) + 1e-12)
+            bc_new = dict(bc)
+            bc_new["point"] = [float(x) for x in p_r.detach().cpu().tolist()]
+            bc_new["normal"] = [float(x) for x in n_r.detach().cpu().tolist()]
+            bc_new.pop("space", None)
+            bc_converted.append(bc_new)
+        else:
+            bc_converted.append(bc)
 
-    backend.set_boundary_conditions(bc_params_mpm, time_params)
+    backend.set_boundary_conditions(bc_converted, time_params)
     backend.finalize()  # finalize after set_boundary_conditions
 
     # ── 5. Optional: simulation without rendering ─────────────────────
@@ -1244,15 +1088,9 @@ def main():
         cov3D = state.covariances[:gs_num].to(device)
         rot = state.rotations[:gs_num].to(device)
 
-        # Convert back to world space for export
-        pos_world = apply_inverse_rotations(
-            undotransform2origin(
-                undoshift2center111(pos), scale_origin, original_mean_pos
-            ),
-            rotation_matrices,
-        )
-        cov_world = cov3D / (scale_origin * scale_origin)
-        cov_world = apply_inverse_cov_rotations(cov_world, rotation_matrices)
+        # Convert from rotated world space back to world space for export
+        pos_world = apply_inverse_rotations(pos, rotation_matrices)
+        cov_world = apply_inverse_cov_rotations(cov3D, rotation_matrices)
 
         out_path = os.path.join(args.output, "final_state.npz")
         np.savez_compressed(
@@ -1272,13 +1110,19 @@ def main():
         mpm_space_vertical_upward_axis = (
             torch.tensor(camera_params["mpm_space_vertical_upward_axis"]).reshape((1, 3)).cuda()
         )
+        # Compute legacy MPM-space transform params on-the-fly for camera
+        # backward compat (mpm_space_viewpoint_center is in [0,2]^3 space).
+        _cam_ref_pos = sim_init_pos
+        _, _cam_scale_origin, _cam_mean_pos = transform2origin(
+            _cam_ref_pos, preprocessing_params.get("scale", 1.0)
+        )
         viewpoint_center_worldspace, observant_coordinates = (
             get_center_view_worldspace_and_observant_coordinate(
                 mpm_space_viewpoint_center,
                 mpm_space_vertical_upward_axis,
                 rotation_matrices,
-                scale_origin,
-                original_mean_pos,
+                _cam_scale_origin,
+                _cam_mean_pos,
             )
         )
     else:
@@ -1383,7 +1227,7 @@ def main():
 
         # Sanity check: detect NaN/Inf/extreme positions
         nan_mask = ~torch.isfinite(pos).all(dim=1)
-        extreme_mask = (pos.abs() > 10.0).any(dim=1)
+        extreme_mask = (pos.abs() > 100.0).any(dim=1)
         bad_mask = nan_mask | extreme_mask
         if bad_mask.any():
             n_nan = int(nan_mask.sum().item())
@@ -1396,19 +1240,14 @@ def main():
             cov3D[bad_mask] = 0.0
 
         if args.debug and frame == 0:
-            _log("=== CHECKPOINT 6: Frame 0 — raw MPM state (before inverse transform) ===")
-            _dbg("pos (from MPM)", pos)
-            _dbg("cov3D (from MPM)", cov3D)
-            _dbg("rot (from MPM)", rot)
+            _log("=== CHECKPOINT 6: Frame 0 — backend state (rotated world space) ===")
+            _dbg("pos (rotated world)", pos)
+            _dbg("cov3D (rotated world)", cov3D)
+            _dbg("rot", rot)
 
-        # Inverse transform back to world space
-        pos = apply_inverse_rotations(
-            undotransform2origin(
-                undoshift2center111(pos), scale_origin, original_mean_pos
-            ),
-            rotation_matrices,
-        )
-        cov3D = cov3D / (scale_origin * scale_origin)
+        # Inverse rotation back to world space (positions and covariances
+        # are already in rotated world space — no normalisation to undo)
+        pos = apply_inverse_rotations(pos, rotation_matrices)
         cov3D = apply_inverse_cov_rotations(cov3D, rotation_matrices)
 
         # 2DGS: inverse-transform quats (scales need no adjustment)
