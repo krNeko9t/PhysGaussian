@@ -107,6 +107,23 @@ def apply_axis_permutation(
     return pos_new, cov_new
 
 
+def apply_axis_perm_to_quats(quats_wxyz: torch.Tensor, perm: str) -> torch.Tensor:
+    """Rotate quaternions to account for axis permutation.
+
+    Positions get axis-permuted via ``apply_axis_permutation``, so the
+    Gaussian orientations must be rotated by the same permutation matrix
+    to stay consistent: ``q_new = quat(P) * q_old``.
+    """
+    if perm == "xyz":
+        return quats_wxyz
+    device = quats_wxyz.device
+    P = _build_axis_perm_matrix(perm, device)
+    if torch.det(P) < 0:
+        P = -P
+    q_perm = _rotmat_to_quat_wxyz(P)
+    return _quat_mul_wxyz(q_perm, quats_wxyz)
+
+
 def _build_axis_perm_matrix(perm: str, device: torch.device) -> torch.Tensor:
     """Build a 3×3 signed permutation matrix from an axis permutation string."""
     if perm == "xyz":
@@ -498,12 +515,13 @@ def main():
     #   gs_num                     (GS particle count, for rendering)
     #   shs, opacity               (GS render attributes)
     #   scale_origin, original_mean_pos  (coordinate transform params)
-    #   static_pos/cov/opacity/shs (static particles for rendering, or None)
+    #   static_pos/cov/opacity/shs/quats/scales (static particles, or None)
     #   has_static                 (bool, whether static particles exist)
     #   per_object_info            (None or list of per-object material+indices)
 
     # Static render-only particles (world space)
     static_pos = static_cov = static_opacity = static_shs = None
+    static_quats = static_scales = None
     has_static = False
 
     # Multi-object mapping for physics backends
@@ -570,6 +588,8 @@ def main():
                         cov=r_cov[op_mask],
                         opacity=r_opacity[op_mask],
                         shs=r_shs[op_mask],
+                        quats=ply_params["quats"][op_mask],
+                        scales=ply_params["scales"][op_mask],
                     )
                 )
                 print(
@@ -652,6 +672,8 @@ def main():
                     cov=r_cov[op_mask],
                     opacity=r_opacity[op_mask],
                     shs=r_shs[op_mask],
+                    quats=ply_params["quats"][op_mask],
+                    scales=ply_params["scales"][op_mask],
                 )
             )
             print(f"    [render_only] {obj['name']}: {int(op_mask.sum().item())} GS particles")
@@ -774,6 +796,8 @@ def main():
                         cov=init_cov[unsel_mask],
                         opacity=init_opacity[unsel_mask],
                         shs=init_shs[unsel_mask],
+                        quats=init_ply_quats[unsel_mask],
+                        scales=init_ply_scales[unsel_mask],
                     )
                 )
 
@@ -782,6 +806,8 @@ def main():
             static_cov = torch.cat([c["cov"] for c in static_chunks], dim=0)
             static_opacity = torch.cat([c["opacity"] for c in static_chunks], dim=0)
             static_shs = torch.cat([c["shs"] for c in static_chunks], dim=0)
+            static_quats = torch.cat([c["quats"] for c in static_chunks], dim=0)
+            static_scales = torch.cat([c["scales"] for c in static_chunks], dim=0)
             has_static = True
 
         # Concatenate simulated GS particles
@@ -952,6 +978,8 @@ def main():
             static_cov = init_cov[~area_mask, :]
             static_opacity = init_opacity[~area_mask, :]
             static_shs = init_shs[~area_mask, :]
+            static_quats = init_ply_quats[~area_mask, :]
+            static_scales = init_ply_scales[~area_mask, :]
             has_static = True
 
             rotated_pos = rotated_pos[area_mask, :]
@@ -1384,11 +1412,17 @@ def main():
         cov3D = apply_inverse_cov_rotations(cov3D, rotation_matrices)
 
         # 2DGS: inverse-transform quats (scales need no adjustment)
+        # inverse_preprocess_quats undoes both axis_perm and rotation,
+        # returning to original PLY space.  We then re-apply axis_perm so
+        # quats match the axis-permuted position space used for rendering.
         render_quats = None
         render_scales = None
         if gs_type == "2dgs" and state.quats is not None:
-            render_quats = inverse_preprocess_quats(
-                state.quats[:gs_num].to(device), axis_perm, rotation_matrices,
+            render_quats = apply_axis_perm_to_quats(
+                inverse_preprocess_quats(
+                    state.quats[:gs_num].to(device), axis_perm, rotation_matrices,
+                ),
+                axis_perm,
             )
             render_scales = state.scales[:gs_num].to(device)
 
@@ -1398,6 +1432,8 @@ def main():
             _dbg("cov3D (world)", cov3D)
 
         # Merge with static (render-only) particles
+        # Static quats are in original PLY space — axis_perm is applied
+        # after merging so all quats end up in the same coordinate system.
         cur_opacity = opacity_render
         cur_shs = shs_render
         if has_static:
@@ -1405,6 +1441,12 @@ def main():
             cov3D = torch.cat([cov3D, static_cov], dim=0)
             cur_opacity = torch.cat([opacity_render, static_opacity], dim=0)
             cur_shs = torch.cat([shs_render, static_shs], dim=0)
+            if render_quats is not None and static_quats is not None:
+                render_quats = torch.cat([
+                    render_quats,
+                    apply_axis_perm_to_quats(static_quats, axis_perm),
+                ], dim=0)
+                render_scales = torch.cat([render_scales, static_scales], dim=0)
 
         if args.debug and frame == 0:
             _log("=== CHECKPOINT 8: Frame 0 — final render inputs ===")

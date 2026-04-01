@@ -111,7 +111,12 @@ class GsplatBackend(RasterBackend):
         Ks = camera.K.unsqueeze(0)
         opacities_1d = opacities.squeeze(-1)
 
-        render_colors, render_alphas, _, meta = rasterization_2dgs(
+        if scales.shape[-1] == 2:
+            scales = torch.cat([scales, torch.zeros_like(scales[:, :1])], dim=-1)
+        colors = colors.unsqueeze(0)
+        bg_color = bg_color.unsqueeze(0)
+
+        (render_colors, render_alphas, _render_normals, _normals_from_depth, render_distort, _render_median, meta) = rasterization_2dgs(
             means=means,
             quats=quats,
             scales=scales,
