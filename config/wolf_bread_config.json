@@ -24,7 +24,7 @@
         "search_exclude_direction": 2,
         "ray_cast_direction": 4,
         "max_particles_num": 200000,
-        "max_partciels_per_cell": 1,
+        "max_particles_per_cell": 1,
         "boundary": [0.2, 1.8, 0.2, 1.8, 0.2, 1.8],
         "smooth": false,
         "visualize": false
@@ -55,7 +55,7 @@
                 "search_exclude_direction": -1,
                 "ray_cast_direction": 4,
                 "max_particles_num": 200000,
-                "max_partciels_per_cell": 1,
+                "max_particles_per_cell": 1,
                 "boundary": [0.2, 1.8, 0.2, 1.8, 0.2, 1.8],
                 "smooth": true,
                 "visualize": false
@@ -90,7 +90,7 @@
     "mpm_space_viewpoint_center": [1, 1, 0.8],
     "default_camera_index": -1,
     "show_hint": false,
-    "init_azimuthm": 90,
+    "init_azimuth": 90,
     "init_elevation": 20,
     "init_radius": 6.0,
     "move_camera": true,

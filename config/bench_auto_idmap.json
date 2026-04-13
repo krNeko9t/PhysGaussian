@@ -32,7 +32,7 @@
   "height": 600,
   "fovx_deg": 60.0,
   "fovy_deg": 45.0,
-  "init_azimuthm": 160.0,
+  "init_azimuth": 160.0,
   "init_elevation": 20.0,
   "init_radius": 20.8,
   "move_camera": true,

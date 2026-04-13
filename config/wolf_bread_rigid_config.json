@@ -61,7 +61,7 @@
     "mpm_space_viewpoint_center": [1, 1, 0.8],
     "default_camera_index": -1,
     "show_hint": false,
-    "init_azimuthm": 90,
+    "init_azimuth": 90,
     "init_elevation": 20,
     "init_radius": 3.0,
     "move_camera": true,

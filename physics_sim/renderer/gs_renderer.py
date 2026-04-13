@@ -456,7 +456,7 @@ class GaussianRenderer:
             raw_camera = data[default_idx]
         else:
             raw_camera = data[0]
-            init_a = camera_params["init_azimuthm"]
+            init_a = camera_params["init_azimuth"]
             init_e = camera_params["init_elevation"]
             init_r = camera_params["init_radius"]
             assert init_a is not None and init_e is not None and init_r is not None
@@ -510,7 +510,7 @@ class GaussianRenderer:
           - width, height
           - either (fx, fy) or (fovx_deg/fovy_deg)
         And orbit parameters:
-          - init_azimuthm, init_elevation, init_radius
+          - init_azimuth, init_elevation, init_radius
           - optional delta_a/delta_e/delta_r when move_camera=true
         """
         width = camera_params.get("width")
@@ -541,12 +541,12 @@ class GaussianRenderer:
                 fx = fov2focal(fovx, float(width))
                 fy = fov2focal(fovy, float(height))
 
-        init_a = camera_params.get("init_azimuthm")
+        init_a = camera_params.get("init_azimuth")
         init_e = camera_params.get("init_elevation")
         init_r = camera_params.get("init_radius")
         if init_a is None or init_e is None or init_r is None:
             raise ValueError(
-                "Procedural orbit camera requires init_azimuthm/init_elevation/init_radius"
+                "Procedural orbit camera requires init_azimuth/init_elevation/init_radius"
             )
 
         if camera_params.get("move_camera", False):

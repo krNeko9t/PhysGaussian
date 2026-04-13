@@ -136,7 +136,7 @@ def decode_param_json(json_file: str):
         filling.setdefault("density_threshold", 5.0)
         filling.setdefault("search_threshold", 3.0)
         filling.setdefault("max_particles_num", 2000000)
-        filling.setdefault("max_partciels_per_cell", 1)
+        filling.setdefault("max_particles_per_cell", 1)
         filling.setdefault("search_exclude_direction", 5)
         filling.setdefault("ray_cast_direction", 4)
         filling.setdefault("boundary", None)
@@ -152,7 +152,7 @@ def decode_param_json(json_file: str):
         "mpm_space_vertical_upward_axis": sim_params.get("mpm_space_vertical_upward_axis", [0, 0, 1]),
         "default_camera_index": sim_params.get("default_camera_index", 0),
         "show_hint": sim_params.get("show_hint", False),
-        "init_azimuthm": sim_params.get("init_azimuthm", None),
+        "init_azimuth": sim_params.get("init_azimuth", None),
         "init_elevation": sim_params.get("init_elevation", None),
         "init_radius": sim_params.get("init_radius", None),
         "delta_a": sim_params.get("delta_a", None),

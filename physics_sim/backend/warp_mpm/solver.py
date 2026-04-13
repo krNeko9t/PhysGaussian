@@ -209,7 +209,7 @@ class WarpMPMBackend(PhysicsBackend):
                 grid_dx=fill_grid_dx,
                 density_thres=filling_params["density_threshold"],
                 search_thres=filling_params["search_threshold"],
-                max_particles_per_cell=filling_params["max_partciels_per_cell"],
+                max_particles_per_cell=filling_params["max_particles_per_cell"],
                 search_exclude_dir=filling_params["search_exclude_direction"],
                 ray_cast_dir=filling_params["ray_cast_direction"],
                 boundary=filling_params["boundary"],

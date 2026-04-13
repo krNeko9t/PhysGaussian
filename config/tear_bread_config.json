@@ -29,7 +29,7 @@
         "search_exclude_direction": -1,
         "ray_cast_direction": 4,
         "max_particles_num": 2000000,
-        "max_partciels_per_cell": 1,
+        "max_particles_per_cell": 1,
         "smooth": true,
         "boundary":
         [
@@ -91,7 +91,7 @@
     "mpm_space_viewpoint_center": [1,1,1],
     "default_camera_index": -1,
     "show_hint": false,
-    "init_azimuthm": 55,
+    "init_azimuth": 55,
     "init_elevation": 13,
     "init_radius": 2.0,
     "move_camera": false,
