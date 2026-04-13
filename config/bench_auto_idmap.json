@@ -53,7 +53,7 @@
     {
       "name": "3dovs_bench_inst000",
       "mode": "simulate",
-      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_idmap_split/postprocess/gt_split/instance_00000.ply",
+      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_000.ply",
       "density": 981.8,
       "mu": 0.474,
       "E": 44058682800.0,
@@ -63,7 +63,7 @@
     {
       "name": "3dovs_bench_inst001",
       "mode": "simulate",
-      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_idmap_split/postprocess/gt_split/instance_00001.ply",
+      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_001.ply",
       "density": 328.3,
       "mu": 0.485,
       "E": 828444.0,
@@ -73,7 +73,7 @@
     {
       "name": "3dovs_bench_inst002",
       "mode": "simulate",
-      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_idmap_split/postprocess/gt_split/instance_00002.ply",
+      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_002.ply",
       "density": 934.8,
       "mu": 0.414,
       "E": 104946240000.00002,
@@ -82,8 +82,8 @@
     },
     {
       "name": "3dovs_bench_inst003",
-      "mode": "collider_only",
-      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_idmap_split/postprocess/gt_split/instance_00003.ply",
+      "mode": "simulate",
+      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_003.ply",
       "collider": {
         "type": "plane",
         "space": "world",
@@ -98,8 +98,8 @@
     },
     {
       "name": "3dovs_bench_inst004",
-      "mode": "simulate",
-      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_idmap_split/postprocess/gt_split/instance_00004.ply",
+      "mode": "collider_only",
+      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_004.ply",
       "density": 633.4,
       "mu": 0.412,
       "E": 5021179200.000001,
@@ -108,8 +108,8 @@
     },
     {
       "name": "3dovs_bench_inst005",
-      "mode": "collider_only",
-      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_idmap_split/postprocess/gt_split/instance_00005.ply",
+      "mode": "simulate",
+      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_005.ply",
       "collider": {
         "type": "plane",
         "space": "world",
@@ -129,8 +129,8 @@
     },
     {
       "name": "3dovs_bench_inst006",
-      "mode": "simulate",
-      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_idmap_split/postprocess/gt_split/instance_00006.ply",
+      "mode": "collider_only",
+      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_006.ply",
       "density": 375.6,
       "mu": 0.513,
       "E": 38934514.0,
@@ -140,7 +140,7 @@
     {
       "name": "3dovs_bench_inst007",
       "mode": "simulate",
-      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_idmap_split/postprocess/gt_split/instance_00007.ply",
+      "ply_path": "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_007.ply",
       "density": 619.7,
       "mu": 0.5,
       "E": 260148.0,
