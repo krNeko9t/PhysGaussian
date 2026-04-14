@@ -712,7 +712,7 @@ class NewtonRigidBackend(PhysicsBackend):
                           float(center_np[2])),
                 q=wp.quat(*quat),
             ),
-            key=name,
+            label=name,
         )
 
         if geo == "obb":
@@ -821,7 +821,7 @@ class NewtonRigidBackend(PhysicsBackend):
                           float(center_np[2])),
                 q=wp.quat_identity(),
             ),
-            key=name,
+            label=name,
         )
         builder.add_shape_mesh(body_idx, mesh=collision_mesh, cfg=shape_cfg)
 

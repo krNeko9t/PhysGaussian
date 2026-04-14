@@ -905,7 +905,7 @@ class NewtonVBDBackend(PhysicsBackend):
                 p=wp.vec3(*center_np.astype(float)),
                 q=wp.quat(*quat),
             ),
-            key=name,
+            label=name,
         )
 
         if geo == "obb":
@@ -972,7 +972,7 @@ class NewtonVBDBackend(PhysicsBackend):
                 p=wp.vec3(*center_np.astype(float)),
                 q=wp.quat_identity(),
             ),
-            key=name,
+            label=name,
         )
         builder.add_shape_mesh(body_idx, mesh=collision_mesh, cfg=shape_cfg)
 
