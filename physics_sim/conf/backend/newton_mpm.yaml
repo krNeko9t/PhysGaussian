@@ -1,4 +1,0 @@
-n_grid: 200
-grid_lim: 2.0
-solver:
-  iterations: 20

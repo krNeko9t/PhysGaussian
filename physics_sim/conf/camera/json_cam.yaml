@@ -1,6 +1,0 @@
-camera_mode: json
-cameras_json: null
-mpm_space_viewpoint_center: [1.0, 1.0, 1.0]
-mpm_space_vertical_upward_axis: [0, 0, 1]
-default_camera_index: 0
-show_hint: false

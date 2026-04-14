@@ -14,4 +14,4 @@ torchvision==0.15.1
 tqdm==4.66.1
 warp_lang==0.10.1
 gsplat
-PyYAML>=6.0
+pydantic

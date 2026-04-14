@@ -1,5 +1,5 @@
-from physics_sim.config.loader import ConfigLoader, load_config
-from physics_sim.config.schema import (
+from physics_sim.config.loader import load_config
+from physics_sim.config.models import (
     CameraConfig,
     PreprocessConfig,
     SimConfig,
