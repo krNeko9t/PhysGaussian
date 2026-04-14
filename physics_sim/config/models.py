@@ -172,8 +172,9 @@ class CameraConfig(BaseModel):
     delta_a: float = -2.4
     delta_e: float = 0.8
     delta_r: float = 0.0
-    width: int | None = None
-    height: int | None = None
+    # Procedural orbit/fixed cameras need a framebuffer size; json mode reads W/H from cameras.json.
+    width: int = 800
+    height: int = 600
     fovx_deg: float | None = None
     fovy_deg: float | None = None
     fx: float | None = None
