@@ -1,26 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
-# Example Falling Gift
+# Softbody Gift
 #
 # This simulation demonstrates four stacked soft body blocks with two cloth
 # straps wrapped around them. The blocks fall under gravity, and the cloth
 # straps hold them together.
 #
-# Command: uv run -m newton.examples.multiphysics.example_falling_gift
+# Command: uv run -m newton.examples softbody_gift
 #
 ###########################################################################
 
@@ -140,9 +128,9 @@ PYRAMID_PARTICLES = [
 
 
 class Example:
-    def __init__(self, viewer, args=None, solver_type: str = "vbd"):
+    def __init__(self, viewer, args):
         self.viewer = viewer
-        self.solver_type = solver_type
+        self.solver_type = args.solver
         self.sim_time = 0.0
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -235,9 +223,7 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        # Create collision pipeline (default: unified)
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -263,7 +249,7 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+            self.model.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
@@ -296,28 +282,21 @@ class Example:
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--solver",
+            help="Type of solver (only 'vbd' supports this example)",
+            type=str,
+            choices=["vbd"],
+            default="vbd",
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    # Create parser with base arguments
-    parser = newton.examples.create_parser()
-
-    # Add solver-specific arguments
-    parser.add_argument(
-        "--solver",
-        help="Type of solver (only 'vbd' supports this example)",
-        type=str,
-        choices=["vbd"],
-        default="vbd",
-    )
-
-    # Parse arguments and initialize viewer
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
-
-    # Create example and run
-    example = Example(
-        viewer=viewer,
-        args=args,
-        solver_type=args.solver,
-    )
-
+    example = Example(viewer, args)
     newton.examples.run(example, args)

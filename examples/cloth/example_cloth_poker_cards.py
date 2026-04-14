@@ -1,20 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
-# Example Poker Cards Stacking
+# Cloth Poker Cards
 #
 # This simulation demonstrates 52 poker cards (13 ranks x 4 suits) dropping
 # and stacking on a cube, then being knocked off by a sphere. The cards use
@@ -26,7 +14,7 @@
 # - Height: 8.89 cm (3.5 inches) = 0.0889 m
 # - Resolution: 4x6 cells per card
 #
-# Command: uv run -m newton.examples multiphysics.example_poker_cards_stacking
+# Command: uv run -m newton.examples cloth_poker_cards
 #
 ###########################################################################
 
@@ -38,7 +26,7 @@ import newton.examples
 
 
 class Example:
-    def __init__(self, viewer, args=None):
+    def __init__(self, viewer, args):
         self.viewer = viewer
         self.sim_time = 0.0
 
@@ -81,7 +69,7 @@ class Example:
                 p=wp.vec3(0.0, 0.0, self.cube_height),
                 q=wp.quat_identity(),
             ),
-            key="cube",
+            label="cube",
         )
         cube_cfg = newton.ModelBuilder.ShapeConfig()
         cube_cfg.density = 0.0  # Static body (infinite mass)
@@ -110,7 +98,7 @@ class Example:
                 p=wp.vec3(self.sphere_start_x, 0.0, self.sphere_height),
                 q=wp.quat_identity(),
             ),
-            key="sphere",
+            label="sphere",
         )
         sphere_cfg = newton.ModelBuilder.ShapeConfig()
         sphere_cfg.density = 0.0  # Kinematic body (not affected by gravity)
@@ -183,7 +171,11 @@ class Example:
             )
 
         # Add ground plane
-        builder.add_ground_plane()
+        ground_cfg = newton.ModelBuilder.ShapeConfig()
+        ground_cfg.ke = 1.0e5  # Contact stiffness
+        ground_cfg.kd = 1.0e-4  # Contact damping
+        ground_cfg.mu = 0.3  #
+        builder.add_ground_plane(cfg=ground_cfg)
 
         # Color the mesh for VBD solver (include bending constraints)
         builder.color(include_bending=True)
@@ -216,23 +208,23 @@ class Example:
         self.sphere_current_x = self.sphere_start_x
 
         # Create collision pipeline for ground and cube contact
-        self.collision_pipeline = newton.CollisionPipelineUnified.from_model(
+        self.collision_pipeline = newton.CollisionPipeline(
             self.model,
-            broad_phase_mode=newton.BroadPhaseMode.NXN,
+            broad_phase="nxn",
             soft_contact_margin=0.005,  # m (0.5 cm)
         )
-        self.contacts = self.collision_pipeline.collide(self.model, self.state_0)
+        self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
 
         # Set camera to view the stacking
         self.viewer.set_camera(
             pos=wp.vec3(0.5, -0.5, 0.3),
-            pitch=-20.0,
-            yaw=90.0,
+            pitch=-15.0,
+            yaw=140.0,
         )
         if hasattr(self.viewer, "camera") and hasattr(self.viewer.camera, "fov"):
-            self.viewer.camera.fov = 60.0
+            self.viewer.camera.fov = 70.0
 
         self.capture()
 
@@ -258,7 +250,7 @@ class Example:
             self.state_0.body_q = wp.array(body_q, dtype=wp.transform)
 
             # Collision detection
-            self.contacts = self.collision_pipeline.collide(self.model, self.state_0)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
 
             # Solver step
             self.solver.step(

@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Selection Multiple Articulations
@@ -36,15 +24,13 @@ VERBOSE = True
 
 
 @wp.kernel
-def compute_middle_kernel(
-    lower: wp.array3d(dtype=float), upper: wp.array3d(dtype=float), middle: wp.array3d(dtype=float)
-):
+def compute_middle_kernel(lower: wp.array3d[float], upper: wp.array3d[float], middle: wp.array3d[float]):
     world, arti, dof = wp.tid()
     middle[world, arti, dof] = 0.5 * (lower[world, arti, dof] + upper[world, arti, dof])
 
 
 @wp.kernel
-def init_masks(mask_0: wp.array(dtype=bool), mask_1: wp.array(dtype=bool)):
+def init_masks(mask_0: wp.array[bool], mask_1: wp.array[bool]):
     tid = wp.tid()
     yes = tid % 2 == 0
     mask_0[tid] = yes
@@ -52,7 +38,7 @@ def init_masks(mask_0: wp.array(dtype=bool), mask_1: wp.array(dtype=bool)):
 
 
 @wp.func
-def check_mask(mask: wp.array(dtype=bool), idx: int) -> bool:
+def check_mask(mask: wp.array[bool], idx: int) -> bool:
     # mask could be None, in which case return True
     if mask:
         return mask[idx]
@@ -62,8 +48,8 @@ def check_mask(mask: wp.array(dtype=bool), idx: int) -> bool:
 
 @wp.kernel
 def reset_kernel(
-    root_velocities: wp.array2d(dtype=wp.spatial_vector),  # root velocities
-    mask: wp.array(dtype=bool),  # world mask (optional, can be None)
+    root_velocities: wp.array2d[wp.spatial_vector],  # root velocities
+    mask: wp.array[bool],  # world mask (optional, can be None)
     max_jump: float,  # maximum jump speed
     max_spin: float,  # maximum spin speed
     seed: int,  # random seed
@@ -83,7 +69,7 @@ def reset_kernel(
 
 @wp.kernel
 def random_forces_kernel(
-    dof_forces: wp.array3d(dtype=float),  # dof forces (output)
+    dof_forces: wp.array3d[float],  # dof forces (output)
     max_magnitude: float,  # maximum force magnitude
     seed: int,  # random seed
 ):
@@ -94,7 +80,7 @@ def random_forces_kernel(
 
 
 class Example:
-    def __init__(self, viewer, num_worlds=16):
+    def __init__(self, viewer, args):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
 
@@ -102,7 +88,7 @@ class Example:
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.num_worlds = num_worlds
+        self.world_count = args.world_count
 
         # load articulation
         arti = newton.ModelBuilder()
@@ -121,7 +107,7 @@ class Example:
         # create scene
         scene = newton.ModelBuilder()
         scene.add_ground_plane()
-        scene.replicate(world, num_worlds=self.num_worlds)
+        scene.replicate(world, world_count=self.world_count)
 
         # finalize model
         self.model = scene.finalize()
@@ -133,6 +119,8 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
+        # Contacts only needed for non-MuJoCo solvers
+        self.contacts = self.model.contacts() if not isinstance(self.solver, newton.solvers.SolverMuJoCo) else None
 
         self.next_reset = 0.0
         self.step_count = 0
@@ -158,10 +146,10 @@ class Example:
             self.default_dof_velocities = wp.to_torch(self.ants.get_dof_velocities(self.model)).clone()
 
             # create disjoint subsets to alternate resets
-            all_indices = torch.arange(num_worlds, dtype=torch.int32)
-            self.mask_0 = torch.zeros(num_worlds, dtype=bool)
+            all_indices = torch.arange(self.world_count, dtype=torch.int32)
+            self.mask_0 = torch.zeros(self.world_count, dtype=bool)
             self.mask_0[all_indices[::2]] = True
-            self.mask_1 = torch.zeros(num_worlds, dtype=bool)
+            self.mask_1 = torch.zeros(self.world_count, dtype=bool)
             self.mask_1[all_indices[1::2]] = True
         else:
             # default ant root states
@@ -180,9 +168,9 @@ class Example:
             self.default_dof_velocities = wp.clone(self.ants.get_dof_velocities(self.model))
 
             # create disjoint subsets to alternate resets
-            self.mask_0 = wp.empty(num_worlds, dtype=bool)
-            self.mask_1 = wp.empty(num_worlds, dtype=bool)
-            wp.launch(init_masks, dim=num_worlds, inputs=[self.mask_0, self.mask_1])
+            self.mask_0 = wp.empty(self.world_count, dtype=bool)
+            self.mask_1 = wp.empty(self.world_count, dtype=bool)
+            wp.launch(init_masks, dim=self.world_count, inputs=[self.mask_0, self.mask_1])
 
         self.viewer.set_model(self.model)
 
@@ -204,12 +192,10 @@ class Example:
             self.state_0.clear_forces()
 
             # explicit collisions needed without MuJoCo solver
-            if not isinstance(self.solver, newton.solvers.SolverMuJoCo):
-                contacts = self.model.collide(self.state_0)
-            else:
-                contacts = None
+            if self.contacts is not None:
+                self.model.collide(self.state_0, self.contacts)
 
-            self.solver.step(self.state_0, self.state_1, self.control, contacts, self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
@@ -224,7 +210,7 @@ class Example:
         if USE_TORCH:
             import torch  # noqa: PLC0415
 
-            dof_forces = 2.0 - 4.0 * torch.rand((self.num_worlds, self.num_per_world, self.ants.joint_dof_count))
+            dof_forces = 2.0 - 4.0 * torch.rand((self.world_count, self.num_per_world, self.ants.joint_dof_count))
         else:
             dof_forces = self.ants.get_dof_forces(self.control)
             wp.launch(
@@ -252,15 +238,15 @@ class Example:
             import torch  # noqa: PLC0415
 
             # random jump speed per world
-            self.default_root_velocities[..., 2] = 3.0 * torch.rand((self.num_worlds, 1))
+            self.default_root_velocities[..., 2] = 3.0 * torch.rand((self.world_count, 1))
             # random spin speed per articulation
             self.default_root_velocities[..., 5] = (
-                4.0 * torch.pi * (0.5 - torch.rand((self.num_worlds, self.num_per_world)))
+                4.0 * torch.pi * (0.5 - torch.rand((self.world_count, self.num_per_world)))
             )
         else:
             wp.launch(
                 reset_kernel,
-                dim=(self.num_worlds, self.num_per_world),
+                dim=(self.world_count, self.num_per_world),
                 inputs=[self.default_root_velocities, mask, 3.0, 2.0 * wp.pi, self.step_count],
             )
 
@@ -285,10 +271,16 @@ class Example:
             lambda q, qd: q[2] > 0.01,
         )
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        newton.examples.add_world_count_arg(parser)
+        parser.set_defaults(world_count=16)
+        return parser
+
 
 if __name__ == "__main__":
-    parser = newton.examples.create_parser()
-    parser.add_argument("--num-worlds", type=int, default=16, help="Total number of simulated worlds.")
+    parser = Example.create_parser()
 
     viewer, args = newton.examples.init(parser)
 
@@ -297,6 +289,6 @@ if __name__ == "__main__":
 
         torch.set_default_device(args.device)
 
-    example = Example(viewer, num_worlds=args.num_worlds)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)

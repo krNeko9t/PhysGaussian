@@ -1,31 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
-# Example Integrated Viewer
+# Example Replay Viewer
 #
 # Shows how to use the replay UI with ViewerGL to load and
 # display previously recorded simulation data.
 #
-# Recording is done automatically using ViewerFile (like ViewerUSD):
-#   viewer = newton.viewer.ViewerFile("my_recording.json")
+# Recording is done automatically using ViewerFile:
+#   viewer = newton.viewer.ViewerFile("my_recording.bin")
 #   viewer.set_model(model)
 #   viewer.log_state(state)  # Records automatically
 #   viewer.close()  # Saves automatically
 #
-# Command: python -m newton.examples.example_replay_viewer
+# Command: python -m newton.examples replay_viewer
 #
 ###########################################################################
 
@@ -34,7 +22,6 @@ import traceback
 
 import newton
 import newton.examples
-from newton._src.utils.recorder import RecorderModelAndState
 
 
 class ReplayUI:
@@ -51,11 +38,11 @@ class ReplayUI:
         viewer.register_ui_callback(replay_ui.render, "free")
     """
 
-    def __init__(self, viewer=None):
+    def __init__(self, viewer):
         """Initialize the ReplayUI extension.
 
         Args:
-            viewer: The ViewerGL instance this UI will be attached to (optional)
+            viewer: The ViewerGL instance this UI will be attached to.
         """
         # Store reference to viewer for accessing viewer functionality
         self.viewer = viewer
@@ -68,10 +55,6 @@ class ReplayUI:
         self.selected_file = ""
         self.status_message = ""
         self.status_color = (1.0, 1.0, 1.0, 1.0)  # White by default
-
-    def set_viewer(self, viewer):
-        """Set the viewer reference after initialization."""
-        self.viewer = viewer
 
     def render(self, imgui):
         """
@@ -109,24 +92,17 @@ class ReplayUI:
 
     def _render_playback_controls(self, imgui):
         """Render playback controls section."""
+        file_path = self.viewer.ui.consume_file_dialog_result()
+        if file_path:
+            self._clear_status()
+            self._load_recording(file_path)
 
         # File loading
         imgui.text("Recording File:")
         imgui.text(self.selected_file if self.selected_file else "No file loaded")
 
         if imgui.button("Load Recording..."):
-            file_path = self.viewer.ui.open_load_file_dialog(
-                filetypes=[
-                    ("Recording files", ("*.json", "*.bin")),
-                    ("JSON files", "*.json"),
-                    ("Binary files", "*.bin"),
-                    ("All files", "*.*"),
-                ],
-                title="Select Recording File",
-            )
-            if file_path:
-                self._clear_status()
-                self._load_recording(file_path)
+            self.viewer.ui.open_load_file_dialog(title="Select Recording File")
 
         # Playback controls (only if recording is loaded)
         if self.total_frames > 0:
@@ -167,39 +143,30 @@ class ReplayUI:
         self.status_color = (1.0, 1.0, 1.0, 1.0)
 
     def _load_recording(self, file_path):
-        """Load a recording file for playback (same approach as example_replay_viewer.py)."""
+        """Load a recording file for playback using ViewerFile."""
         try:
-            # Create a new recorder for playback
-            playback_recorder = RecorderModelAndState()
-            playback_recorder.load_from_file(file_path)
+            viewer_file = newton.viewer.ViewerFile(file_path)
+            viewer_file.load_recording()
 
-            self.total_frames = len(playback_recorder.history)
+            self.total_frames = viewer_file.get_frame_count()
             self.selected_file = os.path.basename(file_path)
 
-            # Create new model and state objects (like example_replay_viewer.py)
-            if playback_recorder.deserialized_model:
+            if viewer_file.has_model() and self.total_frames > 0:
                 model = newton.Model()
-                state = newton.State()
+                viewer_file.load_model(model)
 
-                # Restore the model from the recording
-                playback_recorder.playback_model(model)
-
-                # Set the model in the viewer (this will trigger setup)
                 self.viewer.set_model(model)
-
-                # Store the playback recorder
-                self.playback_recorder = playback_recorder
+                self._viewer_file = viewer_file
                 self.current_frame = 0
 
-                # Restore the first frame's state (like example_replay_viewer.py)
-                if len(playback_recorder.history) > 0:
-                    playback_recorder.playback(state, 0)
-                    self.viewer.log_state(state)
+                state = model.state()
+                viewer_file.load_state(state, 0)
+                self.viewer.log_state(state)
 
                 self.status_message = f"Loaded {self.selected_file} ({self.total_frames} frames)"
                 self.status_color = (0.3, 1.0, 0.3, 1.0)  # Green
             else:
-                self.status_message = "Warning: No model data found in recording"
+                self.status_message = "Warning: No model data or frames found in recording"
                 self.status_color = (1.0, 1.0, 0.3, 1.0)  # Yellow
 
         except FileNotFoundError:
@@ -215,14 +182,14 @@ class ReplayUI:
 
     def _load_frame(self):
         """Load a specific frame for display."""
-        if hasattr(self, "playback_recorder") and 0 <= self.current_frame < self.total_frames:
-            state = newton.State()
-            self.playback_recorder.playback(state, self.current_frame)
+        if hasattr(self, "_viewer_file") and 0 <= self.current_frame < self.total_frames:
+            state = self.viewer.model.state()
+            self._viewer_file.load_state(state, self.current_frame)
             self.viewer.log_state(state)
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args):
         """Initialize the integrated viewer example with replay UI."""
         self.viewer = viewer
 
@@ -253,6 +220,6 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init()
 
     # Create example and run
-    example = Example(viewer)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)

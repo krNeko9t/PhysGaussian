@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import numpy as np
 import warp as wp
@@ -25,9 +13,9 @@ import newton.usd
 @wp.kernel
 def acc_to_color(
     alpha: float,
-    imu_acc: wp.array(dtype=wp.vec3),
-    buffer: wp.array(dtype=wp.vec3),
-    color: wp.array(dtype=wp.vec3),
+    imu_acc: wp.array[wp.vec3],
+    buffer: wp.array[wp.vec3],
+    color: wp.array[wp.vec3],
 ):
     """Kernel mapping an acceleration to a color, with exponential smoothing."""
     idx = wp.tid()
@@ -47,7 +35,7 @@ def acc_to_color(
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         self.fps = 200
         self.frame_dt = 1.0 / self.fps
@@ -98,11 +86,12 @@ class Example:
                 hy=scale_filler,
                 hz=scale_filler,
                 cfg=newton.ModelBuilder.ShapeConfig(has_shape_collision=False, density=0),
+                color=(0.1, 0.1, 0.1),
             )
             builder.add_shape_box(
                 body, hx=scale, hy=scale, hz=scale, cfg=newton.ModelBuilder.ShapeConfig(is_visible=False, density=200)
             )
-            imu_site = builder.add_site(body, key=f"imu_site_{cube_idx}")
+            imu_site = builder.add_site(body, label=f"imu_site_{cube_idx}")
 
             self.visual_cubes.append(visual_cube)
             self.visual_fillers.append(visual_filler)
@@ -118,6 +107,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
+        self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
 
         self.buffer = wp.zeros(self.n_cubes, dtype=wp.vec3)
         self.colors = wp.zeros(self.n_cubes, dtype=wp.vec3)
@@ -128,8 +118,9 @@ class Example:
             self.viewer.camera.pos = type(self.viewer.camera.pos)(3.0, 0.0, 2.0)
             self.viewer.camera.pitch = type(self.viewer.camera.pitch)(-20)
 
-        self.viewer.update_shape_colors({cube: (0.1, 0.1, 0.1) for i, cube in enumerate(self.visual_fillers)})
-
+        # Warm up: run one simulate() step before graph capture to ensure the collision
+        # pipeline (and any D2H copies it needs) is initialized outside of capture.
+        self.simulate()
         self.capture()
 
     def capture(self):
@@ -147,8 +138,7 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            self.contacts = self.model.collide(self.state_0)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
 
             # swap states
             self.state_0, self.state_1 = self.state_1, self.state_0
@@ -158,6 +148,8 @@ class Example:
             # average and compute color
             wp.launch(acc_to_color, dim=self.n_cubes, inputs=[0.025, self.imu.accelerometer, self.buffer, self.colors])
 
+        self.solver.update_contacts(self.contacts, self.state_0)
+
     def step(self):
         if self.graph:
             wp.capture_launch(self.graph)
@@ -165,7 +157,9 @@ class Example:
             self.simulate()
 
         self.sim_time += self.frame_dt
-        self.viewer.update_shape_colors({cube: self.colors.numpy()[i] for i, cube in enumerate(self.visual_cubes)})
+        cube_colors = self.colors.numpy()
+        for i, cube in enumerate(self.visual_cubes):
+            self.model.shape_color[cube : cube + 1].fill_(wp.vec3(cube_colors[i]))
 
     def test(self):
         pass
@@ -193,6 +187,6 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init()
 
     # Create viewer and run
-    example = Example(viewer)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)

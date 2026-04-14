@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Cable Twist
@@ -33,11 +21,11 @@ import newton.examples
 
 @wp.kernel
 def spin_first_capsules_kernel(
-    body_indices: wp.array(dtype=wp.int32),
-    twist_rates: wp.array(dtype=float),  # radians per second per body
+    body_indices: wp.array[wp.int32],
+    twist_rates: wp.array[float],  # radians per second per body
     dt: float,
-    body_q0: wp.array(dtype=wp.transform),
-    body_q1: wp.array(dtype=wp.transform),
+    body_q0: wp.array[wp.transform],
+    body_q1: wp.array[wp.transform],
 ):
     """Apply continuous twist to the first segment of each cable."""
     tid = wp.tid()
@@ -118,7 +106,7 @@ class Example:
         edge_q = newton.utils.create_parallel_transport_cable_quaternions(points, twist_total=float(twisting_angle))
         return points, edge_q
 
-    def __init__(self, viewer, args=None):
+    def __init__(self, viewer, args):
         # Store viewer and arguments
         self.viewer = viewer
         self.args = args
@@ -183,7 +171,7 @@ class Example:
                 bend_damping=1.0e-2,
                 stretch_stiffness=stretch_stiffness,
                 stretch_damping=1.0e-4,
-                key=f"cable_{i}",
+                label=f"cable_{i}",
             )
 
             # Fix the first body to make it kinematic
@@ -216,9 +204,7 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        # Create collision pipeline (default: unified)
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -259,7 +245,7 @@ class Example:
 
             # Collide for contact detection
             if update_step_history:
-                self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+                self.model.collide(self.state_0, self.contacts)
 
             self.solver.set_rigid_history_update(update_step_history)
             self.solver.step(

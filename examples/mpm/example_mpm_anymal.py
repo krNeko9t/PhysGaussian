@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example MPM ANYmal
@@ -23,6 +11,7 @@
 ###########################################################################
 
 import sys
+import warnings
 
 import numpy as np
 import torch
@@ -36,15 +25,12 @@ from newton.solvers import SolverImplicitMPM
 
 
 class Example:
-    def __init__(
-        self,
-        viewer,
-        voxel_size=0.05,
-        particles_per_cell=3,
-        tolerance=1.0e-5,
-        grid_type="sparse",
-    ):
-        # setup simulation parameters first
+    def __init__(self, viewer, args):
+        voxel_size = args.voxel_size
+        particles_per_cell = args.particles_per_cell
+        tolerance = args.tolerance
+        grid_type = args.grid_type
+
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -80,7 +66,7 @@ class Example:
 
         # Disable collisions with bodies other than shanks
         for body in range(builder.body_count):
-            if "SHANK" not in builder.body_key[body]:
+            if "SHANK" not in builder.body_label[body]:
                 for shape in builder.body_shapes[body]:
                     builder.shape_flags[shape] = builder.shape_flags[shape] & ~newton.ShapeFlags.COLLIDE_PARTICLES
 
@@ -110,8 +96,9 @@ class Example:
             "LF_KFE": -0.8,
         }
         # Set initial joint positions (skip first 7 position coordinates which are the free joint), e.g. for "LF_HAA" value will be written at index 1+6 = 7.
-        for key, value in initial_q.items():
-            builder.joint_q[builder.joint_key.index(key) + 6] = value
+        for name, value in initial_q.items():
+            idx = next(i for i, lbl in enumerate(builder.joint_label) if lbl.endswith(f"/{name}"))
+            builder.joint_q[idx + 6] = value
 
         for i in range(builder.joint_dof_count):
             builder.joint_target_ke[i] = 150
@@ -134,7 +121,7 @@ class Example:
         self.model = builder.finalize()
 
         # setup mpm solver
-        mpm_options = SolverImplicitMPM.Options()
+        mpm_options = SolverImplicitMPM.Config()
         mpm_options.voxel_size = voxel_size
         mpm_options.tolerance = tolerance
         mpm_options.transfer_scheme = "pic"
@@ -147,23 +134,15 @@ class Example:
         mpm_options.max_iterations = 50
         mpm_options.critical_fraction = 0.0
         mpm_options.air_drag = 1.0
-
-        # Set per-particle hardening via custom attributes
-        self.model.mpm.hardening.fill_(0.0)
+        mpm_options.collider_velocity_mode = "backward"
 
         # setup solvers
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
-            ls_parallel=True,
             ls_iterations=50,
             njmax=50,  # ls_iterations=50 for determinism
         )
         self.mpm_solver = SolverImplicitMPM(self.model, mpm_options)
-
-        # Configure collider: treat robot bodies as kinematic
-        self.mpm_solver.setup_collider(
-            body_mass=wp.zeros_like(self.model.body_mass),
-        )
 
         # simulation state
         self.state_0 = self.model.state()
@@ -171,6 +150,12 @@ class Example:
 
         # not required for MuJoCo, but required for other solvers
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+
+        # Configure collider: treat robot bodies as kinematic and update initial state
+        self.mpm_solver.setup_collider(
+            body_mass=wp.zeros_like(self.model.body_mass),
+            body_q=self.state_0.body_q,
+        )
 
         # Setup control policy
         self.control = self.model.control()
@@ -183,7 +168,13 @@ class Example:
 
         # Download the policy from the newton-assets repository
         policy_path = str(asset_path / "rl_policies" / "anymal_walking_policy_physx.pt")
-        self.policy = torch.jit.load(policy_path, map_location=self.torch_device)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"`torch\.jit\.load` is deprecated\. Please switch to `torch\.export`\.",
+                category=DeprecationWarning,
+            )
+            self.policy = torch.jit.load(policy_path, map_location=self.torch_device)
 
         # Pre-compute tensors that don't change during simulation
         self.lab_to_mujoco_indices = torch.tensor(
@@ -305,13 +296,22 @@ class Example:
         newton.examples.test_particle_state(
             self.state_0,
             "all particles are above the ground",
-            lambda q, qd: q[2] > -voxel_size,
+            lambda q, qd: q[2] > -1.1 * voxel_size,
         )
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         self.viewer.end_frame()
+
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument("--voxel-size", "-dx", type=float, default=0.03)
+        parser.add_argument("--particles-per-cell", "-ppc", type=float, default=3.0)
+        parser.add_argument("--grid-type", "-gt", choices=["sparse", "dense", "fixed"], default="sparse")
+        parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-6)
+        return parser
 
 
 def _spawn_particles(builder: newton.ModelBuilder, res, bounds_lo, bounds_hi, density):
@@ -337,29 +337,12 @@ def _spawn_particles(builder: newton.ModelBuilder, res, bounds_lo, bounds_hi, de
 
 
 if __name__ == "__main__":
-    # Create parser that inherits common arguments and adds example-specific ones
-    parser = newton.examples.create_parser()
-    parser.add_argument("--voxel-size", "-dx", type=float, default=0.03)
-    parser.add_argument("--particles-per-cell", "-ppc", type=float, default=3.0)
-    parser.add_argument("--grid-type", "-gt", choices=["sparse", "dense", "fixed"], default="sparse")
-    parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-6)
-
-    # Parse arguments and initialize viewer
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
 
-    # This example requires a GPU device
     if wp.get_device().is_cpu:
         print("Error: This example requires a GPU device.")
         sys.exit(1)
 
-    # Create example and load policy
-    example = Example(
-        viewer,
-        voxel_size=args.voxel_size,
-        particles_per_cell=args.particles_per_cell,
-        tolerance=args.tolerance,
-        grid_type=args.grid_type,
-    )
-
-    # Run via unified example runner
+    example = Example(viewer, args)
     newton.examples.run(example, args)

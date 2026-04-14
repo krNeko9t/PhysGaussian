@@ -1,23 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
-# Treadmill Cloth Simulation
+# Cloth Rollers
 #
 # A rolled cloth mesh that unrolls as the inner seam rotates.
-# Command: uv run -m newton.examples cloth.example_rolling_cloth
+# Command: uv run -m newton.examples cloth_rollers
 #
 ###########################################################################
 
@@ -32,7 +20,7 @@ from newton import ParticleFlags
 
 
 @wp.kernel
-def increment_time(time: wp.array(dtype=float), dt: float):
+def increment_time(time: wp.array[float], dt: float):
     """Increment time by dt."""
     time[0] = time[0] + dt
 
@@ -41,12 +29,12 @@ def increment_time(time: wp.array(dtype=float), dt: float):
 def rotate_cylinder(
     angular_speed: float,
     dt: float,
-    time: wp.array(dtype=float),
+    time: wp.array[float],
     center_x: float,
     center_z: float,
-    q0: wp.array(dtype=wp.vec3),
-    indices: wp.array(dtype=wp.int64),
-    q1: wp.array(dtype=wp.vec3),
+    q0: wp.array[wp.vec3],
+    indices: wp.array[wp.int64],
+    q1: wp.array[wp.vec3],
 ):
     """Rotate cylinder vertices around their center axis."""
     i = wp.tid()
@@ -186,16 +174,7 @@ def cylinder_mesh(radius=9.5, height=120.0, segments=64):
 
 
 class Example:
-    def __init__(
-        self,
-        viewer,
-        args=None,
-        cloth_length=800.0,
-        cloth_nu=300,
-        cloth_thickness=0.4,
-        angular_speed=2 * np.pi,
-        spin_duration=20.0,
-    ):
+    def __init__(self, viewer, args):
         self.viewer = viewer
         self.sim_time = 0.0
         self.args = args
@@ -210,7 +189,13 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.iterations = 12
 
-        # Cloth parameters
+        # Cloth parameters (hardcoded)
+        cloth_length = 800.0
+        cloth_nu = 300
+        cloth_thickness = 0.4
+        angular_speed = 2 * np.pi
+        spin_duration = 20.0
+
         self.cloth_thickness = cloth_thickness
         self.nv = 15  # vertices per row
 
@@ -539,24 +524,10 @@ if __name__ == "__main__":
     # Create parser with base arguments
     parser = newton.examples.create_parser()
 
-    parser.add_argument("--cloth-length", type=float, default=800.0, help="Length of cloth spiral")
-    parser.add_argument("--cloth-nu", type=int, default=300, help="Number of rows along cloth length")
-    parser.add_argument("--cloth-thickness", type=float, default=0.4, help="Thickness of rolled cloth mesh")
-    parser.add_argument("--angular-speed", type=float, default=2 * np.pi, help="Base rotation speed (rad/sec)")
-    parser.add_argument("--spin-duration", type=float, default=20.0, help="Duration of spinning (seconds)")
-
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)
 
     # Create example and run
-    example = Example(
-        viewer=viewer,
-        args=args,
-        cloth_length=args.cloth_length,
-        cloth_nu=args.cloth_nu,
-        cloth_thickness=args.cloth_thickness,
-        angular_speed=args.angular_speed,
-        spin_duration=args.spin_duration,
-    )
+    example = Example(viewer=viewer, args=args)
 
     newton.examples.run(example, args)

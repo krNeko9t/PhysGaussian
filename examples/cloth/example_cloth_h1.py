@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example cloth H1 (cloth-robot interaction)
@@ -39,7 +27,7 @@ from newton.solvers import style3d
 
 
 class Example:
-    def __init__(self, viewer, args=None):
+    def __init__(self, viewer, args):
         # frame timing
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -189,13 +177,11 @@ class Example:
             model=self.model,
             iterations=self.iterations,
         )
-        self.cloth_solver.precompute(h1)
+        self.cloth_solver._precompute(h1)
         self.cloth_solver.collision.radius = 3.5e-3
         self.control = self.model.control()
 
-        # Create collision pipeline (default: unified)
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
-        self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.contacts()
         self.shape_flags = self.model.shape_flags.numpy()
 
     # ----------------------------------------------------------------------
@@ -211,10 +197,10 @@ class Example:
     @wp.kernel
     def transform_interpolate(
         ratio: float,
-        transform0: wp.array(dtype=wp.transform),
-        transform1: wp.array(dtype=wp.transform),
+        transform0: wp.array[wp.transform],
+        transform1: wp.array[wp.transform],
         # outputs
-        new_transform: wp.array(dtype=wp.transform),
+        new_transform: wp.array[wp.transform],
     ):
         tid = wp.tid()
         tf0 = transform0[tid]
@@ -242,7 +228,7 @@ class Example:
                 device=self.model.device,
             )
             self.state.body_q.assign(self.state1.body_q)
-            self.contacts = self.model.collide(self.state, collision_pipeline=self.collision_pipeline)
+            self.model.collide(self.state, self.contacts)
             self.cloth_solver.step(self.state, self.state1, self.control, self.contacts, self.sim_dt)
             (self.state, self.state1) = (self.state1, self.state)
 

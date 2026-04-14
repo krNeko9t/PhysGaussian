@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Cable Y-Junction
@@ -43,7 +31,7 @@ def _y_dirs_xy() -> list[wp.vec3]:
 
 
 class Example:
-    def __init__(self, viewer, args=None):
+    def __init__(self, viewer, args):
         self.viewer = viewer
         self.args = args
 
@@ -98,7 +86,7 @@ class Example:
             stretch_damping=stretch_damping,
             bend_stiffness=bend_stiffness,
             bend_damping=bend_damping,
-            key="y_graph",
+            label="y_graph",
             wrap_in_articulation=True,
         )
 
@@ -116,7 +104,7 @@ class Example:
             builder.add_ground_plane()
 
         builder.color(balance_colors=False)
-        sim_device = wp.get_device(args.device) if args is not None and getattr(args, "device", None) else None
+        sim_device = wp.get_device(args.device) if args.device else None
         self.model = builder.finalize(device=sim_device)
         self.model.set_gravity((0.0, 0.0, float(getattr(args, "gravity_z", -9.81))))
 
@@ -129,13 +117,21 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+        self.contacts = self.model.contacts()
 
         if self.state_0.body_q is None:
             raise RuntimeError("Body state is not available.")
         self.pinned_body_q0 = self.state_0.body_q.numpy()[self.pinned_body].copy()
 
         self.viewer.set_model(self.model)
+
+        # Set camera to be closer to the cable
+        self.viewer.set_camera(
+            pos=wp.vec3(6.0, 0.0, 1.5),
+            pitch=0.0,
+            yaw=-180.0,
+        )
+
         self.capture()
 
     def capture(self):
@@ -150,7 +146,7 @@ class Example:
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
-            self.contacts = self.model.collide(self.state_0)
+            self.model.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
