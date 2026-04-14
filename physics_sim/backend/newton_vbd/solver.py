@@ -616,12 +616,10 @@ class NewtonVBDBackend(PhysicsBackend):
         self._state_1 = self._model.state()
         self._control = self._model.control()
 
-        # Collision pipeline
-        self._collision_pipeline = (
-            newton.CollisionPipelineUnified.from_model(
-                self._model,
-                broad_phase_mode=newton.BroadPhaseMode.SAP,
-            )
+        # Collision pipeline (Newton ≥1.1: `CollisionPipeline`, broad_phase as string)
+        self._collision_pipeline = newton.CollisionPipeline(
+            self._model,
+            broad_phase="sap",
         )
         self._contacts = self._model.collide(
             self._state_0,
@@ -916,7 +914,7 @@ class NewtonVBDBackend(PhysicsBackend):
         else:
             sa = info["semi_axes"]
             a, b, c = (float(v) for v in sa)
-            builder.add_shape_ellipsoid(body_idx, a=a, b=b, c=c, cfg=shape_cfg)
+            builder.add_shape_ellipsoid(body_idx, rx=a, ry=b, rz=c, cfg=shape_cfg)
             desc = f"ellipsoid({a:.3f},{b:.3f},{c:.3f})"
 
         # Body-local positions

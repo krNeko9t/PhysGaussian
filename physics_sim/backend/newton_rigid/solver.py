@@ -477,12 +477,11 @@ class NewtonRigidBackend(PhysicsBackend):
             self._state_1.body_qd.assign(qd_1)
 
         # ── Collision pipeline ──────────────────────────────────────
-        self._collision_pipeline = (
-            newton.CollisionPipelineUnified.from_model(
-                self._model,
-                reduce_contacts=True,
-                broad_phase_mode=newton.BroadPhaseMode.SAP,
-            )
+        # Newton ≥1.1: unified pipeline is `CollisionPipeline`; broad phase is a string.
+        self._collision_pipeline = newton.CollisionPipeline(
+            self._model,
+            reduce_contacts=True,
+            broad_phase="sap",
         )
         self._contacts = self._model.collide(
             self._state_0,
@@ -725,7 +724,7 @@ class NewtonRigidBackend(PhysicsBackend):
             sa = info["semi_axes"]
             a, b, c = (float(v) for v in sa)
             builder.add_shape_ellipsoid(
-                body_idx, a=a, b=b, c=c, cfg=shape_cfg,
+                body_idx, rx=a, ry=b, rz=c, cfg=shape_cfg,
             )
             shape_desc = f"ellipsoid({a:.3f}, {b:.3f}, {c:.3f})"
 

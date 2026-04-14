@@ -136,7 +136,7 @@ class NewtonMPMBackend(PhysicsBackend):
         # Solver options — start from Newton's own defaults.
         # Overrides come from config JSON ("newton_mpm" → "solver" section)
         # and are applied in set_material().
-        self._solver_opts = SolverImplicitMPM.Options()
+        self._solver_opts = SolverImplicitMPM.Config()
         self._material_params: dict = {}
         self._cov_np: np.ndarray | None = None
         self._volumes: np.ndarray | None = None
@@ -251,7 +251,7 @@ class NewtonMPMBackend(PhysicsBackend):
             self._solver_opts.transfer_scheme = "apic"
 
         # Apply solver option overrides from config ("newton_mpm" → "solver").
-        # Any key that exists as an attribute on SolverImplicitMPM.Options
+        # Any key that exists as an attribute on SolverImplicitMPM.Config
         # can be overridden here.  Unrecognised keys are warned about.
         newton_opts = material_params.get("newton_solver_opts", {})
         _SOLVER_OPT_TYPES = {
