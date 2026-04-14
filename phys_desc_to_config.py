@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
 Convert a phys_desc.json (semantic-level physical descriptions produced by a
-VLM) into a pipeline-ready config JSON that PhysGaussian's ``pipeline.py`` can
-consume directly.
+VLM) into a pipeline-ready YAML config that ``pipeline.py`` can consume.
 
 Usage:
     python phys_desc_to_config.py \
         --phys_desc phys_desc.json \
         --ply_dir   scene_data/plys/ \
-        --output    config/auto_config.json \
+        --output    experiments/auto_config.yaml \
         --backend-preference auto \
         [--scene-defaults scene_defaults.json]
 """
@@ -345,11 +344,27 @@ def convert(
     backend_preference: str = "auto",
     scene_defaults: dict | None = None,
 ) -> dict:
-    """Convert phys_desc entries into a complete pipeline config dict."""
+    """Convert phys_desc entries into a pipeline config dict (new YAML schema).
+
+    The output dict is serialised to YAML by the caller and consumed by
+    ``pipeline.py`` via ``physics_sim.config.loader.load_config``.
+    """
 
     config: dict[str, Any] = {}
 
-    # Start from scene defaults, then overlay user overrides.
+    # Hydra header: enables ``defaults:`` resolution against the shipped
+    # sub-configs in ``physics_sim/conf/``.
+    config["hydra"] = {"searchpath": ["pkg://physics_sim.conf"]}
+    config["defaults"] = [
+        {"material": "sand"},
+        {"time": "default"},
+        {"preprocess": "default"},
+        {"camera": "orbit"},
+        # backend default will be overridden below
+        "_self_",
+    ]
+
+    # Scene-level defaults.
     defaults = dict(_SCENE_DEFAULTS)
     if scene_defaults:
         defaults.update(scene_defaults)
@@ -358,8 +373,35 @@ def convert(
         if k != "objects":
             config[k] = v
 
-    # Build per-object entries.
-    objects: list[dict[str, Any]] = []
+    # Preprocess block
+    config["preprocess"] = {
+        "opacity_threshold": defaults.get("opacity_threshold", 0.1),
+        "axis_permutation": defaults.get("axis_permutation", "xz-y"),
+        "rotation_degree": defaults.get("rotation_degree", [0.0]),
+        "rotation_axis": defaults.get("rotation_axis", [0]),
+        "transform_reference": defaults.get("transform_reference", "shared_ply"),
+    }
+
+    # Camera block
+    config["camera"] = {
+        "camera_mode": "orbit",
+        "default_camera_index": defaults.get("default_camera_index", -1),
+        "show_hint": defaults.get("show_hint", False),
+        "width": defaults.get("width", 800),
+        "height": defaults.get("height", 600),
+        "fovx_deg": defaults.get("fovx_deg", 60.0),
+        "fovy_deg": defaults.get("fovy_deg", 45.0),
+        "init_azimuth": defaults.get("init_azimuth", 160.0),
+        "init_elevation": defaults.get("init_elevation", 20.0),
+        "init_radius": defaults.get("init_radius", 2.8),
+        "move_camera": defaults.get("move_camera", True),
+        "delta_a": defaults.get("delta_a", -0.6),
+        "delta_e": defaults.get("delta_e", 0.0),
+        "delta_r": defaults.get("delta_r", 0.0),
+    }
+
+    # Build per-object entries (new schema with source blocks).
+    objects_internal: list[dict[str, Any]] = []
 
     for entry in phys_desc:
         response = entry.get("response", entry)
@@ -371,7 +413,6 @@ def convert(
 
         mode = _BEHAVIOR_TO_MODE.get(behavior, "render_only")
 
-        # Resolve PLY path
         ply_path = None
         if ply_dir:
             ply_path = _resolve_ply_path(ply_dir, instance_id)
@@ -379,35 +420,31 @@ def convert(
         obj: dict[str, Any] = {
             "name": instance_id,
             "mode": mode,
-            "_behavior": behavior,  # internal, stripped before output
+            "_behavior": behavior,
         }
 
+        # New schema: source block
         if ply_path:
-            obj["ply_path"] = ply_path
+            obj["source"] = {"type": "ply", "ply_path": ply_path}
 
-        # Material parameters for dynamic objects
         if mode == "simulate":
             mat = _blend_materials(appearance_materials, physical_priors, material_lut)
             geo_params = _map_geometry(geometry_form, geometry_lut)
-            obj["density"] = round(mat["density"], 1)
-            obj["mu"] = round(mat["mu"], 3)
-            obj["E"] = mat["E"]
-            obj["nu"] = round(mat["nu"], 3)
+            obj["material"] = {
+                "density": round(mat["density"], 1),
+                "mu": round(mat["mu"], 3),
+                "E": mat["E"],
+                "nu": round(mat["nu"], 3),
+            }
             if "collision_geometry" in geo_params:
-                obj["collision_geometry"] = geo_params["collision_geometry"]
-            obj["_geo_params"] = geo_params  # internal, stripped before output
+                obj["material"]["collision_geometry"] = geo_params["collision_geometry"]
+            obj["_geo_params"] = geo_params
 
-        # Collider config for static objects
         elif mode == "collider_only":
             collider = _auto_collider_config(ply_path, physical_priors, material_lut)
-            # Try to determine plane orientation for prefer_up
             if ply_path:
                 normal = _estimate_plane_orientation(ply_path)
                 if normal is not None:
-                    # If the normal is roughly vertical (|nz| > 0.7), it's a
-                    # floor/ceiling — no prefer_up needed (SVD default is fine).
-                    # Otherwise set prefer_up to the estimated normal so the
-                    # pipeline picks the correct orientation for walls.
                     nz_abs = abs(normal[2])
                     if nz_abs < 0.7:
                         collider["prefer_up"] = [
@@ -417,22 +454,25 @@ def convert(
                         ]
             obj["collider"] = collider
 
-        objects.append(obj)
+        objects_internal.append(obj)
 
     # Infer backend
-    backend = _infer_backend(objects, backend_preference)
+    backend = _infer_backend(objects_internal, backend_preference)
     config["backend"] = backend
 
-    # Build backend override section
-    backend_override = _build_backend_override(backend, objects, geometry_lut)
-    config[backend] = backend_override
+    # Backend defaults merged to top level (new schema — no nested backend block)
+    backend_override = _build_backend_override(backend, objects_internal, geometry_lut)
+    for k, v in backend_override.items():
+        config[k] = v
+
+    # Add backend default to the defaults list
+    config["defaults"].insert(-1, {"backend": backend.replace("_", "_")})
 
     # Strip internal keys and assemble final objects list
     clean_objects = []
-    for obj in objects:
+    for obj in objects_internal:
         clean = {k: v for k, v in obj.items() if not k.startswith("_")}
         clean_objects.append(clean)
-
     config["objects"] = clean_objects
 
     return config
@@ -444,7 +484,7 @@ def convert(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert phys_desc.json to PhysGaussian pipeline config JSON."
+        description="Convert phys_desc.json to PhysGaussian pipeline config YAML."
     )
     parser.add_argument(
         "--phys_desc", type=str, required=True,
@@ -455,8 +495,8 @@ def main():
         help="Directory containing per-object PLY files (<instance_id>.ply)",
     )
     parser.add_argument(
-        "--output", type=str, default="config/auto_config.json",
-        help="Output path for the generated config JSON",
+        "--output", type=str, default="experiments/auto_config.yaml",
+        help="Output path for the generated config YAML",
     )
     parser.add_argument(
         "--backend-preference", type=str, default="auto",
@@ -498,8 +538,17 @@ def main():
     )
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+
+    try:
+        from omegaconf import OmegaConf
+        yaml_str = OmegaConf.to_yaml(OmegaConf.create(config))
+    except ImportError:
+        import yaml  # type: ignore[import-untyped]
+        yaml_str = yaml.dump(config, default_flow_style=False, sort_keys=False,
+                             allow_unicode=True)
+
     with open(args.output, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write(yaml_str)
 
     # Summary
     n_sim = sum(1 for o in config["objects"] if o["mode"] == "simulate")

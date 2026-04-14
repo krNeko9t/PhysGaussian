@@ -1,1 +1,1 @@
-from physics_sim.config.parser import decode_param_json
+from physics_sim.config.loader import load_config

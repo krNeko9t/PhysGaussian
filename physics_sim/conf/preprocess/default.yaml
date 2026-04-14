@@ -1,0 +1,8 @@
+opacity_threshold: 0.02
+rotation_degree:
+  - 0.0
+rotation_axis:
+  - 0
+axis_permutation: xyz
+scale: 1.0
+transform_reference: null

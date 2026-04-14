@@ -1,8 +1,10 @@
 """
-Configuration parser for physics simulation scenes.
+**LEGACY** — Configuration parser for the old JSON config format.
 
-Extracted from PhysGaussian/utils/decode_param.py.
-Reads a JSON config and returns structured parameter dictionaries.
+This module is retained only for backward compatibility with external
+scripts that still use the old JSON configs.  New code should use
+``physics_sim.config.loader.load_config`` with YAML configs and
+``physics_sim.scene.assemble_scene`` for object assembly.
 """
 
 import json

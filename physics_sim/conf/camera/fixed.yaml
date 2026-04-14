@@ -1,0 +1,7 @@
+camera_mode: fixed
+fixed_position: null
+fixed_rotation: null
+width: 800
+height: 600
+fovx_deg: 60.0
+fovy_deg: 45.0

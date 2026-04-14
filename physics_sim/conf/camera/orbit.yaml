@@ -1,0 +1,12 @@
+camera_mode: orbit
+mpm_space_viewpoint_center: [1.0, 1.0, 1.0]
+mpm_space_vertical_upward_axis: [0, 0, 1]
+default_camera_index: -1
+show_hint: false
+init_azimuth: 170
+init_elevation: 0
+init_radius: 1.6
+move_camera: true
+delta_a: -2.4
+delta_e: 0.8
+delta_r: 0.0
