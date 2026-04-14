@@ -175,8 +175,8 @@ class CameraConfig(BaseModel):
     # Procedural orbit/fixed cameras need a framebuffer size; json mode reads W/H from cameras.json.
     width: int = 800
     height: int = 600
-    fovx_deg: float | None = None
-    fovy_deg: float | None = None
+    fovx_deg: float = 60
+    fovy_deg: float = 45
     fx: float | None = None
     fy: float | None = None
     fixed_position: list[float] | None = None
