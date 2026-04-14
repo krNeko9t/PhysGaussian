@@ -1,4 +1,3 @@
-backend: newton_rigid
 n_grid: 200
 grid_lim: 2.0
 collision_geometry: convex_hull

@@ -1,4 +1,3 @@
-material: jelly
-E: 1.0e5
+E: 1.0e+5
 nu: 0.4
 density: 200.0

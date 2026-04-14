@@ -1,4 +1,3 @@
-backend: newton_mpm
 n_grid: 200
 grid_lim: 2.0
 solver:

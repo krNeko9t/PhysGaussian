@@ -13,17 +13,14 @@ from typing import Any
 import numpy as np
 import torch
 
+from physics_sim.config.schema import SimConfig
 from physics_sim.scene.objects import SceneObject
 
 
 def _apply_axis_permutation(
     pos: torch.Tensor, cov: torch.Tensor, perm: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Axis permutation on positions and covariances.
-
-    Duplicated from pipeline helpers to keep the assembler self-contained
-    (avoids circular imports with pipeline.py).
-    """
+    """Axis permutation on positions and covariances."""
     if perm == "xyz":
         return pos, cov
 
@@ -95,14 +92,14 @@ def _resolve_path(path: str, config_dir: str | None) -> str:
 
 
 def assemble_scene(
-    cfg: dict[str, Any],
+    cfg: SimConfig,
     renderer: Any,
     config_dir: str | None = None,
 ) -> list[SceneObject]:
-    """Build a list of SceneObject from a resolved config dict.
+    """Build a list of SceneObject from a fully-resolved :class:`SimConfig`.
 
     Args:
-        cfg: Fully resolved config (plain dict from OmegaConf.to_container).
+        cfg: Fully resolved config (all ``_ref`` references expanded).
         renderer: A ``GaussianRenderer`` instance (used for ``load_ply``).
         config_dir: Directory of the config file, used for resolving
             relative PLY paths.
@@ -116,34 +113,20 @@ def assemble_scene(
         apply_cov_rotations,
     )
 
-    preprocess = cfg.get("preprocess", {})
-    axis_perm = preprocess.get("axis_permutation", "xyz")
-    opacity_threshold = preprocess.get("opacity_threshold", 0.02)
-    rotation_degree = preprocess.get("rotation_degree", [0.0])
-    rotation_axis = preprocess.get("rotation_axis", [0])
+    pp = cfg.preprocess
+    axis_perm = pp.axis_permutation
+    opacity_threshold = pp.opacity_threshold
 
     rotation_matrices = generate_rotation_matrices(
-        torch.tensor(rotation_degree), rotation_axis,
+        torch.tensor(pp.rotation_degree), pp.rotation_axis,
     )
 
-    top_material = {}
-    for key in ("material", "E", "nu", "density", "g", "friction_angle",
-                "yield_stress", "hardening", "xi", "plastic_viscosity",
-                "softening", "rpic_damping", "pic_damping",
-                "ke", "kd", "mu", "friction",
-                "collision_geometry", "physics",
-                "k_mu", "k_lambda", "k_damp",
-                "alpha", "max_triangles", "tet_max_volume", "tet_quality",
-                "initial_velocity",
-                "grid_v_damping_scale", "opacity_threshold"):
-        if key in cfg:
-            top_material[key] = cfg[key]
+    top_material = dict(cfg.material)
 
-    objects_cfg = cfg.get("objects", [])
+    objects_cfg = cfg.objects
     if not objects_cfg:
         raise ValueError("Config must declare at least one object in 'objects'.")
 
-    # -- Collect and deduplicate PLY loads --
     ply_cache: dict[str, dict] = {}
     id_map_cache: dict[str, np.ndarray] = {}
 
@@ -161,7 +144,6 @@ def assemble_scene(
             id_map_cache[resolved] = np.load(resolved)
         return id_map_cache[resolved]
 
-    # -- Process each object --
     result: list[SceneObject] = []
 
     for i, obj_cfg in enumerate(objects_cfg):
@@ -172,7 +154,6 @@ def assemble_scene(
 
         print(f"  [assembler] Processing '{name}' (mode={mode}, source={source_type})")
 
-        # --- Extract raw GS data from source ---
         if source_type == "ply":
             ply_path = source.get("ply_path")
             if ply_path is None:
@@ -224,18 +205,13 @@ def assemble_scene(
             quats = ply_data["quats"].clone()
             scales = ply_data["scales"].clone()
             gs_type = ply_data["gs_type"]
-
-            # sim_area filtering happens after axis_perm + rotation below
-            # (just like the old pipeline), so we defer it.
         else:
             raise ValueError(f"Object '{name}': unknown source.type '{source_type}'.")
 
         # --- Unified preprocessing ---
 
-        # 1. Axis permutation
         pos, cov = _apply_axis_permutation(pos, cov, axis_perm)
 
-        # 2. Opacity filter
         obj_opacity_threshold = obj_cfg.get("opacity_threshold", opacity_threshold)
         op_mask = opacity[:, 0] > obj_opacity_threshold
         pos = pos[op_mask]
@@ -245,19 +221,12 @@ def assemble_scene(
         quats = quats[op_mask]
         scales = scales[op_mask]
 
-        # 3. Rotation (for simulate objects: rotate into backend space;
-        #    for static/collider: keep world space positions but still
-        #    need rotated positions for sim_area filtering)
         if mode == "simulate":
             pos = apply_rotations(pos, rotation_matrices)
             cov = apply_cov_rotations(cov, rotation_matrices)
         elif source_type == "sim_area":
-            # Need rotated positions for AABB selection, but the actual
-            # positions stored are in rotated space for simulate mode.
-            # For non-simulate with sim_area, rotate, filter, then keep.
             pos = apply_rotations(pos, rotation_matrices)
 
-        # 4. sim_area filter (deferred from above)
         if source_type == "sim_area":
             sim_area = source["sim_area"]
             sa_mask = _apply_sim_area_mask(pos, sim_area)
@@ -268,21 +237,16 @@ def assemble_scene(
             quats = quats[sa_mask]
             scales = scales[sa_mask]
 
-        # 5. Position offset (applied in rotated world space)
         position_offset = obj_cfg.get("position_offset")
         if position_offset is not None and mode == "simulate":
             pos = pos + torch.tensor(
                 position_offset, device=pos.device, dtype=pos.dtype,
             )
 
-        # 6. Material (inherit from top-level, override with per-object)
         obj_material_overrides = obj_cfg.get("material", {})
         material = _merge_material(top_material, obj_material_overrides)
 
-        # 7. Collider
         collider = obj_cfg.get("collider")
-
-        # 8. Particle filling
         particle_filling = obj_cfg.get("particle_filling")
 
         print(f"    -> {name}: {pos.shape[0]} GS particles (gs_type={gs_type})")

@@ -1,5 +1,4 @@
-material: sand
-E: 5.0e7
+E: 5.0e+7
 nu: 0.3
 density: 2000.0
 friction_angle: 30

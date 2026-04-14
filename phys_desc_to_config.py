@@ -16,14 +16,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _DEFAULT_MATERIAL_LUT = _SCRIPT_DIR / "physics_sim" / "config" / "material_lut.json"
@@ -344,63 +343,17 @@ def convert(
     backend_preference: str = "auto",
     scene_defaults: dict | None = None,
 ) -> dict:
-    """Convert phys_desc entries into a pipeline config dict (new YAML schema).
+    """Convert phys_desc entries into a pipeline config dict.
 
-    The output dict is serialised to YAML by the caller and consumed by
-    ``pipeline.py`` via ``physics_sim.config.loader.load_config``.
+    The output uses the ``_ref`` config schema:  backend, material, time,
+    preprocess, and camera are nested sections that can reference
+    ``physics_sim/conf/`` fragments.
     """
 
-    config: dict[str, Any] = {}
-
-    # Hydra header: enables ``defaults:`` resolution against the shipped
-    # sub-configs in ``physics_sim/conf/``.
-    config["hydra"] = {"searchpath": ["pkg://physics_sim.conf"]}
-    config["defaults"] = [
-        {"material": "sand"},
-        {"time": "default"},
-        {"preprocess": "default"},
-        {"camera": "orbit"},
-        # backend default will be overridden below
-        "_self_",
-    ]
-
-    # Scene-level defaults.
     defaults = dict(_SCENE_DEFAULTS)
     if scene_defaults:
         defaults.update(scene_defaults)
 
-    for k, v in defaults.items():
-        if k != "objects":
-            config[k] = v
-
-    # Preprocess block
-    config["preprocess"] = {
-        "opacity_threshold": defaults.get("opacity_threshold", 0.1),
-        "axis_permutation": defaults.get("axis_permutation", "xz-y"),
-        "rotation_degree": defaults.get("rotation_degree", [0.0]),
-        "rotation_axis": defaults.get("rotation_axis", [0]),
-        "transform_reference": defaults.get("transform_reference", "shared_ply"),
-    }
-
-    # Camera block
-    config["camera"] = {
-        "camera_mode": "orbit",
-        "default_camera_index": defaults.get("default_camera_index", -1),
-        "show_hint": defaults.get("show_hint", False),
-        "width": defaults.get("width", 800),
-        "height": defaults.get("height", 600),
-        "fovx_deg": defaults.get("fovx_deg", 60.0),
-        "fovy_deg": defaults.get("fovy_deg", 45.0),
-        "init_azimuth": defaults.get("init_azimuth", 160.0),
-        "init_elevation": defaults.get("init_elevation", 20.0),
-        "init_radius": defaults.get("init_radius", 2.8),
-        "move_camera": defaults.get("move_camera", True),
-        "delta_a": defaults.get("delta_a", -0.6),
-        "delta_e": defaults.get("delta_e", 0.0),
-        "delta_r": defaults.get("delta_r", 0.0),
-    }
-
-    # Build per-object entries (new schema with source blocks).
     objects_internal: list[dict[str, Any]] = []
 
     for entry in phys_desc:
@@ -423,7 +376,6 @@ def convert(
             "_behavior": behavior,
         }
 
-        # New schema: source block
         if ply_path:
             obj["source"] = {"type": "ply", "ply_path": ply_path}
 
@@ -456,24 +408,53 @@ def convert(
 
         objects_internal.append(obj)
 
-    # Infer backend
-    backend = _infer_backend(objects_internal, backend_preference)
-    config["backend"] = backend
+    backend_name = _infer_backend(objects_internal, backend_preference)
+    backend_override = _build_backend_override(
+        backend_name, objects_internal, geometry_lut,
+    )
 
-    # Backend defaults merged to top level (new schema — no nested backend block)
-    backend_override = _build_backend_override(backend, objects_internal, geometry_lut)
-    for k, v in backend_override.items():
-        config[k] = v
+    backend_section: dict[str, Any] = {"_ref": backend_name}
+    backend_section.update(backend_override)
 
-    # Add backend default to the defaults list
-    config["defaults"].insert(-1, {"backend": backend.replace("_", "_")})
-
-    # Strip internal keys and assemble final objects list
     clean_objects = []
     for obj in objects_internal:
         clean = {k: v for k, v in obj.items() if not k.startswith("_")}
         clean_objects.append(clean)
-    config["objects"] = clean_objects
+
+    config: dict[str, Any] = {
+        "output": defaults.get("output", "output/auto"),
+        "backend": backend_section,
+        "material": {
+            "density": defaults.get("density", 800),
+            "mu": defaults.get("mu", 0.5),
+            "g": defaults.get("g", [0.0, 0.0, -9.8]),
+        },
+        "time": {
+            "_ref": "default",
+            "substep_dt": defaults.get("substep_dt", 1e-4),
+            "frame_num": defaults.get("frame_num", 120),
+        },
+        "preprocess": {
+            "_ref": "default",
+            "opacity_threshold": defaults.get("opacity_threshold", 0.1),
+            "axis_permutation": defaults.get("axis_permutation", "xz-y"),
+            "transform_reference": defaults.get("transform_reference", "shared_ply"),
+        },
+        "camera": {
+            "_ref": "orbit",
+            "width": defaults.get("width", 800),
+            "height": defaults.get("height", 600),
+            "fovx_deg": defaults.get("fovx_deg", 60.0),
+            "fovy_deg": defaults.get("fovy_deg", 45.0),
+            "init_azimuth": defaults.get("init_azimuth", 160.0),
+            "init_elevation": defaults.get("init_elevation", 20.0),
+            "init_radius": defaults.get("init_radius", 2.8),
+            "delta_a": defaults.get("delta_a", -0.6),
+            "delta_e": defaults.get("delta_e", 0.0),
+        },
+        "objects": clean_objects,
+        "boundary_conditions": defaults.get("boundary_conditions", []),
+    }
 
     return config
 
@@ -539,23 +520,21 @@ def main():
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
-    try:
-        from omegaconf import OmegaConf
-        yaml_str = OmegaConf.to_yaml(OmegaConf.create(config))
-    except ImportError:
-        import yaml  # type: ignore[import-untyped]
-        yaml_str = yaml.dump(config, default_flow_style=False, sort_keys=False,
-                             allow_unicode=True)
+    yaml_str = yaml.dump(
+        config, default_flow_style=False, sort_keys=False, allow_unicode=True,
+    )
 
     with open(args.output, "w") as f:
         f.write(yaml_str)
 
-    # Summary
     n_sim = sum(1 for o in config["objects"] if o["mode"] == "simulate")
     n_col = sum(1 for o in config["objects"] if o["mode"] == "collider_only")
     n_ren = sum(1 for o in config["objects"] if o["mode"] == "render_only")
+    backend_name = config["backend"]
+    if isinstance(backend_name, dict):
+        backend_name = backend_name.get("_ref", "custom")
     print(f"Generated config: {args.output}")
-    print(f"  Backend: {config['backend']}")
+    print(f"  Backend: {backend_name}")
     print(f"  Objects: {len(config['objects'])} total "
           f"({n_sim} simulate, {n_col} collider_only, {n_ren} render_only)")
 

@@ -1,4 +1,3 @@
-material: rubber
-E: 1.0e6
+E: 1.0e+6
 nu: 0.45
 density: 1100.0

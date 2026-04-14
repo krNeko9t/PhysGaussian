@@ -7,25 +7,35 @@ Usage:
     python pipeline.py --config experiments/wolf_bread_rigid.yaml --white_bg --compile_video
     python pipeline.py --config experiments/wolf_bread_rigid.yaml --no_render
 
-All scene parameters (objects, materials, backend, camera, paths) live in
-the YAML config.  The config uses Hydra/OmegaConf ``defaults:`` to compose
-reusable sub-configs from ``physics_sim/conf/``.
+All scene parameters live in a YAML config file.  Config sections
+(backend, material, time, preprocess, camera) can reference reusable
+fragments via the ``_ref`` mechanism — see ``physics_sim/config/loader.py``.
 """
+
+from __future__ import annotations
 
 import argparse
 import os
 import glob as _glob
+from dataclasses import asdict, dataclass, field
+from typing import Optional
 
 import cv2
 import numpy as np
 import torch
 from tqdm import tqdm
 
-from physics_sim.config.loader import load_config
+from physics_sim.config.loader import ConfigLoader
+from physics_sim.config.schema import SimConfig
 from physics_sim.scene import SceneObject, assemble_scene
 from physics_sim.backend.base import SimulationState
 from physics_sim.renderer.gs_renderer import GaussianRenderer
 from physics_sim.geometry.plane_fit import fit_plane_svd
+from physics_sim.preprocessing.quaternions import (
+    apply_axis_perm_to_quats,
+    preprocess_quats,
+    inverse_preprocess_quats,
+)
 from physics_sim.preprocessing.transform import (
     generate_rotation_matrices,
     apply_rotations,
@@ -40,7 +50,7 @@ from physics_sim.preprocessing.transform import (
 
 # ── Debug helpers ────────────────────────────────────────────────────────
 
-_debug_log_path = None
+_debug_log_path: Optional[str] = None
 
 
 def _log(msg: str):
@@ -60,123 +70,6 @@ def _dbg(label: str, t: torch.Tensor):
         f"mean={t_f.mean().item():12.6f}  min={t_f.min().item():12.6f}  "
         f"max={t_f.max().item():12.6f}  sum={t_f.sum().item():14.4f}"
     )
-
-
-# ── Quaternion / axis-permutation helpers ────────────────────────────────
-# Kept in pipeline because they're used in the render loop for 2DGS.
-
-def _build_axis_perm_matrix(perm: str, device: torch.device) -> torch.Tensor:
-    if perm == "xyz":
-        return torch.eye(3, device=device, dtype=torch.float32)
-    axis_map = {"x": 0, "y": 1, "z": 2}
-    idx, signs = [], []
-    negate_next = False
-    for c in perm.lower():
-        if c == "-":
-            negate_next = True
-        elif c in axis_map:
-            idx.append(axis_map[c])
-            signs.append(-1.0 if negate_next else 1.0)
-            negate_next = False
-    P = torch.zeros(3, 3, device=device, dtype=torch.float32)
-    for row, (col, s) in enumerate(zip(idx, signs)):
-        P[row, col] = s
-    return P
-
-
-def _rotmat_to_quat_wxyz(R: torch.Tensor) -> torch.Tensor:
-    single = R.dim() == 2
-    if single:
-        R = R.unsqueeze(0)
-    trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
-    N = R.shape[0]
-    q = torch.zeros(N, 4, device=R.device, dtype=R.dtype)
-    m1 = trace > 0
-    if m1.any():
-        s = torch.sqrt(trace[m1] + 1.0) * 2.0
-        q[m1, 0] = 0.25 * s
-        q[m1, 1] = (R[m1, 2, 1] - R[m1, 1, 2]) / s
-        q[m1, 2] = (R[m1, 0, 2] - R[m1, 2, 0]) / s
-        q[m1, 3] = (R[m1, 1, 0] - R[m1, 0, 1]) / s
-    m2 = ~m1 & (R[:, 0, 0] > R[:, 1, 1]) & (R[:, 0, 0] > R[:, 2, 2])
-    if m2.any():
-        s = torch.sqrt(1.0 + R[m2, 0, 0] - R[m2, 1, 1] - R[m2, 2, 2]) * 2.0
-        q[m2, 0] = (R[m2, 2, 1] - R[m2, 1, 2]) / s
-        q[m2, 1] = 0.25 * s
-        q[m2, 2] = (R[m2, 0, 1] + R[m2, 1, 0]) / s
-        q[m2, 3] = (R[m2, 0, 2] + R[m2, 2, 0]) / s
-    m3 = ~m1 & ~m2 & (R[:, 1, 1] > R[:, 2, 2])
-    if m3.any():
-        s = torch.sqrt(1.0 + R[m3, 1, 1] - R[m3, 0, 0] - R[m3, 2, 2]) * 2.0
-        q[m3, 0] = (R[m3, 0, 2] - R[m3, 2, 0]) / s
-        q[m3, 1] = (R[m3, 0, 1] + R[m3, 1, 0]) / s
-        q[m3, 2] = 0.25 * s
-        q[m3, 3] = (R[m3, 1, 2] + R[m3, 2, 1]) / s
-    m4 = ~m1 & ~m2 & ~m3
-    if m4.any():
-        s = torch.sqrt(1.0 + R[m4, 2, 2] - R[m4, 0, 0] - R[m4, 1, 1]) * 2.0
-        q[m4, 0] = (R[m4, 1, 0] - R[m4, 0, 1]) / s
-        q[m4, 1] = (R[m4, 0, 2] + R[m4, 2, 0]) / s
-        q[m4, 2] = (R[m4, 1, 2] + R[m4, 2, 1]) / s
-        q[m4, 3] = 0.25 * s
-    q = torch.nn.functional.normalize(q, dim=-1)
-    return q[0] if single else q
-
-
-def _quat_mul_wxyz(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    if a.dim() == 1:
-        a = a.unsqueeze(0)
-    aw, ax, ay, az = a[:, 0:1], a[:, 1:2], a[:, 2:3], a[:, 3:4]
-    bw, bx, by, bz = b[:, 0:1], b[:, 1:2], b[:, 2:3], b[:, 3:4]
-    return torch.cat([
-        aw*bw - ax*bx - ay*by - az*bz,
-        aw*bx + ax*bw + ay*bz - az*by,
-        aw*by - ax*bz + ay*bw + az*bx,
-        aw*bz + ax*by - ay*bx + az*bw,
-    ], dim=-1)
-
-
-def apply_axis_perm_to_quats(quats_wxyz: torch.Tensor, perm: str) -> torch.Tensor:
-    if perm == "xyz":
-        return quats_wxyz
-    device = quats_wxyz.device
-    P = _build_axis_perm_matrix(perm, device)
-    if torch.det(P) < 0:
-        P = -P
-    q_perm = _rotmat_to_quat_wxyz(P)
-    return _quat_mul_wxyz(q_perm, quats_wxyz)
-
-
-def preprocess_quats(
-    quats_wxyz: torch.Tensor,
-    axis_perm: str,
-    rotation_matrices: list[torch.Tensor],
-) -> torch.Tensor:
-    device = quats_wxyz.device
-    R_combined = _build_axis_perm_matrix(axis_perm, device)
-    if torch.det(R_combined) < 0:
-        R_combined = -R_combined
-    for R in rotation_matrices:
-        R_combined = R @ R_combined
-    q_pre = _rotmat_to_quat_wxyz(R_combined)
-    return _quat_mul_wxyz(q_pre, quats_wxyz)
-
-
-def inverse_preprocess_quats(
-    quats_mpm_wxyz: torch.Tensor,
-    axis_perm: str,
-    rotation_matrices: list[torch.Tensor],
-) -> torch.Tensor:
-    device = quats_mpm_wxyz.device
-    R_combined = _build_axis_perm_matrix(axis_perm, device)
-    if torch.det(R_combined) < 0:
-        R_combined = -R_combined
-    for R in rotation_matrices:
-        R_combined = R @ R_combined
-    q_pre = _rotmat_to_quat_wxyz(R_combined)
-    q_pre_inv = q_pre.clone()
-    q_pre_inv[1:] = -q_pre_inv[1:]
-    return _quat_mul_wxyz(q_pre_inv, quats_mpm_wxyz)
 
 
 # ── Pipeline helpers ─────────────────────────────────────────────────────
@@ -268,53 +161,150 @@ def _resolve_collider_bc(
     return bc_list
 
 
-# ── Main ─────────────────────────────────────────────────────────────────
+# ── No-op backend (backend_type == "none") ───────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="3DGS Physics Simulation Pipeline")
-    parser.add_argument("--config", type=str, required=True,
-                        help="Path to a Hydra-composable YAML config")
-    parser.add_argument("--white_bg", action="store_true")
-    parser.add_argument("--compile_video", action="store_true")
-    parser.add_argument("--no_render", action="store_true",
-                        help="Run physics only, skip rendering.")
-    parser.add_argument("--sh_degree", type=int, default=3,
-                        help="SH degree of PLY models (default: 3)")
-    parser.add_argument("--raster_backend", type=str, default="gsplat",
-                        choices=["gsplat", "diffrast"],
-                        help="Rasterization backend (default: gsplat)")
-    parser.add_argument("--debug", action="store_true",
-                        help="Print intermediate tensor statistics")
-    parser.add_argument("--debug_log", type=str, default=None,
-                        help="Path to debug log file")
-    args = parser.parse_args()
+class _NoPhysicsBackend:
+    def __init__(self, dev: str):
+        self._device = dev
+        self._pos = self._cov = self._rot = None
+        self._quats = self._scales = None
 
-    assert os.path.exists(args.config), f"Config not found: {args.config}"
+    def initialize(self, positions, volumes, covariances, **kwargs):
+        self._pos = positions.clone()
+        self._cov = covariances.clone()
+        n = positions.shape[0]
+        self._rot = (
+            torch.eye(3, device=self._device, dtype=torch.float32)
+            .unsqueeze(0)
+            .repeat(n, 1, 1)
+        )
+        self._quats = kwargs.get("init_quats")
+        self._scales = kwargs.get("init_scales")
+        if self._quats is not None:
+            self._quats = self._quats.clone()
+        if self._scales is not None:
+            self._scales = self._scales.clone()
 
-    # ── 1. Load config ───────────────────────────────────────────────
-    print("Loading config...")
-    cfg = load_config(args.config)
-    config_dir = os.path.dirname(os.path.abspath(args.config))
+    def set_material(self, material_params: dict) -> None:
+        pass
 
-    backend_name = cfg.get("backend", "warp_mpm")
-    output_dir = cfg.get("output", "output")
-    os.makedirs(output_dir, exist_ok=True)
+    def set_boundary_conditions(self, bc_params: list, time_params: dict) -> None:
+        pass
 
-    # Debug setup
-    if args.debug:
-        global _debug_log_path
-        if args.debug_log is not None:
-            _debug_log_path = args.debug_log
+    def finalize(self) -> None:
+        pass
+
+    def step(self, dt: float, frame: int) -> None:
+        pass
+
+    def get_state(self) -> SimulationState:
+        return SimulationState(
+            positions=self._pos,
+            covariances=self._cov,
+            rotations=self._rot,
+            quats=self._quats,
+            scales=self._scales,
+        )
+
+
+# ── CLI args (separate from config) ─────────────────────────────────────
+
+@dataclass
+class PipelineArgs:
+    """Command-line flags that are orthogonal to the YAML config."""
+
+    config: str = ""
+    no_render: bool = False
+    white_bg: bool = False
+    compile_video: bool = False
+    debug: bool = False
+    debug_log: Optional[str] = None
+    sh_degree: int = 3
+    raster_backend: str = "gsplat"
+
+
+# ── SimulationPipeline ───────────────────────────────────────────────────
+
+class SimulationPipeline:
+    """Orchestrates config loading, scene assembly, physics, and rendering."""
+
+    def __init__(self, cfg: SimConfig, args: PipelineArgs):
+        self.cfg = cfg
+        self.args = args
+        self.device = "cuda:0"
+        self.config_dir = ""
+
+        # Populated by _assemble_scene
+        self.renderer: GaussianRenderer = None  # type: ignore[assignment]
+        self.sim_objects: list[SceneObject] = []
+        self.static_chunks: list[SceneObject] = []
+        self.collider_objects: list[SceneObject] = []
+        self.gs_type: str = "3dgs"
+        self.gs_num: int = 0
+        self.per_object_info: list[dict] = []
+
+        # Simulation tensors (populated by _assemble_scene)
+        self.sim_init_pos: torch.Tensor = torch.zeros(0, 3)
+        self.sim_init_cov: torch.Tensor = torch.zeros(0, 6)
+        self.sim_init_vol: torch.Tensor = torch.zeros(0)
+        self.sim_shs: torch.Tensor = torch.zeros(0)
+        self.sim_opacity: torch.Tensor = torch.zeros(0)
+        self.sim_quats: torch.Tensor = torch.zeros(0, 4)
+        self.sim_scales: torch.Tensor = torch.zeros(0, 3)
+
+        # Static tensors
+        self.static_pos: Optional[torch.Tensor] = None
+        self.static_cov: Optional[torch.Tensor] = None
+        self.static_opacity: Optional[torch.Tensor] = None
+        self.static_shs: Optional[torch.Tensor] = None
+        self.static_quats: Optional[torch.Tensor] = None
+        self.static_scales: Optional[torch.Tensor] = None
+
+        # Preprocessing state
+        self.axis_perm: str = "xyz"
+        self.rotation_matrices: list[torch.Tensor] = []
+
+        # Physics backend
+        self.backend = None
+
+        # Camera state (populated by _setup_camera)
+        self.viewpoint_center_worldspace = None
+        self.observant_coordinates = None
+        self.camera_params: dict = {}
+
+    def run(self, config_dir: str = ""):
+        self.config_dir = config_dir
+        os.makedirs(self.cfg.output, exist_ok=True)
+        self._setup_debug()
+        self._init_runtime()
+        self._assemble_scene()
+        self._init_backend()
+        self._setup_boundary_conditions()
+        if self.args.no_render:
+            self._run_headless()
         else:
-            _debug_log_path = os.path.join(output_dir, "debug.log")
+            self._setup_camera()
+            self._run_with_rendering()
+
+    # ── Stage 0: Debug setup ─────────────────────────────────────────
+
+    def _setup_debug(self):
+        if not self.args.debug:
+            return
+        global _debug_log_path
+        if self.args.debug_log is not None:
+            _debug_log_path = self.args.debug_log
+        else:
+            _debug_log_path = os.path.join(self.cfg.output, "debug.log")
         os.makedirs(os.path.dirname(_debug_log_path), exist_ok=True)
         with open(_debug_log_path, "w"):
             pass
 
-    device = "cuda:0"
+    # ── Stage 1: Runtime init ────────────────────────────────────────
 
-    # ── 2. Initialise runtime ────────────────────────────────────────
-    if backend_name != "none":
+    def _init_runtime(self):
+        if self.cfg.backend_type == "none":
+            return
         try:
             import warp as wp  # type: ignore
         except ModuleNotFoundError as e:
@@ -327,7 +317,7 @@ def main():
             ti = None
 
         wp.init()
-        if backend_name in ("newton_mpm", "newton_rigid", "newton_vbd"):
+        if self.cfg.backend_type in ("newton_mpm", "newton_rigid", "newton_vbd"):
             wp.config.verify_cuda = False
         else:
             wp.config.verify_cuda = True
@@ -335,255 +325,295 @@ def main():
         if ti is not None:
             ti.init(arch=ti.cuda, device_memory_GB=8.0)
 
-    # ── 3. Assemble scene objects ────────────────────────────────────
-    print("Assembling scene...")
-    raster_be = "gsplat" if args.no_render else args.raster_backend
-    renderer = GaussianRenderer(sh_degree=args.sh_degree, raster_backend=raster_be)
+    # ── Stage 2: Scene assembly ──────────────────────────────────────
 
-    objects = assemble_scene(cfg, renderer, config_dir=config_dir)
+    def _assemble_scene(self):
+        print("Assembling scene...")
+        raster_be = (
+            "gsplat" if self.args.no_render else self.args.raster_backend
+        )
+        self.renderer = GaussianRenderer(
+            sh_degree=self.args.sh_degree, raster_backend=raster_be,
+        )
 
-    sim_objects = [o for o in objects if o.mode == "simulate"]
-    static_objects = [o for o in objects if o.mode == "render_only"]
-    collider_objects = [o for o in objects if o.mode == "collider_only"]
+        objects = assemble_scene(
+            self.cfg, self.renderer, config_dir=self.config_dir,
+        )
 
-    if not sim_objects and backend_name != "none":
-        raise ValueError("No simulate objects found — nothing to simulate.")
+        self.sim_objects = [o for o in objects if o.mode == "simulate"]
+        static_objects = [o for o in objects if o.mode == "render_only"]
+        self.collider_objects = [o for o in objects if o.mode == "collider_only"]
 
-    # Determine gs_type from the first simulate object (or first overall).
-    gs_type = (sim_objects or objects)[0].gs_type
+        if not self.sim_objects and self.cfg.backend_type != "none":
+            raise ValueError("No simulate objects found — nothing to simulate.")
 
-    # Preprocess config
-    preprocess = cfg.get("preprocess", {})
-    axis_perm = preprocess.get("axis_permutation", "xyz")
-    rotation_matrices = generate_rotation_matrices(
-        torch.tensor(preprocess.get("rotation_degree", [0.0])),
-        preprocess.get("rotation_axis", [0]),
-    )
+        self.gs_type = (self.sim_objects or objects)[0].gs_type
 
-    # ── 4. Concatenate simulation particles ──────────────────────────
-    n_grid = cfg.get("n_grid", 200)
-    grid_lim = cfg.get("grid_lim", 2.0)
+        pp = self.cfg.preprocess
+        self.axis_perm = pp.axis_permutation
+        self.rotation_matrices = generate_rotation_matrices(
+            torch.tensor(pp.rotation_degree), pp.rotation_axis,
+        )
 
-    if sim_objects:
-        sim_init_pos = torch.cat([o.positions for o in sim_objects], dim=0).to(device)
-        sim_init_cov = torch.cat([o.covariances for o in sim_objects], dim=0).to(device)
-        sim_init_vol = _estimate_volumes(sim_init_pos, n_grid)
-        sim_shs = torch.cat([o.shs for o in sim_objects], dim=0)
-        sim_opacity = torch.cat([o.opacities for o in sim_objects], dim=0)
-        sim_quats = torch.cat([o.quats for o in sim_objects], dim=0)
-        sim_scales = torch.cat([o.scales for o in sim_objects], dim=0)
-        gs_num = sim_init_pos.shape[0]
-        per_object_info = _build_per_object_info(sim_objects)
-    else:
-        # No simulation — create empty tensors for rendering path
-        sim_init_pos = torch.zeros(0, 3, device=device)
-        sim_init_cov = torch.zeros(0, 6, device=device)
-        sim_init_vol = torch.zeros(0, device=device)
-        sim_shs = torch.zeros(0, (args.sh_degree + 1) ** 2, 3, device=device)
-        sim_opacity = torch.zeros(0, 1, device=device)
-        sim_quats = torch.zeros(0, 4, device=device)
-        sim_scales = torch.zeros(0, 3, device=device)
-        gs_num = 0
-        per_object_info = []
+        n_grid = self.cfg.backend.get("n_grid", 200)
+        device = self.device
 
-    # Build static render data from render_only + collider_only (with render flag)
-    static_chunks = []
-    for obj in static_objects:
-        static_chunks.append(obj)
-    for obj in collider_objects:
-        render_flag = (obj.collider or {}).get("render", True)
-        if render_flag and obj.n_particles > 0:
-            static_chunks.append(obj)
+        if self.sim_objects:
+            self.sim_init_pos = torch.cat(
+                [o.positions for o in self.sim_objects], dim=0
+            ).to(device)
+            self.sim_init_cov = torch.cat(
+                [o.covariances for o in self.sim_objects], dim=0
+            ).to(device)
+            self.sim_init_vol = _estimate_volumes(self.sim_init_pos, n_grid)
+            self.sim_shs = torch.cat(
+                [o.shs for o in self.sim_objects], dim=0
+            )
+            self.sim_opacity = torch.cat(
+                [o.opacities for o in self.sim_objects], dim=0
+            )
+            self.sim_quats = torch.cat(
+                [o.quats for o in self.sim_objects], dim=0
+            )
+            self.sim_scales = torch.cat(
+                [o.scales for o in self.sim_objects], dim=0
+            )
+            self.gs_num = self.sim_init_pos.shape[0]
+            self.per_object_info = _build_per_object_info(self.sim_objects)
+        else:
+            sh_c = (self.args.sh_degree + 1) ** 2
+            self.sim_init_pos = torch.zeros(0, 3, device=device)
+            self.sim_init_cov = torch.zeros(0, 6, device=device)
+            self.sim_init_vol = torch.zeros(0, device=device)
+            self.sim_shs = torch.zeros(0, sh_c, 3, device=device)
+            self.sim_opacity = torch.zeros(0, 1, device=device)
+            self.sim_quats = torch.zeros(0, 4, device=device)
+            self.sim_scales = torch.zeros(0, 3, device=device)
+            self.gs_num = 0
+            self.per_object_info = []
 
-    has_static = len(static_chunks) > 0
-    if has_static:
-        static_pos = torch.cat([o.positions for o in static_chunks], dim=0)
-        static_cov = torch.cat([o.covariances for o in static_chunks], dim=0)
-        static_opacity = torch.cat([o.opacities for o in static_chunks], dim=0)
-        static_shs = torch.cat([o.shs for o in static_chunks], dim=0)
-        static_quats = torch.cat([o.quats for o in static_chunks], dim=0)
-        static_scales = torch.cat([o.scales for o in static_chunks], dim=0)
-    else:
-        static_pos = static_cov = static_opacity = static_shs = None
-        static_quats = static_scales = None
+        self.static_chunks = list(static_objects)
+        for obj in self.collider_objects:
+            render_flag = (obj.collider or {}).get("render", True)
+            if render_flag and obj.n_particles > 0:
+                self.static_chunks.append(obj)
 
-    if args.debug:
-        _log(f"=== Scene assembled: {gs_num} sim particles, "
-             f"{sum(o.n_particles for o in static_chunks) if has_static else 0} static ===")
-        if gs_num > 0:
-            _dbg("sim_init_pos", sim_init_pos)
-            _dbg("sim_init_cov", sim_init_cov)
-        for info in per_object_info:
-            _log(f"  [DBG] Object '{info['name']}': {len(info['particle_indices'])} particles")
-
-    # ── 5. Initialise physics backend ────────────────────────────────
-    class _NoPhysicsBackend:
-        def __init__(self, dev: str):
-            self._device = dev
-            self._pos = self._cov = self._rot = None
-            self._quats = self._scales = None
-
-        def initialize(self, positions, volumes, covariances, **kwargs):
-            self._pos = positions.clone()
-            self._cov = covariances.clone()
-            n = positions.shape[0]
-            self._rot = torch.eye(3, device=self._device, dtype=torch.float32).unsqueeze(0).repeat(n, 1, 1)
-            self._quats = kwargs.get("init_quats")
-            self._scales = kwargs.get("init_scales")
-            if self._quats is not None:
-                self._quats = self._quats.clone()
-            if self._scales is not None:
-                self._scales = self._scales.clone()
-
-        def set_material(self, material_params: dict) -> None:
-            pass
-
-        def set_boundary_conditions(self, bc_params: list, time_params: dict) -> None:
-            pass
-
-        def finalize(self) -> None:
-            pass
-
-        def step(self, dt: float, frame: int) -> None:
-            pass
-
-        def get_state(self) -> SimulationState:
-            return SimulationState(
-                positions=self._pos, covariances=self._cov,
-                rotations=self._rot, quats=self._quats, scales=self._scales,
+        if self.static_chunks:
+            self.static_pos = torch.cat(
+                [o.positions for o in self.static_chunks], dim=0
+            )
+            self.static_cov = torch.cat(
+                [o.covariances for o in self.static_chunks], dim=0
+            )
+            self.static_opacity = torch.cat(
+                [o.opacities for o in self.static_chunks], dim=0
+            )
+            self.static_shs = torch.cat(
+                [o.shs for o in self.static_chunks], dim=0
+            )
+            self.static_quats = torch.cat(
+                [o.quats for o in self.static_chunks], dim=0
+            )
+            self.static_scales = torch.cat(
+                [o.scales for o in self.static_chunks], dim=0
             )
 
-    print(f"Initialising backend: {backend_name}")
-    if backend_name == "none":
-        backend = _NoPhysicsBackend(device)
-    elif backend_name == "newton_mpm":
-        from physics_sim.backend.newton_mpm import NewtonMPMBackend
-        backend = NewtonMPMBackend(device=device)
-    elif backend_name == "newton_rigid":
-        from physics_sim.backend.newton_rigid import NewtonRigidBackend
-        backend = NewtonRigidBackend(device=device)
-    elif backend_name == "newton_vbd":
-        from physics_sim.backend.newton_vbd import NewtonVBDBackend
-        backend = NewtonVBDBackend(device=device)
-    else:
-        from physics_sim.backend.warp_mpm import WarpMPMBackend
-        backend = WarpMPMBackend(device=device)
+        if self.args.debug:
+            n_static = (
+                sum(o.n_particles for o in self.static_chunks)
+                if self.static_chunks
+                else 0
+            )
+            _log(
+                f"=== Scene assembled: {self.gs_num} sim particles, "
+                f"{n_static} static ==="
+            )
+            if self.gs_num > 0:
+                _dbg("sim_init_pos", self.sim_init_pos)
+                _dbg("sim_init_cov", self.sim_init_cov)
+            for info in self.per_object_info:
+                _log(
+                    f"  [DBG] Object '{info['name']}': "
+                    f"{len(info['particle_indices'])} particles"
+                )
 
-    # Collect init kwargs from backend config
-    backend_cfg = cfg.get("backend_opts", {})
-    init_kwargs: dict = dict(n_grid=n_grid, grid_lim=grid_lim)
+    # ── Stage 3: Backend init ────────────────────────────────────────
 
-    _INIT_PASSTHROUGH_KEYS = (
-        "collision_geometry", "alpha", "max_triangles",
-        "contact_margin", "use_sdf", "sdf_resolution", "sdf_narrow_band",
-        "debug_soft_no_deformation", "sv_clamp_min", "sv_clamp_max",
-        "particle_self_contact", "particle_self_contact_radius",
-        "particle_self_contact_margin",
-        "soft_contact_ke", "soft_contact_kd", "soft_contact_mu",
-        "rigid_contact_max",
-    )
-    for k in _INIT_PASSTHROUGH_KEYS:
-        val = cfg.get(k)
-        if val is None:
-            val = backend_cfg.get(k)
-        if val is not None:
-            init_kwargs[k] = val
+    def _init_backend(self):
+        bt = self.cfg.backend_type
+        device = self.device
+        print(f"Initialising backend: {bt}")
 
-    # 2DGS: preprocess quats
-    if gs_type == "2dgs" and gs_num > 0:
-        quats_sim = preprocess_quats(sim_quats, axis_perm, rotation_matrices)
-        init_kwargs["init_quats"] = quats_sim
-        init_kwargs["init_scales"] = sim_scales
-
-    # Warp-MPM extras
-    if backend_name == "warp_mpm":
-        init_kwargs["scale"] = preprocess.get("scale", 1.0)
-        init_kwargs["opacity"] = sim_opacity
-        filling = preprocess.get("particle_filling")
-        if filling is not None:
-            init_kwargs["filling_params"] = filling
-
-    if gs_num > 0:
-        backend.initialize(sim_init_pos, sim_init_vol, sim_init_cov, **init_kwargs)
-
-    # Material params: build top-level + per-object
-    material_params: dict = {}
-    for key in ("material", "E", "nu", "density", "g", "friction_angle",
-                "yield_stress", "hardening", "xi", "plastic_viscosity",
-                "softening", "rpic_damping", "pic_damping",
-                "ke", "kd", "mu", "friction",
-                "n_grid", "grid_lim", "grid_v_damping_scale"):
-        if key in cfg:
-            material_params[key] = cfg[key]
-    material_params.setdefault("n_grid", n_grid)
-    material_params.setdefault("grid_lim", grid_lim)
-
-    # Solver options
-    solver_opts = cfg.get("solver")
-    if solver_opts is not None:
-        material_params["newton_solver_opts"] = solver_opts
-
-    if per_object_info:
-        material_params["per_object"] = per_object_info
-    backend.set_material(material_params)
-
-    # ── 6. Boundary conditions ───────────────────────────────────────
-    bc_all: list[dict] = list(cfg.get("boundary_conditions", []))
-
-    # Add collider-only generated BCs
-    collider_bcs = _resolve_collider_bc(
-        collider_objects, renderer, axis_perm,
-        preprocess.get("opacity_threshold", 0.02),
-    )
-    bc_all.extend(collider_bcs)
-
-    # Rotate world-space BCs into backend space
-    bc_converted: list[dict] = []
-    for bc in bc_all:
-        if bc.get("space") == "world" and bc.get("type") == "surface_collider":
-            p_w = torch.tensor(bc["point"], device="cuda", dtype=torch.float32).reshape(1, 3)
-            n_w = torch.tensor(bc["normal"], device="cuda", dtype=torch.float32).reshape(1, 3)
-            p_r = apply_rotations(p_w, rotation_matrices)[0]
-            n_r = apply_rotations(n_w, rotation_matrices)[0]
-            n_r = n_r / (torch.norm(n_r) + 1e-12)
-            bc_new = dict(bc)
-            bc_new["point"] = [float(x) for x in p_r.detach().cpu().tolist()]
-            bc_new["normal"] = [float(x) for x in n_r.detach().cpu().tolist()]
-            bc_new.pop("space", None)
-            bc_converted.append(bc_new)
+        if bt == "none":
+            self.backend = _NoPhysicsBackend(device)
+        elif bt == "newton_mpm":
+            from physics_sim.backend.newton_mpm import NewtonMPMBackend
+            self.backend = NewtonMPMBackend(device=device)
+        elif bt == "newton_rigid":
+            from physics_sim.backend.newton_rigid import NewtonRigidBackend
+            self.backend = NewtonRigidBackend(device=device)
+        elif bt == "newton_vbd":
+            from physics_sim.backend.newton_vbd import NewtonVBDBackend
+            self.backend = NewtonVBDBackend(device=device)
         else:
-            bc_converted.append(bc)
+            from physics_sim.backend.warp_mpm import WarpMPMBackend
+            self.backend = WarpMPMBackend(device=device)
 
-    time_params = {
-        "substep_dt": cfg.get("substep_dt", 1e-4),
-        "frame_dt": cfg.get("frame_dt", 1e-2),
-        "frame_num": cfg.get("frame_num", 100),
-    }
+        init_kwargs = dict(self.cfg.backend)
 
-    backend.set_boundary_conditions(bc_converted, time_params)
-    backend.finalize()
+        if self.gs_type == "2dgs" and self.gs_num > 0:
+            init_kwargs["init_quats"] = preprocess_quats(
+                self.sim_quats, self.axis_perm, self.rotation_matrices,
+            )
+            init_kwargs["init_scales"] = self.sim_scales
 
-    # ── 7. No-render path ────────────────────────────────────────────
-    substep_dt = time_params["substep_dt"]
-    frame_dt = time_params["frame_dt"]
-    frame_num = time_params["frame_num"]
-    step_per_frame = int(frame_dt / substep_dt)
+        if bt == "warp_mpm":
+            init_kwargs["scale"] = self.cfg.preprocess.scale
+            init_kwargs["opacity"] = self.sim_opacity
+            if self.cfg.particle_filling is not None:
+                init_kwargs["filling_params"] = self.cfg.particle_filling
 
-    if args.no_render:
+        if self.gs_num > 0:
+            self.backend.initialize(
+                self.sim_init_pos, self.sim_init_vol, self.sim_init_cov,
+                **init_kwargs,
+            )
+
+        material_params = dict(self.cfg.material)
+        material_params.setdefault("n_grid", self.cfg.backend.get("n_grid", 200))
+        material_params.setdefault("grid_lim", self.cfg.backend.get("grid_lim", 2.0))
+
+        solver_opts = self.cfg.backend.get("solver")
+        if solver_opts is not None:
+            material_params["newton_solver_opts"] = solver_opts
+
+        if self.per_object_info:
+            material_params["per_object"] = self.per_object_info
+        self.backend.set_material(material_params)
+
+    # ── Stage 4: Boundary conditions ─────────────────────────────────
+
+    def _setup_boundary_conditions(self):
+        bc_all: list[dict] = list(self.cfg.boundary_conditions)
+
+        collider_bcs = _resolve_collider_bc(
+            self.collider_objects,
+            self.renderer,
+            self.axis_perm,
+            self.cfg.preprocess.opacity_threshold,
+        )
+        bc_all.extend(collider_bcs)
+
+        bc_converted: list[dict] = []
+        for bc in bc_all:
+            if (
+                bc.get("space") == "world"
+                and bc.get("type") == "surface_collider"
+            ):
+                p_w = torch.tensor(
+                    bc["point"], device="cuda", dtype=torch.float32
+                ).reshape(1, 3)
+                n_w = torch.tensor(
+                    bc["normal"], device="cuda", dtype=torch.float32
+                ).reshape(1, 3)
+                p_r = apply_rotations(p_w, self.rotation_matrices)[0]
+                n_r = apply_rotations(n_w, self.rotation_matrices)[0]
+                n_r = n_r / (torch.norm(n_r) + 1e-12)
+                bc_new = dict(bc)
+                bc_new["point"] = [float(x) for x in p_r.detach().cpu().tolist()]
+                bc_new["normal"] = [float(x) for x in n_r.detach().cpu().tolist()]
+                bc_new.pop("space", None)
+                bc_converted.append(bc_new)
+            else:
+                bc_converted.append(bc)
+
+        tc = self.cfg.time
+        time_params = {
+            "substep_dt": tc.substep_dt,
+            "frame_dt": tc.frame_dt,
+            "frame_num": tc.frame_num,
+        }
+
+        self.backend.set_boundary_conditions(bc_converted, time_params)
+        self.backend.finalize()
+
+    # ── Stage 5: Camera setup ────────────────────────────────────────
+
+    def _setup_camera(self):
+        cam = self.cfg.camera
+        camera_mode = cam.camera_mode
+
+        cameras_json = cam.cameras_json
+        if camera_mode == "json":
+            if cameras_json is None:
+                raise FileNotFoundError(
+                    "camera_mode='json' requires 'cameras_json' in the config."
+                )
+            cameras_json = str(cameras_json)
+            if not os.path.isabs(cameras_json):
+                cameras_json = os.path.join(self.config_dir, cameras_json)
+            assert os.path.exists(cameras_json), (
+                f"cameras.json not found: {cameras_json}"
+            )
+
+            mpm_vc = torch.tensor(
+                cam.mpm_space_viewpoint_center
+            ).reshape(1, 3).cuda()
+            mpm_up = torch.tensor(
+                cam.mpm_space_vertical_upward_axis
+            ).reshape(1, 3).cuda()
+
+            _, scale_origin, mean_pos = transform2origin(
+                self.sim_init_pos, self.cfg.preprocess.scale,
+            )
+            self.viewpoint_center_worldspace, self.observant_coordinates = (
+                get_center_view_worldspace_and_observant_coordinate(
+                    mpm_vc, mpm_up,
+                    self.rotation_matrices, scale_origin, mean_pos,
+                )
+            )
+        else:
+            if self.sim_objects:
+                ref_pos = self.sim_init_pos
+            elif self.static_chunks:
+                ref_pos = self.static_pos
+            else:
+                ref_pos = torch.zeros(1, 3, device="cuda")
+            lo = torch.min(ref_pos, dim=0)[0]
+            hi = torch.max(ref_pos, dim=0)[0]
+            self.viewpoint_center_worldspace = (
+                ((lo + hi) * 0.5).detach().cpu().numpy()
+            )
+            world_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            vertical, h1, h2 = generate_local_coord(world_up)
+            self.observant_coordinates = np.column_stack((h1, h2, vertical))
+
+        cam_dict = asdict(cam)
+        self.camera_params = {
+            k: v for k, v in cam_dict.items() if v is not None
+        }
+
+    # ── Stage 6a: Headless simulation ────────────────────────────────
+
+    def _run_headless(self):
+        tc = self.cfg.time
+        substep_dt = tc.substep_dt
+        step_per_frame = int(tc.frame_dt / substep_dt)
+
         print("Running simulation (no rendering)...")
-        for frame in tqdm(range(frame_num), desc="Simulating"):
+        for frame in tqdm(range(tc.frame_num), desc="Simulating"):
             for _ in range(step_per_frame):
-                backend.step(substep_dt, frame)
+                self.backend.step(substep_dt, frame)
 
-        state = backend.get_state()
-        pos = state.positions[:gs_num].to(device)
-        cov3D = state.covariances[:gs_num].to(device)
-        rot = state.rotations[:gs_num].to(device)
+        state = self.backend.get_state()
+        pos = state.positions[: self.gs_num].to(self.device)
+        cov3D = state.covariances[: self.gs_num].to(self.device)
+        rot = state.rotations[: self.gs_num].to(self.device)
 
-        pos_world = apply_inverse_rotations(pos, rotation_matrices)
-        cov_world = apply_inverse_cov_rotations(cov3D, rotation_matrices)
+        pos_world = apply_inverse_rotations(pos, self.rotation_matrices)
+        cov_world = apply_inverse_cov_rotations(cov3D, self.rotation_matrices)
 
-        out_path = os.path.join(output_dir, "final_state.npz")
+        out_path = os.path.join(self.cfg.output, "final_state.npz")
         np.savez_compressed(
             out_path,
             positions=pos_world.detach().cpu().numpy(),
@@ -591,216 +621,240 @@ def main():
             rotations=rot.detach().cpu().numpy(),
         )
         print(f"Saved final state to {out_path}")
-        return
 
-    # ── 8. Camera setup ──────────────────────────────────────────────
-    camera_cfg = cfg.get("camera", cfg)
-    camera_mode = camera_cfg.get("camera_mode", "orbit")
+    # ── Stage 6b: Simulation + rendering ─────────────────────────────
 
-    # Resolve cameras_json path for json mode
-    cameras_json = camera_cfg.get("cameras_json")
+    def _run_with_rendering(self):
+        tc = self.cfg.time
+        substep_dt = tc.substep_dt
+        frame_dt = tc.frame_dt
+        frame_num = tc.frame_num
+        step_per_frame = int(frame_dt / substep_dt)
+        output_dir = self.cfg.output
+        camera_mode = self.cfg.camera.camera_mode
+        cameras_json = self.cfg.camera.cameras_json
+        if cameras_json and not os.path.isabs(cameras_json):
+            cameras_json = os.path.join(self.config_dir, cameras_json)
 
-    if camera_mode == "json":
-        if cameras_json is None:
-            raise FileNotFoundError(
-                "camera_mode='json' requires 'cameras_json' in the config."
-            )
-        cameras_json = str(cameras_json)
-        if not os.path.isabs(cameras_json):
-            cameras_json = os.path.join(config_dir, cameras_json)
-        assert os.path.exists(cameras_json), f"cameras.json not found: {cameras_json}"
-
-        mpm_space_viewpoint_center = torch.tensor(
-            camera_cfg.get("mpm_space_viewpoint_center", [1.0, 1.0, 1.0])
-        ).reshape(1, 3).cuda()
-        mpm_space_vertical_upward_axis = torch.tensor(
-            camera_cfg.get("mpm_space_vertical_upward_axis", [0, 0, 1])
-        ).reshape(1, 3).cuda()
-
-        _cam_ref_pos = sim_init_pos
-        _, _cam_scale_origin, _cam_mean_pos = transform2origin(
-            _cam_ref_pos, preprocess.get("scale", 1.0),
+        print("Running simulation and rendering...")
+        print(
+            f"  substep_dt={substep_dt:.2e}  frame_dt={frame_dt:.2e}  "
+            f"steps/frame={step_per_frame}  frames={frame_num}"
         )
-        viewpoint_center_worldspace, observant_coordinates = (
-            get_center_view_worldspace_and_observant_coordinate(
-                mpm_space_viewpoint_center, mpm_space_vertical_upward_axis,
-                rotation_matrices, _cam_scale_origin, _cam_mean_pos,
-            )
+
+        stale = sorted(_glob.glob(os.path.join(output_dir, "[0-9]*.png")))
+        if stale:
+            expected = {
+                os.path.join(output_dir, f"{i:04d}.png")
+                for i in range(frame_num)
+            }
+            to_remove = [p for p in stale if p not in expected]
+            if to_remove:
+                print(f"  Removing {len(to_remove)} stale frame PNG(s)")
+                for p in to_remove:
+                    os.remove(p)
+
+        bg_color = (
+            torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda")
+            if self.args.white_bg
+            else torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
         )
-    else:
-        # Procedural cameras: orbit or fixed
-        if sim_objects:
-            ref_pos = sim_init_pos
-        elif has_static:
-            ref_pos = static_pos
-        else:
-            ref_pos = torch.zeros(1, 3, device="cuda")
-        lo = torch.min(ref_pos, dim=0)[0]
-        hi = torch.max(ref_pos, dim=0)[0]
-        viewpoint_center_worldspace = ((lo + hi) * 0.5).detach().cpu().numpy()
-        world_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        vertical, h1, h2 = generate_local_coord(world_up)
-        observant_coordinates = np.column_stack((h1, h2, vertical))
+        opacity_render = self.sim_opacity
+        shs_render = self.sim_shs
+        has_static = len(self.static_chunks) > 0
+        height = width = None
 
-    # Camera params dict (for renderer.build_camera_* methods)
-    camera_params = {}
-    for k in ("mpm_space_viewpoint_center", "mpm_space_vertical_upward_axis",
-              "default_camera_index", "show_hint",
-              "init_azimuth", "init_azimuthm", "init_elevation", "init_radius",
-              "delta_a", "delta_e", "delta_r", "move_camera",
-              "width", "height", "fx", "fy", "fovx_deg", "fovy_deg",
-              "fixed_position", "fixed_rotation"):
-        val = camera_cfg.get(k)
-        if val is not None:
-            camera_params[k] = val
-
-    # ── 9. Simulation + rendering loop ───────────────────────────────
-    print("Running simulation and rendering...")
-    print(f"  substep_dt={substep_dt:.2e}  frame_dt={frame_dt:.2e}  "
-          f"steps/frame={step_per_frame}  frames={frame_num}")
-
-    # Clean stale frame PNGs
-    stale = sorted(_glob.glob(os.path.join(output_dir, "[0-9]*.png")))
-    if stale:
-        expected = {os.path.join(output_dir, f"{i:04d}.png") for i in range(frame_num)}
-        to_remove = [p for p in stale if p not in expected]
-        if to_remove:
-            print(f"  Removing {len(to_remove)} stale frame PNG(s)")
-            for p in to_remove:
-                os.remove(p)
-
-    bg_color = (
-        torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda")
-        if args.white_bg
-        else torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
-    )
-    opacity_render = sim_opacity
-    shs_render = sim_shs
-    height = width = None
-
-    for frame in tqdm(range(frame_num), desc="Simulating"):
-        # Build camera
-        if camera_mode == "json":
-            camera = renderer.build_camera_from_json(
-                cameras_json, camera_params,
-                center_view_world_space=viewpoint_center_worldspace,
-                observant_coordinates=observant_coordinates,
-                current_frame=frame,
-            )
-        elif camera_mode == "orbit":
-            camera = renderer.build_camera_orbit(
-                camera_params=camera_params,
-                center_view_world_space=viewpoint_center_worldspace,
-                observant_coordinates=observant_coordinates,
-                current_frame=frame,
-            )
-        else:
-            camera = renderer.build_camera_fixed(camera_params=camera_params)
-
-        # Substep simulation
-        for _ in range(step_per_frame):
-            backend.step(substep_dt, frame)
-
-        # Export state
-        state = backend.get_state()
-        pos = state.positions[:gs_num].to(device)
-        cov3D = state.covariances[:gs_num].to(device)
-        rot = state.rotations[:gs_num].to(device)
-
-        # Per-frame diagnostics
-        if hasattr(backend, "get_diagnostics"):
-            diag = backend.get_diagnostics()
-            for bd in diag["bodies"]:
-                p, v = bd["pos"], bd["vel"]
-                pdists = bd["plane_distances"]
-                nan_flag = " *** NaN! ***" if bd["has_nan"] else ""
-                dist_str = "  ".join(f"plane{pi}={sd:+.4f}" for pi, sd in pdists)
-                print(
-                    f"  [DIAG] Frame {frame} {bd['name']}: "
-                    f"pos=[{p[0]:.4f},{p[1]:.4f},{p[2]:.4f}] "
-                    f"vel=[{v[0]:.4f},{v[1]:.4f},{v[2]:.4f}] "
-                    f"{dist_str}{nan_flag}"
+        for frame in tqdm(range(frame_num), desc="Simulating"):
+            if camera_mode == "json":
+                camera = self.renderer.build_camera_from_json(
+                    cameras_json,
+                    self.camera_params,
+                    center_view_world_space=self.viewpoint_center_worldspace,
+                    observant_coordinates=self.observant_coordinates,
+                    current_frame=frame,
+                )
+            elif camera_mode == "orbit":
+                camera = self.renderer.build_camera_orbit(
+                    camera_params=self.camera_params,
+                    center_view_world_space=self.viewpoint_center_worldspace,
+                    observant_coordinates=self.observant_coordinates,
+                    current_frame=frame,
+                )
+            else:
+                camera = self.renderer.build_camera_fixed(
+                    camera_params=self.camera_params,
                 )
 
-        # Sanity check
-        nan_mask = ~torch.isfinite(pos).all(dim=1)
-        extreme_mask = (pos.abs() > 100.0).any(dim=1)
-        bad_mask = nan_mask | extreme_mask
-        if bad_mask.any():
-            n_nan = int(nan_mask.sum().item())
-            n_ext = int((extreme_mask & ~nan_mask).sum().item())
-            print(f"[WARNING] Frame {frame}: {n_nan} NaN/Inf + {n_ext} extreme particles")
-            pos[bad_mask] = 0.0
-            cov3D[bad_mask] = 0.0
+            for _ in range(step_per_frame):
+                self.backend.step(substep_dt, frame)
 
-        # Inverse rotation back to world space
-        pos = apply_inverse_rotations(pos, rotation_matrices)
-        cov3D = apply_inverse_cov_rotations(cov3D, rotation_matrices)
+            state = self.backend.get_state()
+            pos = state.positions[: self.gs_num].to(self.device)
+            cov3D = state.covariances[: self.gs_num].to(self.device)
+            rot = state.rotations[: self.gs_num].to(self.device)
 
-        # 2DGS quats
-        render_quats = render_scales = None
-        if gs_type == "2dgs" and state.quats is not None:
-            render_quats = apply_axis_perm_to_quats(
-                inverse_preprocess_quats(
-                    state.quats[:gs_num].to(device), axis_perm, rotation_matrices,
-                ),
-                axis_perm,
+            if hasattr(self.backend, "get_diagnostics"):
+                diag = self.backend.get_diagnostics()
+                for bd in diag["bodies"]:
+                    p, v = bd["pos"], bd["vel"]
+                    pdists = bd["plane_distances"]
+                    nan_flag = " *** NaN! ***" if bd["has_nan"] else ""
+                    dist_str = "  ".join(
+                        f"plane{pi}={sd:+.4f}" for pi, sd in pdists
+                    )
+                    print(
+                        f"  [DIAG] Frame {frame} {bd['name']}: "
+                        f"pos=[{p[0]:.4f},{p[1]:.4f},{p[2]:.4f}] "
+                        f"vel=[{v[0]:.4f},{v[1]:.4f},{v[2]:.4f}] "
+                        f"{dist_str}{nan_flag}"
+                    )
+
+            nan_mask = ~torch.isfinite(pos).all(dim=1)
+            extreme_mask = (pos.abs() > 100.0).any(dim=1)
+            bad_mask = nan_mask | extreme_mask
+            if bad_mask.any():
+                n_nan = int(nan_mask.sum().item())
+                n_ext = int((extreme_mask & ~nan_mask).sum().item())
+                print(
+                    f"[WARNING] Frame {frame}: "
+                    f"{n_nan} NaN/Inf + {n_ext} extreme particles"
+                )
+                pos[bad_mask] = 0.0
+                cov3D[bad_mask] = 0.0
+
+            pos = apply_inverse_rotations(pos, self.rotation_matrices)
+            cov3D = apply_inverse_cov_rotations(cov3D, self.rotation_matrices)
+
+            render_quats = render_scales = None
+            if self.gs_type == "2dgs" and state.quats is not None:
+                render_quats = apply_axis_perm_to_quats(
+                    inverse_preprocess_quats(
+                        state.quats[: self.gs_num].to(self.device),
+                        self.axis_perm,
+                        self.rotation_matrices,
+                    ),
+                    self.axis_perm,
+                )
+                render_scales = state.scales[: self.gs_num].to(self.device)
+
+            cur_opacity = opacity_render
+            cur_shs = shs_render
+            if has_static:
+                pos = torch.cat([pos, self.static_pos], dim=0)
+                cov3D = torch.cat([cov3D, self.static_cov], dim=0)
+                cur_opacity = torch.cat(
+                    [opacity_render, self.static_opacity], dim=0
+                )
+                cur_shs = torch.cat([shs_render, self.static_shs], dim=0)
+                if render_quats is not None and self.static_quats is not None:
+                    render_quats = torch.cat(
+                        [
+                            render_quats,
+                            apply_axis_perm_to_quats(
+                                self.static_quats, self.axis_perm,
+                            ),
+                        ],
+                        dim=0,
+                    )
+                    render_scales = torch.cat(
+                        [render_scales, self.static_scales], dim=0
+                    )
+
+            colors_precomp = self.renderer.convert_sh(
+                cur_shs, camera, pos, rot,
             )
-            render_scales = state.scales[:gs_num].to(device)
+            if self.gs_type == "2dgs" and render_quats is not None:
+                rendering, _meta = self.renderer.render(
+                    camera=camera,
+                    means=pos,
+                    colors=colors_precomp,
+                    opacities=cur_opacity,
+                    bg_color=bg_color,
+                    quats=render_quats,
+                    scales=render_scales,
+                )
+            else:
+                rendering, _meta = self.renderer.render(
+                    camera=camera,
+                    means=pos,
+                    colors=colors_precomp,
+                    opacities=cur_opacity,
+                    bg_color=bg_color,
+                    cov6=cov3D,
+                )
 
-        # Merge with static particles
-        cur_opacity = opacity_render
-        cur_shs = shs_render
-        if has_static:
-            pos = torch.cat([pos, static_pos], dim=0)
-            cov3D = torch.cat([cov3D, static_cov], dim=0)
-            cur_opacity = torch.cat([opacity_render, static_opacity], dim=0)
-            cur_shs = torch.cat([shs_render, static_shs], dim=0)
-            if render_quats is not None and static_quats is not None:
-                render_quats = torch.cat([
-                    render_quats,
-                    apply_axis_perm_to_quats(static_quats, axis_perm),
-                ], dim=0)
-                render_scales = torch.cat([render_scales, static_scales], dim=0)
-
-        # Render
-        colors_precomp = renderer.convert_sh(cur_shs, camera, pos, rot)
-        if gs_type == "2dgs" and render_quats is not None:
-            rendering, _meta = renderer.render(
-                camera=camera, means=pos, colors=colors_precomp,
-                opacities=cur_opacity, bg_color=bg_color,
-                quats=render_quats, scales=render_scales,
+            cv2_img = rendering.permute(1, 2, 0).detach().cpu().numpy()
+            cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+            if height is None or width is None:
+                height = cv2_img.shape[0] // 2 * 2
+                width = cv2_img.shape[1] // 2 * 2
+            cv2.imwrite(
+                os.path.join(output_dir, f"{frame:04d}.png"),
+                255 * cv2_img,
             )
-        else:
-            rendering, _meta = renderer.render(
-                camera=camera, means=pos, colors=colors_precomp,
-                opacities=cur_opacity, bg_color=bg_color, cov6=cov3D,
+
+        if self.args.compile_video:
+            fps = int(1.0 / frame_dt)
+            cmd = (
+                f"ffmpeg -framerate {fps} -i {output_dir}/%04d.png "
+                f"-c:v libx264 -s {width}x{height} -y -pix_fmt yuv420p "
+                f"{output_dir}/output.mp4"
             )
+            print(f"Compiling video: {cmd}")
+            os.system(cmd)
+            print(f"Video saved to {output_dir}/output.mp4")
 
-        # Save frame
-        cv2_img = rendering.permute(1, 2, 0).detach().cpu().numpy()
-        cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-        if height is None or width is None:
-            height = cv2_img.shape[0] // 2 * 2
-            width = cv2_img.shape[1] // 2 * 2
-        cv2.imwrite(
-            os.path.join(output_dir, f"{frame:04d}.png"),
-            255 * cv2_img,
-        )
+        print("Done!")
 
-    # ── 10. Compile video ────────────────────────────────────────────
-    if args.compile_video:
-        fps = int(1.0 / frame_dt)
-        cmd = (
-            f"ffmpeg -framerate {fps} -i {output_dir}/%04d.png "
-            f"-c:v libx264 -s {width}x{height} -y -pix_fmt yuv420p "
-            f"{output_dir}/output.mp4"
-        )
-        print(f"Compiling video: {cmd}")
-        os.system(cmd)
-        print(f"Video saved to {output_dir}/output.mp4")
 
-    print("Done!")
+# ── CLI entry point ──────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="3DGS Physics Simulation Pipeline"
+    )
+    parser.add_argument(
+        "--config", type=str, required=True, help="Path to YAML config"
+    )
+    parser.add_argument("--white_bg", action="store_true")
+    parser.add_argument("--compile_video", action="store_true")
+    parser.add_argument(
+        "--no_render", action="store_true", help="Run physics only, skip rendering."
+    )
+    parser.add_argument(
+        "--sh_degree", type=int, default=3, help="SH degree of PLY models"
+    )
+    parser.add_argument(
+        "--raster_backend",
+        type=str,
+        default="gsplat",
+        choices=["gsplat", "diffrast"],
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="Print intermediate tensor stats"
+    )
+    parser.add_argument("--debug_log", type=str, default=None)
+    raw = parser.parse_args()
+
+    assert os.path.exists(raw.config), f"Config not found: {raw.config}"
+
+    args = PipelineArgs(
+        config=raw.config,
+        no_render=raw.no_render,
+        white_bg=raw.white_bg,
+        compile_video=raw.compile_video,
+        debug=raw.debug,
+        debug_log=raw.debug_log,
+        sh_degree=raw.sh_degree,
+        raster_backend=raw.raster_backend,
+    )
+
+    print("Loading config...")
+    cfg = ConfigLoader().load(raw.config)
+    config_dir = os.path.dirname(os.path.abspath(raw.config))
+
+    pipeline = SimulationPipeline(cfg, args)
+    pipeline.run(config_dir=config_dir)
 
 
 if __name__ == "__main__":

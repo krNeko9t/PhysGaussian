@@ -1,121 +1,24 @@
-# Auto-generated bench scene with VBD backend (migrated from
-# config/auto_config.json — the phys_desc_to_config output format).
-#
-# Demonstrates collider_only objects with SVD plane fitting, and the
-# id_map source type (commented out — uncomment to use).
-#
-# Usage:
-#   python pipeline.py --config experiments/bench_auto_vbd.yaml
-
-hydra:
-  searchpath:
-    - pkg://physics_sim.conf
-defaults:
-  - material: sand
-  - time: default
-  - preprocess: default
-  - camera: orbit
-  - backend: newton_vbd
-  - _self_
-
+# Auto-generated bench scene with VBD backend
 output: output/bench_auto_vbd
 
-# Material defaults
-density: 800
-mu: 0.5
-g: [0.0, 0.0, -9.8]
+backend: newton_vbd
+material: {density: 800, mu: 0.5, g: [0, 0, -9.8]}
+time: {_ref: default, frame_num: 120}
+preprocess: {_ref: default, opacity_threshold: 0.1, axis_permutation: "xz-y", transform_reference: shared_ply}
+camera: {_ref: orbit, width: 800, height: 600, fovx_deg: 60.0, fovy_deg: 45.0, init_azimuth: 160.0, init_elevation: 20.0, init_radius: 2.8, delta_a: -0.6, delta_e: 0.0}
 
-# Time
-substep_dt: 1.0e-4
-frame_dt: 1.0e-2
-frame_num: 120
-
-# Grid
-n_grid: 200
-
-# Backend-specific
-collision_geometry: convex_hull
-use_sdf: true
-solver:
-  iterations: 20
-  contact_relaxation: 0.5
-
-# Preprocessing
-preprocess:
-  opacity_threshold: 0.1
-  axis_permutation: "xz-y"
-  transform_reference: shared_ply
-
-# Camera
-camera:
-  camera_mode: orbit
-  default_camera_index: -1
-  show_hint: false
-  width: 800
-  height: 600
-  fovx_deg: 60.0
-  fovy_deg: 45.0
-  init_azimuth: 160.0
-  init_elevation: 20.0
-  init_radius: 2.8
-  move_camera: true
-  delta_a: -0.6
-  delta_e: 0.0
-  delta_r: 0.0
-
-# Objects
 objects:
   - name: 3dovs_bench_inst000
-    mode: simulate
-    source:
-      type: ply
-      ply_path: scene_data/plys/3dovs_bench_inst000.ply
-    material:
-      density: 981.8
-      mu: 0.474
-      E: 44058682800.0
-      nu: 0.313
-      collision_geometry: convex_hull
+    ply_path: scene_data/plys/3dovs_bench_inst000.ply
+    material: {density: 981.8, mu: 0.474, E: 44058682800.0, nu: 0.313, collision_geometry: convex_hull}
 
   - name: 3dovs_bench_inst001
-    mode: simulate
-    source:
-      type: ply
-      ply_path: scene_data/plys/3dovs_bench_inst001.ply
-    material:
-      density: 328.3
-      mu: 0.485
-      E: 828444.0
-      nu: 0.423
-      collision_geometry: convex_hull
+    ply_path: scene_data/plys/3dovs_bench_inst001.ply
+    material: {density: 328.3, mu: 0.485, E: 828444.0, nu: 0.423, collision_geometry: convex_hull}
 
   - name: 3dovs_bench_inst003
     mode: collider_only
-    source:
-      type: ply
-      ply_path: scene_data/plys/3dovs_bench_inst003.ply
-    collider:
-      type: plane
-      space: world
-      fit:
-        method: svd
-        sample_max: 200000
-        seed: 0
-      surface: slip
-      friction: 0.703
+    ply_path: scene_data/plys/3dovs_bench_inst003.ply
+    collider: {type: plane, space: world, fit: {method: svd, sample_max: 200000, seed: 0}, surface: slip, friction: 0.703}
 
-  # Example: id_map source (uncomment to use)
-  # - name: chair_from_id_map
-  #   mode: simulate
-  #   source:
-  #     type: id_map
-  #     shared_ply: scene_data/plys/full_scene.ply
-  #     id_map: scene_data/plys/gs_object_ids.npy
-  #     object_id: 5
-  #   material:
-  #     density: 600
-  #     mu: 0.5
-  #     collision_geometry: convex_hull
-
-# Boundary conditions
 boundary_conditions: []

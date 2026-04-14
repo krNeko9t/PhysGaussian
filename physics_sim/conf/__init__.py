@@ -1,2 +1,2 @@
-# Makes physics_sim.conf a package so Hydra can resolve
-# ``pkg://physics_sim.conf`` as a search path.
+# Makes physics_sim.conf a package so ConfigLoader can locate
+# the YAML fragment directory via __file__.
