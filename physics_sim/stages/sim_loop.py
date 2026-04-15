@@ -136,6 +136,7 @@ def run_with_rendering(
                 center_view_world_space=camera_state.viewpoint_center_worldspace,
                 observant_coordinates=camera_state.observant_coordinates,
                 current_frame=frame,
+                axis_perm=axis_perm,
             )
         elif camera_mode == "orbit":
             camera = renderer.build_camera_orbit(
@@ -225,7 +226,10 @@ def run_with_rendering(
                 )
 
         # Render
-        colors_precomp = renderer.convert_sh(cur_shs, camera, pos, rot)
+        colors_precomp = renderer.convert_sh(
+            cur_shs, camera, pos, rot,
+            axis_perm_inv=scene_data.axis_perm_inv,
+        )
         if scene_data.gs_type == "2dgs" and render_quats is not None:
             rendering, _ = renderer.render(
                 camera=camera,

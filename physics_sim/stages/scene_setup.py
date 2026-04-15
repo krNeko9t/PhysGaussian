@@ -8,6 +8,7 @@ from typing import Optional
 import torch
 
 from physics_sim.config.models import SimConfig
+from physics_sim.preprocessing.quaternions import build_axis_perm_matrix
 from physics_sim.preprocessing.transform import generate_rotation_matrices
 from physics_sim.renderer.gs_renderer import GaussianRenderer
 from physics_sim.scene import SceneObject, assemble_scene
@@ -41,6 +42,7 @@ class SceneData:
     static_scales: Optional[torch.Tensor] = None
 
     axis_perm: str = "xyz"
+    axis_perm_inv: Optional[torch.Tensor] = None
     rotation_matrices: list[torch.Tensor] = field(default_factory=list)
 
 
@@ -93,6 +95,9 @@ def setup_scene(
     rotation_matrices = generate_rotation_matrices(
         torch.tensor(pp.rotation_degree), pp.rotation_axis,
     )
+
+    P = build_axis_perm_matrix(pp.axis_permutation, device=device)
+    axis_perm_inv = P.T if pp.axis_permutation != "xyz" else None
 
     n_grid = getattr(cfg.backend, "n_grid", 200)
 
@@ -156,5 +161,6 @@ def setup_scene(
         static_quats=static_quats_t,
         static_scales=static_scales_t,
         axis_perm=pp.axis_permutation,
+        axis_perm_inv=axis_perm_inv,
         rotation_matrices=rotation_matrices,
     )

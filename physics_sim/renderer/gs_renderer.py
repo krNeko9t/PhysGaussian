@@ -380,20 +380,27 @@ class GaussianRenderer:
         camera: "SimpleCamera",
         position: torch.Tensor,
         rotation: Optional[torch.Tensor] = None,
+        axis_perm_inv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Convert spherical harmonics to precomputed RGB colours.
 
         Args:
-            shs:      (N, SH, 3) spherical harmonic coefficients.
-            camera:   a SimpleCamera (needs .camera_center).
-            position: (N, 3) positions.
-            rotation: (M, 3, 3) optional per-particle rotation (M <= N).
+            shs:           (N, SH, 3) spherical harmonic coefficients.
+            camera:        a SimpleCamera (needs .camera_center).
+            position:      (N, 3) positions in render space.
+            rotation:      (M, 3, 3) optional per-particle rotation (M <= N).
+            axis_perm_inv: (3, 3) inverse of axis permutation matrix.  When
+                           not None the viewing direction is transformed back
+                           to PLY-native space so that it matches the frame in
+                           which the SH coefficients were trained.
         """
         shs_view = shs.transpose(1, 2).view(-1, 3, (self.sh_degree + 1) ** 2)
         dir_pp = position - camera.camera_center.repeat(shs_view.shape[0], 1)
         if rotation is not None:
             n = rotation.shape[0]
             dir_pp[:n] = torch.matmul(rotation, dir_pp[:n].unsqueeze(2)).squeeze(2)
+        if axis_perm_inv is not None:
+            dir_pp = torch.matmul(dir_pp, axis_perm_inv.T)
         dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
         sh2rgb = eval_sh(self.sh_degree, shs_view, dir_pp_normalized)
         return torch.clamp_min(sh2rgb + 0.5, 0.0)
@@ -434,6 +441,7 @@ class GaussianRenderer:
         center_view_world_space=None,
         observant_coordinates=None,
         current_frame: int = 0,
+        axis_perm: str = "xyz",
     ) -> "SimpleCamera":
         """Build a SimpleCamera from a cameras.json file and camera_params dict."""
         with open(cameras_json_path) as f:
@@ -454,6 +462,13 @@ class GaussianRenderer:
 
         if default_idx > -1:
             raw_camera = data[default_idx]
+            if axis_perm != "xyz":
+                from physics_sim.preprocessing.quaternions import build_axis_perm_matrix
+                P = build_axis_perm_matrix(axis_perm, device="cpu").numpy()
+                raw_camera = dict(raw_camera)
+                raw_camera["rotation"] = (
+                    np.array(raw_camera["rotation"]) @ P.T
+                ).tolist()
         else:
             raw_camera = data[0]
             init_a = camera_params["init_azimuth"]
