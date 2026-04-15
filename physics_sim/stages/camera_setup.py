@@ -1,4 +1,8 @@
-"""Stage 3: Camera setup."""
+"""Stage 3: Camera setup.
+
+The camera is set up in the **internal Y-up** coordinate system.
+For orbit and fixed cameras, the "world up" is always ``[0, 1, 0]``.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +13,7 @@ import numpy as np
 import torch
 
 from physics_sim.config.models import CameraConfig, SimConfig
-from physics_sim.preprocessing.transform import (
-    generate_local_coord,
-    get_center_view_worldspace_and_observant_coordinate,
-    transform2origin,
-)
+from physics_sim.preprocessing.transform import generate_local_coord
 
 if TYPE_CHECKING:
     from physics_sim.stages.scene_setup import SceneData
@@ -31,10 +31,26 @@ def setup_camera(
     scene_data: SceneData,
     config_dir: str = "",
 ) -> CameraState:
-    """Build camera state from config and scene data."""
+    """Build camera state from config and scene data.
+
+    All scene positions are already in internal Y-up. The camera is
+    built to orbit around the scene center with Y as the vertical axis.
+    """
     import os
     cam = cfg.camera
     state = CameraState()
+
+    # Determine scene center from available positions (already Y-up)
+    if scene_data.sim_objects:
+        ref_pos = scene_data.sim_init_pos
+    elif scene_data.static_chunks:
+        ref_pos = scene_data.static_pos
+    else:
+        ref_pos = torch.zeros(1, 3, device="cuda")
+
+    lo = torch.min(ref_pos, dim=0)[0]
+    hi = torch.max(ref_pos, dim=0)[0]
+    scene_center = ((lo + hi) * 0.5).detach().cpu().numpy()
 
     if cam.camera_mode == "json":
         cameras_json = cam.cameras_json
@@ -46,31 +62,20 @@ def setup_camera(
         if not os.path.isabs(cameras_json):
             cameras_json = os.path.join(config_dir, cameras_json)
 
-        mpm_vc = torch.tensor(cam.mpm_space_viewpoint_center).reshape(1, 3).cuda()
-        mpm_up = torch.tensor(cam.mpm_space_vertical_upward_axis).reshape(1, 3).cuda()
+        # For json cameras, the viewpoint center and up direction are
+        # in internal Y-up. The user can override via config if needed.
+        state.viewpoint_center_worldspace = scene_center
 
-        _, scale_origin, mean_pos = transform2origin(
-            scene_data.sim_init_pos, cfg.preprocess.scale,
-        )
-        state.viewpoint_center_worldspace, state.observant_coordinates = (
-            get_center_view_worldspace_and_observant_coordinate(
-                mpm_vc, mpm_up,
-                scene_data.rotation_matrices, scale_origin, mean_pos,
-            )
-        )
+        # Internal Y-up: vertical is always [0, 1, 0]
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        vertical, h1, h2 = generate_local_coord(world_up)
+        state.observant_coordinates = np.column_stack((h1, h2, vertical))
+
     else:
-        if scene_data.sim_objects:
-            ref_pos = scene_data.sim_init_pos
-        elif scene_data.static_chunks:
-            ref_pos = scene_data.static_pos
-        else:
-            ref_pos = torch.zeros(1, 3, device="cuda")
-        lo = torch.min(ref_pos, dim=0)[0]
-        hi = torch.max(ref_pos, dim=0)[0]
-        state.viewpoint_center_worldspace = (
-            ((lo + hi) * 0.5).detach().cpu().numpy()
-        )
-        world_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        state.viewpoint_center_worldspace = scene_center
+
+        # Internal Y-up: vertical is always [0, 1, 0]
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
         vertical, h1, h2 = generate_local_coord(world_up)
         state.observant_coordinates = np.column_stack((h1, h2, vertical))
 

@@ -5,6 +5,7 @@ from physics_sim.config.models import (
     ObjectConfig,
     ObjectTransform,
     PlySource,
+    PreprocessConfig,
     SimConfig,
     SurfaceCollider,
     TimeConfig,
@@ -15,9 +16,9 @@ config = SimConfig(
     output="output/wolf_bread_rigid",
     backend=NewtonRigidConfig(),
     time=TimeConfig(substep_dt=1e-3),
+    preprocess=PreprocessConfig(source_up="Z_UP"),
     camera=CameraConfig(
         init_azimuth=90, init_elevation=20, init_radius=3.0,
-        mpm_space_viewpoint_center=[1, 1, 0.8],
         delta_a=-1.0, delta_e=0.0,
     ),
     objects=[

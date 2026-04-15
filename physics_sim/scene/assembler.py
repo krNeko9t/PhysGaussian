@@ -1,7 +1,15 @@
 """Scene assembler: reads config + PLY files and produces list[SceneObject].
 
-Consumes the new Pydantic-based :class:`~physics_sim.config.models.SimConfig`
-where each object is a typed ``ObjectConfig`` (not a raw dict).
+Consumes the Pydantic-based :class:`~physics_sim.config.models.SimConfig`
+where each object is a typed ``ObjectConfig``.
+
+Coordinate alignment
+--------------------
+Source data is aligned to the internal **Y-up** convention via
+:mod:`physics_sim.coord`.  The ``source_up`` field in
+``PreprocessConfig`` declares the PLY coordinate system.  All position,
+covariance, and quaternion data are transformed **once** in this module;
+downstream code always sees Y-up.
 """
 
 from __future__ import annotations
@@ -18,51 +26,16 @@ from physics_sim.config.models import (
     PlySource,
     SimConfig,
 )
+from physics_sim.coord import (
+    UpAxis,
+    align_covariances,
+    align_positions,
+    align_quats,
+)
 from physics_sim.scene.objects import SceneObject
 
 
-# ── Internal helpers ─────────────────────────────────────────────────
-
-def _apply_axis_permutation(
-    pos: torch.Tensor, cov: torch.Tensor, perm: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if perm == "xyz":
-        return pos, cov
-
-    axis_map = {"x": 0, "y": 1, "z": 2}
-    idx: list[int] = []
-    signs: list[float] = []
-    negate_next = False
-    for c in perm.lower():
-        if c == "-":
-            negate_next = True
-        elif c in axis_map:
-            idx.append(axis_map[c])
-            signs.append(-1.0 if negate_next else 1.0)
-            negate_next = False
-
-    signs_t = torch.tensor(signs, device=pos.device, dtype=pos.dtype)
-    pos_new = pos[:, idx] * signs_t
-
-    cov_full = torch.zeros((pos.shape[0], 3, 3), device=cov.device)
-    cov_full[:, 0, 0] = cov[:, 0]
-    cov_full[:, 0, 1] = cov_full[:, 1, 0] = cov[:, 1]
-    cov_full[:, 0, 2] = cov_full[:, 2, 0] = cov[:, 2]
-    cov_full[:, 1, 1] = cov[:, 3]
-    cov_full[:, 1, 2] = cov_full[:, 2, 1] = cov[:, 4]
-    cov_full[:, 2, 2] = cov[:, 5]
-
-    cov_perm = cov_full[:, idx, :][:, :, idx]
-    sign_matrix = signs_t.unsqueeze(0) * signs_t.unsqueeze(1)
-    cov_perm = cov_perm * sign_matrix
-
-    cov_new = torch.stack(
-        [cov_perm[:, 0, 0], cov_perm[:, 0, 1], cov_perm[:, 0, 2],
-         cov_perm[:, 1, 1], cov_perm[:, 1, 2], cov_perm[:, 2, 2]],
-        dim=1,
-    )
-    return pos_new, cov_new
-
+# ── Helpers ───────────────────────────────────────────────────────────
 
 def _resolve_path(path: str, config_dir: str | None) -> str:
     p = Path(path)
@@ -75,7 +48,7 @@ def _resolve_path(path: str, config_dir: str | None) -> str:
     return str(p)
 
 
-# ── Public API ───────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────
 
 def assemble_scene(
     cfg: SimConfig,
@@ -84,28 +57,12 @@ def assemble_scene(
 ) -> list[SceneObject]:
     """Build a list of :class:`SceneObject` from a :class:`SimConfig`.
 
-    Args:
-        cfg: Pydantic experiment config (fully typed).
-        renderer: A ``GaussianRenderer`` instance (provides ``load_ply``).
-        config_dir: Base directory for resolving relative PLY paths.
-
-    Returns:
-        One ``SceneObject`` per declared object, preprocessed and ready
-        for consumption by the pipeline stages.
+    All returned objects have positions/covariances/quaternions in the
+    internal Y-up coordinate system.
     """
-    from physics_sim.preprocessing.transform import (
-        apply_cov_rotations,
-        apply_rotations,
-        generate_rotation_matrices,
-    )
-
     pp = cfg.preprocess
-    axis_perm = pp.axis_permutation
+    source_up = UpAxis.from_string(pp.source_up)
     global_opacity_threshold = pp.opacity_threshold
-
-    rotation_matrices = generate_rotation_matrices(
-        torch.tensor(pp.rotation_degree), pp.rotation_axis,
-    )
 
     if not cfg.objects:
         raise ValueError("Config must declare at least one object.")
@@ -136,7 +93,7 @@ def assemble_scene(
 
         print(f"  [assembler] Processing '{name}' (role={role}, source={source.type})")
 
-        # ── Load GS data from source ─────────────────────────────────
+        # ── Load GS data ──────────────────────────────────────────────
         if isinstance(source, PlySource):
             ply_data = _load_ply(source.ply_path)
             pos = ply_data["pos"]
@@ -164,9 +121,7 @@ def assemble_scene(
         else:
             raise ValueError(f"Object '{name}': unsupported source type {type(source)}")
 
-        # ── Unified preprocessing ────────────────────────────────────
-        pos, cov = _apply_axis_permutation(pos, cov, axis_perm)
-
+        # ── Opacity filtering ─────────────────────────────────────────
         opacity_threshold = (
             obj_cfg.opacity_threshold
             if obj_cfg.opacity_threshold is not None
@@ -180,17 +135,17 @@ def assemble_scene(
         quats = quats[op_mask]
         scales = scales[op_mask]
 
-        if role == "dynamic":
-            pos = apply_rotations(pos, rotation_matrices)
-            cov = apply_cov_rotations(cov, rotation_matrices)
-
-        # ── Transform (position offset + future rotation) ────────────
-        transform = obj_cfg.transform
-        offset = transform.position
-        if role == "dynamic" and any(v != 0.0 for v in offset):
+        # ── Position offset (in source coordinates) ───────────────────
+        offset = obj_cfg.transform.position
+        if any(v != 0.0 for v in offset):
             pos = pos + torch.tensor(offset, device=pos.device, dtype=pos.dtype)
 
-        # ── Collider / filling as dicts for downstream ───────────────
+        # ── Coordinate alignment (source -> internal Y-up) ───────────
+        pos = align_positions(pos, source_up)
+        cov = align_covariances(cov, source_up)
+        quats = align_quats(quats, source_up)
+
+        # ── Collider / filling dicts for downstream ───────────────────
         collider_dict = obj_cfg.collider.model_dump() if obj_cfg.collider else None
         filling_dict = (
             obj_cfg.particle_filling.model_dump()

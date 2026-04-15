@@ -23,10 +23,9 @@ config = SimConfig(
         solver_iterations=30,
     ),
     time=TimeConfig(substep_dt=2e-3, frame_num=600),
-    preprocess=PreprocessConfig(opacity_threshold=0.1),
+    preprocess=PreprocessConfig(opacity_threshold=0.1, source_up="Z_UP"),
     camera=CameraConfig(
         init_azimuth=90, init_elevation=20, init_radius=8.0,
-        mpm_space_viewpoint_center=[1, 1, 0.8],
         delta_a=-1.0, delta_e=0.0,
     ),
     objects=[

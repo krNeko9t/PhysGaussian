@@ -1,24 +1,22 @@
 """
-Coordinate transformation utilities for mapping 3DGS scenes to/from the MPM simulation domain.
+Coordinate transformation utilities.
 
-Extracted from PhysGaussian/utils/transformation_utils.py and
-PhysGaussian/utils/camera_view_utils.py (for the center/observant functions).
+.. note::
+
+    Coordinate-system alignment (source -> internal Y-up) is now handled
+    by :mod:`physics_sim.coord`.  The functions below handle the
+    **MPM domain mapping** ([0, 2]^3) and camera/observant helpers which
+    are still used by backends and the camera stage.
 """
 
 import torch
 import numpy as np
 
 
-# ---------------------------------------------------------------------------
-# Forward transforms  (World → MPM domain)
-# ---------------------------------------------------------------------------
+# ── MPM domain helpers ────────────────────────────────────────────────
 
 def transform2origin(position_tensor, scale=1.0):
-    """Centre the point cloud at the origin and scale it to fit the MPM domain.
-
-    Returns:
-        new_position_tensor, scale, original_mean_pos
-    """
+    """Centre the point cloud at the origin and scale it."""
     min_pos = torch.min(position_tensor, 0)[0]
     max_pos = torch.max(position_tensor, 0)[0]
     max_diff = torch.max(max_pos - min_pos)
@@ -37,12 +35,7 @@ def shift2center111(position_tensor):
 
 
 def transform_with_reference(position_tensor, scale, original_mean_pos):
-    """Apply a precomputed transform2origin() mapping.
-
-    This is equivalent to the output of transform2origin(position_tensor),
-    but uses a *fixed* (scale, original_mean_pos) computed from a reference
-    point cloud.
-    """
+    """Apply a precomputed transform2origin() mapping."""
     return (position_tensor - original_mean_pos) * scale
 
 
@@ -52,9 +45,10 @@ def world_to_mpm_positions(
     scale_origin: torch.Tensor,
     original_mean_pos: torch.Tensor,
 ):
-    """World-space positions → MPM domain positions.
+    """World-space positions -> MPM domain positions.
 
-    Applies: rotation(s) → translate/scale (reference) → shift to [0,2]^3.
+    .. deprecated:: Use ``physics_sim.coord`` for alignment;
+        domain mapping is internal to each backend.
     """
     rotated = apply_rotations(world_positions, rotation_matrices)
     transformed = transform_with_reference(rotated, scale_origin, original_mean_pos)
@@ -65,12 +59,14 @@ def world_to_mpm_directions(
     world_dirs: torch.Tensor,
     rotation_matrices,
 ):
-    """World-space direction vectors (e.g. normals) → MPM-space directions.
+    """World-space direction vectors -> MPM-space directions.
 
-    Only rotations are applied. The caller is responsible for normalization.
+    .. deprecated:: Use ``physics_sim.coord.align_directions`` instead.
     """
     return apply_rotations(world_dirs, rotation_matrices)
 
+
+# ── Rotation helpers (deprecated – use physics_sim.coord) ────────────
 
 def generate_rotation_matrix(degree, axis):
     cos_theta = torch.cos(degree / 180.0 * 3.1415926)
@@ -146,9 +142,7 @@ def apply_cov_rotations(upper_cov_tensor, rotation_matrices):
     return get_upper_from_mat(cov_tensor)
 
 
-# ---------------------------------------------------------------------------
-# Inverse transforms  (MPM domain → World)
-# ---------------------------------------------------------------------------
+# ── Inverse transforms (deprecated) ──────────────────────────────────
 
 def undotransform2origin(position_tensor, scale, original_mean_pos):
     return original_mean_pos + position_tensor / scale
@@ -179,7 +173,7 @@ def apply_inverse_cov_rotations(upper_cov_tensor, rotation_matrices):
 
 
 def undo_all_transforms(input, rotation_matrices, scale_origin, original_mean_pos):
-    """Convenience: undo shift → undo scale/translate → undo rotation."""
+    """Convenience: undo shift -> undo scale/translate -> undo rotation."""
     return apply_inverse_rotations(
         undotransform2origin(
             undoshift2center111(input), scale_origin, original_mean_pos
@@ -194,15 +188,13 @@ def mpm_to_world_positions(
     scale_origin: torch.Tensor,
     original_mean_pos: torch.Tensor,
 ):
-    """MPM domain positions → world-space positions."""
+    """MPM domain positions -> world-space positions."""
     return undo_all_transforms(
         mpm_positions, rotation_matrices, scale_origin, original_mean_pos
     )
 
 
-# ---------------------------------------------------------------------------
-# Camera / observant coordinate helpers
-# ---------------------------------------------------------------------------
+# ── Camera / observant coordinate helpers ─────────────────────────────
 
 def generate_local_coord(vertical_vector):
     """Build a local coordinate frame from a vertical direction vector."""
@@ -223,6 +215,11 @@ def get_center_view_worldspace_and_observant_coordinate(
     scale_origin,
     original_mean_pos,
 ):
+    """Convert MPM-space camera center and up to world space.
+
+    .. deprecated:: Camera setup now uses the scene center directly
+        in internal Y-up coordinates.
+    """
     viewpoint_center_worldspace = undo_all_transforms(
         mpm_space_viewpoint_center, rotation_matrices, scale_origin, original_mean_pos
     )

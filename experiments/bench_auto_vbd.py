@@ -17,7 +17,7 @@ config = SimConfig(
     time=TimeConfig(frame_num=120),
     preprocess=PreprocessConfig(
         opacity_threshold=0.1,
-        axis_permutation="xz-y",
+        source_up="Z_UP",
     ),
     camera=CameraConfig(
         width=800, height=600,

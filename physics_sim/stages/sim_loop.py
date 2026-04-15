@@ -1,4 +1,13 @@
-"""Stage 4: Simulation loop (headless and with rendering)."""
+"""Stage 4: Simulation loop (headless and with rendering).
+
+All positions coming out of the physics backend are in the internal
+Y-up coordinate system.  No inverse rotation is needed for rendering
+because the camera is also set up in Y-up.
+
+SH evaluation requires view directions in the PLY-native coordinate
+system, so ``alignment_inv`` (internal -> source) is passed to
+``convert_sh`` for that purpose.
+"""
 
 from __future__ import annotations
 
@@ -13,14 +22,6 @@ import torch
 from tqdm import tqdm
 
 from physics_sim.config.models import SimConfig
-from physics_sim.preprocessing.quaternions import (
-    apply_axis_perm_to_quats,
-    inverse_preprocess_quats,
-)
-from physics_sim.preprocessing.transform import (
-    apply_inverse_cov_rotations,
-    apply_inverse_rotations,
-)
 
 if TYPE_CHECKING:
     from physics_sim.backend.base import PhysicsBackend
@@ -59,14 +60,11 @@ def run_headless(
     cov3D = state.covariances[:gs_num].to(device)
     rot = state.rotations[:gs_num].to(device)
 
-    pos_world = apply_inverse_rotations(pos, scene_data.rotation_matrices)
-    cov_world = apply_inverse_cov_rotations(cov3D, scene_data.rotation_matrices)
-
     out_path = os.path.join(cfg.output, "final_state.npz")
     np.savez_compressed(
         out_path,
-        positions=pos_world.detach().cpu().numpy(),
-        covariances=cov_world.detach().cpu().numpy(),
+        positions=pos.detach().cpu().numpy(),
+        covariances=cov3D.detach().cpu().numpy(),
         rotations=rot.detach().cpu().numpy(),
     )
     print(f"Saved final state to {out_path}")
@@ -121,8 +119,8 @@ def run_with_rendering(
     opacity_render = scene_data.sim_opacity
     shs_render = scene_data.sim_shs
     has_static = len(scene_data.static_chunks) > 0
-    axis_perm = scene_data.axis_perm
-    rotation_matrices = scene_data.rotation_matrices
+    alignment_inv = scene_data.alignment_inv
+    source_up = scene_data.source_up
 
     height: Optional[int] = None
     width: Optional[int] = None
@@ -136,7 +134,7 @@ def run_with_rendering(
                 center_view_world_space=camera_state.viewpoint_center_worldspace,
                 observant_coordinates=camera_state.observant_coordinates,
                 current_frame=frame,
-                axis_perm=axis_perm,
+                source_up=source_up,
             )
         elif camera_mode == "orbit":
             camera = renderer.build_camera_orbit(
@@ -159,7 +157,7 @@ def run_with_rendering(
         cov3D = state.covariances[:gs_num].to(device)
         rot = state.rotations[:gs_num].to(device)
 
-        # Diagnostics (optional)
+        # Diagnostics
         if hasattr(backend, "get_diagnostics"):
             diag = backend.get_diagnostics()
             for bd in diag["bodies"]:
@@ -190,21 +188,10 @@ def run_with_rendering(
             pos[bad_mask] = 0.0
             cov3D[bad_mask] = 0.0
 
-        # Inverse-rotate back to world space
-        pos = apply_inverse_rotations(pos, rotation_matrices)
-        cov3D = apply_inverse_cov_rotations(cov3D, rotation_matrices)
-
-        # 2DGS quats/scales
+        # 2DGS quats/scales — already in Y-up, no inverse needed
         render_quats = render_scales = None
         if scene_data.gs_type == "2dgs" and state.quats is not None:
-            render_quats = apply_axis_perm_to_quats(
-                inverse_preprocess_quats(
-                    state.quats[:gs_num].to(device),
-                    axis_perm,
-                    rotation_matrices,
-                ),
-                axis_perm,
-            )
+            render_quats = state.quats[:gs_num].to(device)
             render_scales = state.scales[:gs_num].to(device)
 
         # Combine with static geometry
@@ -217,18 +204,16 @@ def run_with_rendering(
             cur_shs = torch.cat([shs_render, scene_data.static_shs], dim=0)
             if render_quats is not None and scene_data.static_quats is not None:
                 render_quats = torch.cat(
-                    [render_quats,
-                     apply_axis_perm_to_quats(scene_data.static_quats, axis_perm)],
-                    dim=0,
+                    [render_quats, scene_data.static_quats], dim=0,
                 )
                 render_scales = torch.cat(
                     [render_scales, scene_data.static_scales], dim=0,
                 )
 
-        # Render
+        # SH -> RGB (alignment_inv transforms view dirs to PLY-native space)
         colors_precomp = renderer.convert_sh(
             cur_shs, camera, pos, rot,
-            axis_perm_inv=scene_data.axis_perm_inv,
+            alignment_inv=alignment_inv,
         )
         if scene_data.gs_type == "2dgs" and render_quats is not None:
             rendering, _ = renderer.render(

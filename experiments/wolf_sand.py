@@ -7,6 +7,7 @@ from physics_sim.config.models import (
     NewtonMPMConfig,
     ObjectConfig,
     PlySource,
+    PreprocessConfig,
     ReleaseParticlesSequentially,
     SimConfig,
     SurfaceCollider,
@@ -17,7 +18,8 @@ config = SimConfig(
     output="output/wolf_sand",
     backend=NewtonMPMConfig(n_grid=200),
     time=TimeConfig(substep_dt=2e-5, frame_dt=4e-2, frame_num=50),
-    camera=CameraConfig(mpm_space_viewpoint_center=[1, 1, 0.8]),
+    preprocess=PreprocessConfig(source_up="Z_UP"),
+    camera=CameraConfig(),
     objects=[
         ObjectConfig(
             name="wolf",

@@ -1,3 +1,11 @@
+"""Preprocessing utilities.
+
+.. note::
+    Coordinate alignment is now handled by :mod:`physics_sim.coord`.
+    The functions here are retained for backward compatibility and for
+    MPM-domain mapping used internally by backends.
+"""
+
 from physics_sim.preprocessing.transform import (
     transform2origin,
     undotransform2origin,

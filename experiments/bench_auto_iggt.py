@@ -12,7 +12,7 @@ from physics_sim.config.models import (
 )
 
 config = SimConfig(
-    output="output/bench_auto_iggt_refactored",
+    output="output/bench_auto_iggt_axis_refactored",
     backend=NewtonVBDConfig(
         n_grid=200,
         collision_geometry="convex_hull",
@@ -27,9 +27,7 @@ config = SimConfig(
     ),
     preprocess=PreprocessConfig(
         opacity_threshold=0.1,
-        axis_permutation="xz-y",
-        rotation_degree=[0.0],
-        rotation_axis=[0],
+        source_up="Z_UP",
     ),
     camera=CameraConfig(
         width=800,
@@ -43,7 +41,6 @@ config = SimConfig(
         delta_a=-0.6,
         delta_e=0.0,
         delta_r=0.0,
-        mpm_space_vertical_upward_axis=[0, 0, 1],
         default_camera_index=-1,
         show_hint=False,
     ),

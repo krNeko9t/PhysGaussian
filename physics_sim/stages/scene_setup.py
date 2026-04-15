@@ -1,4 +1,10 @@
-"""Stage 1: Scene assembly and tensor concatenation."""
+"""Stage 1: Scene assembly and tensor concatenation.
+
+After this stage, **all tensors are in the internal Y-up coordinate
+system**.  The ``SceneData.source_up`` / ``alignment_inv`` fields
+record the original convention so that SH evaluation can transform
+view directions back to PLY-native space.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +14,7 @@ from typing import Optional
 import torch
 
 from physics_sim.config.models import SimConfig
-from physics_sim.preprocessing.quaternions import build_axis_perm_matrix
-from physics_sim.preprocessing.transform import generate_rotation_matrices
+from physics_sim.coord import UpAxis, alignment_matrix, inverse_alignment_matrix
 from physics_sim.renderer.gs_renderer import GaussianRenderer
 from physics_sim.scene import SceneObject, assemble_scene
 
@@ -41,9 +46,9 @@ class SceneData:
     static_quats: Optional[torch.Tensor] = None
     static_scales: Optional[torch.Tensor] = None
 
-    axis_perm: str = "xyz"
-    axis_perm_inv: Optional[torch.Tensor] = None
-    rotation_matrices: list[torch.Tensor] = field(default_factory=list)
+    # Coordinate system metadata
+    source_up: UpAxis = UpAxis.Y_UP
+    alignment_inv: Optional[torch.Tensor] = None  # 3x3, internal -> source (for SH)
 
 
 def _estimate_volumes(pos: torch.Tensor, n_grid: int) -> torch.Tensor:
@@ -77,8 +82,13 @@ def setup_scene(
     device: str = "cuda:0",
     sh_degree: int = 3,
 ) -> SceneData:
-    """Assemble the scene and concatenate tensors for simulation."""
+    """Assemble the scene and concatenate tensors for simulation.
+
+    All returned tensors are in the internal Y-up coordinate system.
+    """
     print("Assembling scene...")
+
+    source_up = UpAxis.from_string(cfg.preprocess.source_up)
 
     objects = assemble_scene(cfg, renderer, config_dir=config_dir)
 
@@ -90,14 +100,6 @@ def setup_scene(
         raise ValueError("No dynamic objects found — nothing to simulate.")
 
     gs_type = (sim_objects or objects)[0].gs_type
-
-    pp = cfg.preprocess
-    rotation_matrices = generate_rotation_matrices(
-        torch.tensor(pp.rotation_degree), pp.rotation_axis,
-    )
-
-    P = build_axis_perm_matrix(pp.axis_permutation, device=device)
-    axis_perm_inv = P.T if pp.axis_permutation != "xyz" else None
 
     n_grid = getattr(cfg.backend, "n_grid", 200)
 
@@ -140,6 +142,10 @@ def setup_scene(
         static_quats_t = torch.cat([o.quats for o in static_chunks], dim=0)
         static_scales_t = torch.cat([o.scales for o in static_chunks], dim=0)
 
+    # Precompute inverse alignment for SH direction transform
+    A_inv = inverse_alignment_matrix(source_up, device=device)
+    alignment_inv = A_inv if source_up is not UpAxis.Y_UP else None
+
     return SceneData(
         sim_objects=sim_objects,
         static_chunks=static_chunks,
@@ -160,7 +166,6 @@ def setup_scene(
         static_shs=static_shs,
         static_quats=static_quats_t,
         static_scales=static_scales_t,
-        axis_perm=pp.axis_permutation,
-        axis_perm_inv=axis_perm_inv,
-        rotation_matrices=rotation_matrices,
+        source_up=source_up,
+        alignment_inv=alignment_inv,
     )

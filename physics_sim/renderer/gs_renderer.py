@@ -380,27 +380,29 @@ class GaussianRenderer:
         camera: "SimpleCamera",
         position: torch.Tensor,
         rotation: Optional[torch.Tensor] = None,
+        alignment_inv: Optional[torch.Tensor] = None,
+        # DEPRECATED alias — will be removed
         axis_perm_inv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Convert spherical harmonics to precomputed RGB colours.
 
         Args:
-            shs:           (N, SH, 3) spherical harmonic coefficients.
-            camera:        a SimpleCamera (needs .camera_center).
-            position:      (N, 3) positions in render space.
-            rotation:      (M, 3, 3) optional per-particle rotation (M <= N).
-            axis_perm_inv: (3, 3) inverse of axis permutation matrix.  When
-                           not None the viewing direction is transformed back
-                           to PLY-native space so that it matches the frame in
-                           which the SH coefficients were trained.
+            shs:            (N, SH, 3) spherical harmonic coefficients.
+            camera:         a SimpleCamera (needs .camera_center).
+            position:       (N, 3) positions in render space (internal Y-up).
+            rotation:       (M, 3, 3) optional per-particle rotation (M <= N).
+            alignment_inv:  (3, 3) internal-to-source coordinate matrix.
+                            Transforms view directions back to PLY-native
+                            space for correct SH evaluation.
         """
+        inv = alignment_inv if alignment_inv is not None else axis_perm_inv
         shs_view = shs.transpose(1, 2).view(-1, 3, (self.sh_degree + 1) ** 2)
         dir_pp = position - camera.camera_center.repeat(shs_view.shape[0], 1)
         if rotation is not None:
             n = rotation.shape[0]
             dir_pp[:n] = torch.matmul(rotation, dir_pp[:n].unsqueeze(2)).squeeze(2)
-        if axis_perm_inv is not None:
-            dir_pp = torch.matmul(dir_pp, axis_perm_inv.T)
+        if inv is not None:
+            dir_pp = torch.matmul(dir_pp, inv.T)
         dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
         sh2rgb = eval_sh(self.sh_degree, shs_view, dir_pp_normalized)
         return torch.clamp_min(sh2rgb + 0.5, 0.0)
@@ -441,14 +443,27 @@ class GaussianRenderer:
         center_view_world_space=None,
         observant_coordinates=None,
         current_frame: int = 0,
+        source_up=None,
+        # DEPRECATED alias
         axis_perm: str = "xyz",
     ) -> "SimpleCamera":
-        """Build a SimpleCamera from a cameras.json file and camera_params dict."""
+        """Build a SimpleCamera from a cameras.json file and camera_params dict.
+
+        When *source_up* is provided, camera extrinsics from the JSON
+        are aligned from the source coordinate system to internal Y-up.
+        """
+        from physics_sim.coord import UpAxis, align_camera_w2c_rotation, align_camera_position
+
         with open(cameras_json_path) as f:
             data = json.load(f)
 
         default_idx = camera_params.get("default_camera_index", 0)
         show_hint = camera_params.get("show_hint", False)
+
+        # Resolve the effective up-axis
+        up = source_up if source_up is not None else None
+        if up is None and axis_perm != "xyz":
+            up = UpAxis.Z_UP  # legacy fallback
 
         if show_hint:
             if default_idx < 0:
@@ -462,12 +477,13 @@ class GaussianRenderer:
 
         if default_idx > -1:
             raw_camera = data[default_idx]
-            if axis_perm != "xyz":
-                from physics_sim.preprocessing.quaternions import build_axis_perm_matrix
-                P = build_axis_perm_matrix(axis_perm, device="cpu").numpy()
+            if up is not None and up is not UpAxis.Y_UP:
                 raw_camera = dict(raw_camera)
-                raw_camera["rotation"] = (
-                    np.array(raw_camera["rotation"]) @ P.T
+                raw_camera["rotation"] = align_camera_w2c_rotation(
+                    np.array(raw_camera["rotation"]), up
+                ).tolist()
+                raw_camera["position"] = align_camera_position(
+                    np.array(raw_camera["position"]), up
                 ).tolist()
         else:
             raw_camera = data[0]

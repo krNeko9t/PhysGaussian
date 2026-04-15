@@ -277,9 +277,7 @@ def _build_backend_override(
 
 _SCENE_DEFAULTS: dict[str, Any] = {
     "opacity_threshold": 0.1,
-    "axis_permutation": "xz-y",
-    "rotation_degree": [0.0],
-    "rotation_axis": [0],
+    "source_up": "Z_UP",
     "transform_reference": "shared_ply",
 
     "substep_dt": 1e-4,
@@ -294,7 +292,7 @@ _SCENE_DEFAULTS: dict[str, Any] = {
 
     "boundary_conditions": [],
 
-    "mpm_space_vertical_upward_axis": [0, 0, 1],
+    "mpm_space_vertical_upward_axis": [0, 1, 0],
     "default_camera_index": -1,
     "show_hint": False,
 
@@ -437,7 +435,7 @@ def convert(
         "preprocess": {
             "_ref": "default",
             "opacity_threshold": defaults.get("opacity_threshold", 0.1),
-            "axis_permutation": defaults.get("axis_permutation", "xz-y"),
+            "source_up": defaults.get("source_up", "Z_UP"),
             "transform_reference": defaults.get("transform_reference", "shared_ply"),
         },
         "camera": {
