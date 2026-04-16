@@ -480,7 +480,7 @@ def main():
     )
     parser.add_argument(
         "--backend-preference", type=str, default="auto",
-        choices=["auto", "newton_rigid", "newton_mpm", "newton_vbd", "warp_mpm"],
+        choices=["auto", "newton_rigid", "newton_mpm", "newton_vbd"],
         help="Backend preference (default: auto — inferred from scene composition)",
     )
     parser.add_argument(
