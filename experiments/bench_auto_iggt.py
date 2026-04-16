@@ -27,14 +27,15 @@ config = SimConfig(
     ),
     preprocess=PreprocessConfig(
         opacity_threshold=0.1,
-        source_up="Z_UP",
+        source_up="+Y",
+        source_front="-Y",
     ),
     camera=CameraConfig(
         width=800,
         height=600,
         fovx_deg=60.0,
         fovy_deg=45.0,
-        init_azimuth=160.0,
+        init_azimuth=0.0,
         init_elevation=20.0,
         init_radius=20.8,
         move_camera=True,
@@ -56,7 +57,7 @@ config = SimConfig(
                 E=44058682800.0,
                 nu=0.313,
                 collision_geometry="convex_hull",
-                g=[0, 0, -9.8],
+                g_magnitude=9.8,
             ),
         ),
         ObjectConfig(
@@ -70,7 +71,7 @@ config = SimConfig(
                 E=828444.0,
                 nu=0.423,
                 collision_geometry="convex_hull",
-                g=[0, 0, -9.8],
+                g_magnitude=9.8,
             ),
         ),
         ObjectConfig(
@@ -84,7 +85,7 @@ config = SimConfig(
                 E=104946240000.00002,
                 nu=0.351,
                 collision_geometry="convex_hull",
-                g=[0, 0, -9.8],
+                g_magnitude=9.8,
             ),
         ),
         ObjectConfig(
@@ -105,7 +106,7 @@ config = SimConfig(
                 E=1e5,
                 nu=0.4,
                 collision_geometry="convex_hull",
-                g=[0, 0, -9.8],
+                g_magnitude=9.8,
             ),
         ),
         ObjectConfig(
@@ -120,7 +121,7 @@ config = SimConfig(
                 E=5021179200.000001,
                 nu=0.347,
                 collision_geometry="convex_hull",
-                g=[0, 0, -9.8],
+                g_magnitude=9.8,
             ),
         ),
         ObjectConfig(
@@ -142,7 +143,7 @@ config = SimConfig(
                 E=1e5,
                 nu=0.4,
                 collision_geometry="convex_hull",
-                g=[0, 0, -9.8],
+                g_magnitude=9.8,
             ),
         ),
         ObjectConfig(
@@ -157,7 +158,7 @@ config = SimConfig(
                 E=38934514.0,
                 nu=0.444,
                 collision_geometry="convex_hull",
-                g=[0, 0, -9.8],
+                g_magnitude=9.8,
             ),
         ),
         ObjectConfig(
@@ -171,7 +172,7 @@ config = SimConfig(
                 E=260148.0,
                 nu=0.44,
                 collision_geometry="convex_hull",
-                g=[0, 0, -9.8],
+                g_magnitude=9.8,
             ),
         ),
     ],

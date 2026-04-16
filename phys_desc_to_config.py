@@ -277,7 +277,8 @@ def _build_backend_override(
 
 _SCENE_DEFAULTS: dict[str, Any] = {
     "opacity_threshold": 0.1,
-    "source_up": "Z_UP",
+    "source_up": "+Z",
+    "source_front": "-Y",
     "transform_reference": "shared_ply",
 
     "substep_dt": 1e-4,
@@ -286,13 +287,12 @@ _SCENE_DEFAULTS: dict[str, Any] = {
 
     "material": "sand",
     "density": 800,
-    "g": [0.0, 0.0, -9.8],
+    "g_magnitude": 9.8,
     "mu": 0.5,
     "n_grid": 200,
 
     "boundary_conditions": [],
 
-    "mpm_space_vertical_upward_axis": [0, 1, 0],
     "default_camera_index": -1,
     "show_hint": False,
 
@@ -301,7 +301,7 @@ _SCENE_DEFAULTS: dict[str, Any] = {
     "fovx_deg": 60.0,
     "fovy_deg": 45.0,
 
-    "init_azimuth": 160.0,
+    "init_azimuth": 0.0,
     "init_elevation": 20.0,
     "init_radius": 2.8,
     "move_camera": True,
@@ -425,7 +425,7 @@ def convert(
         "material": {
             "density": defaults.get("density", 800),
             "mu": defaults.get("mu", 0.5),
-            "g": defaults.get("g", [0.0, 0.0, -9.8]),
+            "g_magnitude": defaults.get("g_magnitude", 9.8),
         },
         "time": {
             "_ref": "default",
@@ -435,7 +435,8 @@ def convert(
         "preprocess": {
             "_ref": "default",
             "opacity_threshold": defaults.get("opacity_threshold", 0.1),
-            "source_up": defaults.get("source_up", "Z_UP"),
+            "source_up": defaults.get("source_up", "+Z"),
+            "source_front": defaults.get("source_front", "-Y"),
             "transform_reference": defaults.get("transform_reference", "shared_ply"),
         },
         "camera": {

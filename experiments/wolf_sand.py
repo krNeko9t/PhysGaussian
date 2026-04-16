@@ -18,7 +18,7 @@ config = SimConfig(
     output="output/wolf_sand",
     backend=NewtonMPMConfig(n_grid=200),
     time=TimeConfig(substep_dt=2e-5, frame_dt=4e-2, frame_num=50),
-    preprocess=PreprocessConfig(source_up="Z_UP"),
+    preprocess=PreprocessConfig(source_up="+Z", source_front="-Y"),
     camera=CameraConfig(),
     objects=[
         ObjectConfig(

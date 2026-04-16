@@ -6,8 +6,8 @@ where each object is a typed ``ObjectConfig``.
 Coordinate alignment
 --------------------
 Source data is aligned to the internal **Y-up** convention via
-:mod:`physics_sim.coord`.  The ``source_up`` field in
-``PreprocessConfig`` declares the PLY coordinate system.  All position,
+:mod:`physics_sim.coord`.  The ``source_up`` / ``source_front`` fields in
+``PreprocessConfig`` declare the PLY coordinate system.  All position,
 covariance, and quaternion data are transformed **once** in this module;
 downstream code always sees Y-up.
 """
@@ -27,7 +27,7 @@ from physics_sim.config.models import (
     SimConfig,
 )
 from physics_sim.coord import (
-    UpAxis,
+    SourceAxes,
     align_covariances,
     align_positions,
     align_quats,
@@ -61,7 +61,7 @@ def assemble_scene(
     internal Y-up coordinate system.
     """
     pp = cfg.preprocess
-    source_up = UpAxis.from_string(pp.source_up)
+    source_axes = SourceAxes.from_config(pp.source_up, pp.source_front)
     global_opacity_threshold = pp.opacity_threshold
 
     if not cfg.objects:
@@ -141,9 +141,9 @@ def assemble_scene(
             pos = pos + torch.tensor(offset, device=pos.device, dtype=pos.dtype)
 
         # ── Coordinate alignment (source -> internal Y-up) ───────────
-        pos = align_positions(pos, source_up)
-        cov = align_covariances(cov, source_up)
-        quats = align_quats(quats, source_up)
+        pos = align_positions(pos, source_axes)
+        cov = align_covariances(cov, source_axes)
+        quats = align_quats(quats, source_axes)
 
         # ── Collider / filling dicts for downstream ───────────────────
         collider_dict = obj_cfg.collider.model_dump() if obj_cfg.collider else None

@@ -3,11 +3,18 @@
 All positions, directions, and boundary conditions are already in the
 internal Y-up coordinate system after :func:`setup_scene`.  This stage
 transforms user-specified "world" BCs (which are in source coordinates)
-into internal coordinates using the alignment from :mod:`physics_sim.coord`.
+into internal coordinates using :mod:`physics_sim.coord`.
+
+Gravity
+-------
+Direction is always ``[0, -g_magnitude, 0]`` in internal Y-up space.
+The user only specifies ``g_magnitude`` (default 9.8) in the material
+dict.  Legacy ``g=[x,y,z]`` vectors are accepted with a warning.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -16,11 +23,9 @@ import torch
 from physics_sim.backend.registry import create_backend, resolve_material
 from physics_sim.config.models import SimConfig
 from physics_sim.coord import (
-    UpAxis,
+    SourceAxes,
     align_directions,
     align_positions,
-    align_quats,
-    gravity_from_source,
     gravity_vector,
 )
 from physics_sim.geometry.plane_fit import fit_plane_svd
@@ -30,15 +35,45 @@ if TYPE_CHECKING:
     from physics_sim.stages.scene_setup import SceneData
 
 
+def _resolve_gravity(per_object_info: list[dict]) -> list[float]:
+    """Determine gravity vector in internal Y-up coordinates.
+
+    Reads ``g_magnitude`` from the first object's material (default 9.8).
+    Legacy ``g=[x,y,z]`` vectors are accepted but emit a deprecation
+    warning; only the magnitude is used, direction is always -Y.
+    """
+    magnitude = 9.8
+    for info in per_object_info:
+        mat = info.get("material", {})
+        if "g_magnitude" in mat:
+            magnitude = float(mat["g_magnitude"])
+            break
+        if "g" in mat:
+            g_vec = mat["g"]
+            if isinstance(g_vec, (list, tuple)):
+                magnitude = float(np.linalg.norm(g_vec))
+                warnings.warn(
+                    f"material['g'] = {g_vec} is deprecated. "
+                    f"Use material['g_magnitude'] = {magnitude:.4f} instead. "
+                    f"Gravity direction is always -Y in internal coordinates.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            else:
+                magnitude = abs(float(g_vec))
+            break
+
+    return gravity_vector(magnitude, device="cpu").tolist()
+
+
 def _resolve_collider_bc(
     collider_objects,
-    source_up: UpAxis,
+    source_axes: SourceAxes,
 ) -> list[dict]:
     """Convert collider_only objects into surface_collider BCs.
 
-    The fitted planes are computed from positions that are already in
-    internal Y-up space, so their point/normal are also in Y-up.
-    These BCs use ``space="internal"`` to skip further transformation.
+    Fitted planes are computed from positions already in internal Y-up
+    space, so their point/normal are also in Y-up.
     """
     bc_list: list[dict] = []
     for obj in collider_objects:
@@ -56,16 +91,14 @@ def _resolve_collider_bc(
         end_time = col.get("end_time", 1e3)
 
         if col.get("point") is not None and col.get("normal") is not None:
-            # Explicit point/normal (in source coordinates) — transform
             pt_src = torch.tensor(col["point"], device="cuda", dtype=torch.float32).reshape(1, 3)
             nr_src = torch.tensor(col["normal"], device="cuda", dtype=torch.float32).reshape(1, 3)
-            point = align_positions(pt_src, source_up)[0]
-            normal = align_directions(nr_src, source_up)[0]
+            point = align_positions(pt_src, source_axes)[0]
+            normal = align_directions(nr_src, source_axes)[0]
             normal = normal / (torch.norm(normal) + 1e-12)
             point = [float(x) for x in point.cpu().tolist()]
             normal = [float(x) for x in normal.cpu().tolist()]
         else:
-            # Fit from the (already Y-up aligned) collider positions
             pts = obj.positions.detach().cpu().numpy()
             if pts.shape[0] < 3:
                 raise ValueError(
@@ -74,10 +107,10 @@ def _resolve_collider_bc(
                 )
             fit = col.get("fit") or {}
             sample_max = fit.get("sample_max", 200000)
-            # prefer_up in source coords -> align to Y-up
-            prefer_up_src = col.get("prefer_up", [0.0, 0.0, 1.0])
+            # prefer_up: transform from source to internal
+            prefer_up_src = col.get("prefer_up", source_axes.up_vector.tolist())
             prefer_up_t = torch.tensor(prefer_up_src, dtype=torch.float32).reshape(1, 3)
-            prefer_up_aligned = align_directions(prefer_up_t, source_up)[0].numpy()
+            prefer_up_aligned = align_directions(prefer_up_t, source_axes)[0].numpy()
             res = fit_plane_svd(
                 pts,
                 sample_max=sample_max,
@@ -112,14 +145,13 @@ def init_backend(
     """Create, configure, and finalize the physics backend."""
     backend_cfg = cfg.backend
     bt = backend_cfg.type
-    source_up = scene_data.source_up
+    source_axes = scene_data.source_axes
     print(f"Initialising backend: {bt}")
 
     backend = create_backend(backend_cfg, device=device)
 
     init_kwargs = backend_cfg.model_dump(exclude={"type"}, exclude_none=True)
 
-    # For 2DGS, pass the (already Y-up aligned) quats
     if scene_data.gs_type == "2dgs" and scene_data.gs_num > 0:
         init_kwargs["init_quats"] = scene_data.sim_quats
         init_kwargs["init_scales"] = scene_data.sim_scales
@@ -154,18 +186,8 @@ def init_backend(
             resolved_info.append(resolved)
         material_params["per_object"] = resolved_info
 
-    # Gravity: transform from source coordinates to internal Y-up.
-    # Falls back to standard Y-down gravity if no per-object `g` is found.
-    g_found = False
-    for info in scene_data.per_object_info:
-        if "g" in info["material"]:
-            g_src = info["material"]["g"]
-            g_internal = gravity_from_source(g_src, source_up).tolist()
-            material_params.setdefault("g", g_internal)
-            g_found = True
-            break
-    if not g_found:
-        material_params.setdefault("g", gravity_vector(device="cpu").tolist())
+    # Gravity: always -Y in internal Y-up space; magnitude from config
+    material_params.setdefault("g", _resolve_gravity(scene_data.per_object_info))
 
     backend.set_material(material_params)
 
@@ -174,7 +196,7 @@ def init_backend(
     for bc in cfg.boundary_conditions:
         bc_all.append(bc.model_dump() if hasattr(bc, "model_dump") else dict(bc))
 
-    collider_bcs = _resolve_collider_bc(scene_data.collider_objects, source_up)
+    collider_bcs = _resolve_collider_bc(scene_data.collider_objects, source_axes)
     bc_all.extend(collider_bcs)
 
     # Transform user-specified "world" BCs from source coords to internal
@@ -184,8 +206,8 @@ def init_backend(
         if space == "world" and bc.get("type") == "surface_collider":
             p_src = torch.tensor(bc["point"], device="cuda", dtype=torch.float32).reshape(1, 3)
             n_src = torch.tensor(bc["normal"], device="cuda", dtype=torch.float32).reshape(1, 3)
-            p_int = align_positions(p_src, source_up)[0]
-            n_int = align_directions(n_src, source_up)[0]
+            p_int = align_positions(p_src, source_axes)[0]
+            n_int = align_directions(n_src, source_axes)[0]
             n_int = n_int / (torch.norm(n_int) + 1e-12)
             bc_new = dict(bc)
             bc_new["point"] = [float(x) for x in p_int.cpu().tolist()]

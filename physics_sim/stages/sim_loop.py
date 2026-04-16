@@ -120,7 +120,7 @@ def run_with_rendering(
     shs_render = scene_data.sim_shs
     has_static = len(scene_data.static_chunks) > 0
     alignment_inv = scene_data.alignment_inv
-    source_up = scene_data.source_up
+    source_axes = scene_data.source_axes
 
     height: Optional[int] = None
     width: Optional[int] = None
@@ -134,7 +134,7 @@ def run_with_rendering(
                 center_view_world_space=camera_state.viewpoint_center_worldspace,
                 observant_coordinates=camera_state.observant_coordinates,
                 current_frame=frame,
-                source_up=source_up,
+                source_axes=source_axes,
             )
         elif camera_mode == "orbit":
             camera = renderer.build_camera_orbit(

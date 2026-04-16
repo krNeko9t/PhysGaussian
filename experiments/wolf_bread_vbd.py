@@ -23,7 +23,7 @@ config = SimConfig(
         solver_iterations=30,
     ),
     time=TimeConfig(substep_dt=2e-3, frame_num=600),
-    preprocess=PreprocessConfig(opacity_threshold=0.1, source_up="Z_UP"),
+    preprocess=PreprocessConfig(opacity_threshold=0.1, source_up="+Z", source_front="-Y"),
     camera=CameraConfig(
         init_azimuth=90, init_elevation=20, init_radius=8.0,
         delta_a=-1.0, delta_e=0.0,
@@ -36,7 +36,7 @@ config = SimConfig(
             ),
             material=dict(
                 physics="rigid", collision_geometry="convex_hull",
-                density=500, mu=0.5, g=[0, 0, -9.8],
+                density=500, mu=0.5, g_magnitude=9.8,
             ),
         ),
         ObjectConfig(
@@ -48,7 +48,7 @@ config = SimConfig(
             material=dict(
                 physics="soft", density=300,
                 k_mu=1e5, k_lambda=1e5, k_damp=1e-3,
-                g=[0, 0, -9.8],
+                g_magnitude=9.8,
             ),
             particle_filling=FillingConfig(max_particles_per_cell=16),
         ),

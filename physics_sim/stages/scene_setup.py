@@ -1,7 +1,7 @@
 """Stage 1: Scene assembly and tensor concatenation.
 
 After this stage, **all tensors are in the internal Y-up coordinate
-system**.  The ``SceneData.source_up`` / ``alignment_inv`` fields
+system**.  The ``SceneData.source_axes`` / ``alignment_inv`` fields
 record the original convention so that SH evaluation can transform
 view directions back to PLY-native space.
 """
@@ -14,7 +14,7 @@ from typing import Optional
 import torch
 
 from physics_sim.config.models import SimConfig
-from physics_sim.coord import UpAxis, alignment_matrix, inverse_alignment_matrix
+from physics_sim.coord import SourceAxes
 from physics_sim.renderer.gs_renderer import GaussianRenderer
 from physics_sim.scene import SceneObject, assemble_scene
 
@@ -47,7 +47,7 @@ class SceneData:
     static_scales: Optional[torch.Tensor] = None
 
     # Coordinate system metadata
-    source_up: UpAxis = UpAxis.Y_UP
+    source_axes: SourceAxes = field(default_factory=SourceAxes.identity)
     alignment_inv: Optional[torch.Tensor] = None  # 3x3, internal -> source (for SH)
 
 
@@ -88,7 +88,9 @@ def setup_scene(
     """
     print("Assembling scene...")
 
-    source_up = UpAxis.from_string(cfg.preprocess.source_up)
+    source_axes = SourceAxes.from_config(
+        cfg.preprocess.source_up, cfg.preprocess.source_front,
+    )
 
     objects = assemble_scene(cfg, renderer, config_dir=config_dir)
 
@@ -142,9 +144,9 @@ def setup_scene(
         static_quats_t = torch.cat([o.quats for o in static_chunks], dim=0)
         static_scales_t = torch.cat([o.scales for o in static_chunks], dim=0)
 
-    # Precompute inverse alignment for SH direction transform
-    A_inv = inverse_alignment_matrix(source_up, device=device)
-    alignment_inv = A_inv if source_up is not UpAxis.Y_UP else None
+    alignment_inv = (
+        source_axes.A_inv.to(device) if not source_axes.is_identity else None
+    )
 
     return SceneData(
         sim_objects=sim_objects,
@@ -166,6 +168,6 @@ def setup_scene(
         static_shs=static_shs,
         static_quats=static_quats_t,
         static_scales=static_scales_t,
-        source_up=source_up,
+        source_axes=source_axes,
         alignment_inv=alignment_inv,
     )

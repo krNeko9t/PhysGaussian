@@ -381,8 +381,6 @@ class GaussianRenderer:
         position: torch.Tensor,
         rotation: Optional[torch.Tensor] = None,
         alignment_inv: Optional[torch.Tensor] = None,
-        # DEPRECATED alias — will be removed
-        axis_perm_inv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Convert spherical harmonics to precomputed RGB colours.
 
@@ -395,7 +393,7 @@ class GaussianRenderer:
                             Transforms view directions back to PLY-native
                             space for correct SH evaluation.
         """
-        inv = alignment_inv if alignment_inv is not None else axis_perm_inv
+        inv = alignment_inv
         shs_view = shs.transpose(1, 2).view(-1, 3, (self.sh_degree + 1) ** 2)
         dir_pp = position - camera.camera_center.repeat(shs_view.shape[0], 1)
         if rotation is not None:
@@ -443,16 +441,18 @@ class GaussianRenderer:
         center_view_world_space=None,
         observant_coordinates=None,
         current_frame: int = 0,
-        source_up=None,
-        # DEPRECATED alias
-        axis_perm: str = "xyz",
+        source_axes=None,
     ) -> "SimpleCamera":
         """Build a SimpleCamera from a cameras.json file and camera_params dict.
 
-        When *source_up* is provided, camera extrinsics from the JSON
-        are aligned from the source coordinate system to internal Y-up.
+        When *source_axes* is provided (a :class:`SourceAxes` instance),
+        camera extrinsics from the JSON are aligned from the source
+        coordinate system to internal Y-up.  The ``cameras.json`` format
+        is assumed to be COLMAP / 3DGS style: ``rotation`` is the W2C
+        3x3 rotation, ``position`` is the camera's world-space position
+        (i.e. the W2C translation column).
         """
-        from physics_sim.coord import UpAxis, align_camera_w2c_rotation, align_camera_position
+        from physics_sim.coord import SourceAxes as _SA, align_camera_w2c_rotation, align_camera_position
 
         with open(cameras_json_path) as f:
             data = json.load(f)
@@ -460,10 +460,11 @@ class GaussianRenderer:
         default_idx = camera_params.get("default_camera_index", 0)
         show_hint = camera_params.get("show_hint", False)
 
-        # Resolve the effective up-axis
-        up = source_up if source_up is not None else None
-        if up is None and axis_perm != "xyz":
-            up = UpAxis.Z_UP  # legacy fallback
+        need_align = (
+            source_axes is not None
+            and isinstance(source_axes, _SA)
+            and not source_axes.is_identity
+        )
 
         if show_hint:
             if default_idx < 0:
@@ -476,17 +477,16 @@ class GaussianRenderer:
             raise SystemExit(0)
 
         if default_idx > -1:
-            raw_camera = data[default_idx]
-            if up is not None and up is not UpAxis.Y_UP:
-                raw_camera = dict(raw_camera)
+            raw_camera = dict(data[default_idx])
+            if need_align:
                 raw_camera["rotation"] = align_camera_w2c_rotation(
-                    np.array(raw_camera["rotation"]), up
+                    np.array(raw_camera["rotation"]), source_axes
                 ).tolist()
                 raw_camera["position"] = align_camera_position(
-                    np.array(raw_camera["position"]), up
+                    np.array(raw_camera["position"]), source_axes
                 ).tolist()
         else:
-            raw_camera = data[0]
+            raw_camera = dict(data[0])
             init_a = camera_params["init_azimuth"]
             init_e = camera_params["init_elevation"]
             init_r = camera_params["init_radius"]

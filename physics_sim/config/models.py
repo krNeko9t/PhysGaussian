@@ -148,25 +148,14 @@ class TimeConfig(BaseModel):
 
 class PreprocessConfig(BaseModel):
     opacity_threshold: float = 0.02
-    source_up: str = "Y_UP"
+    source_up: str = "+Y"
+    source_front: str | None = None
     scale: float = 1.0
-
-    # DEPRECATED -- kept for backward compatibility only.
-    # When ``source_up`` is explicitly set these are ignored.
-    axis_permutation: str = "xyz"
-    rotation_degree: list[float] = Field(default_factory=lambda: [0.0])
-    rotation_axis: list[int] = Field(default_factory=lambda: [0])
 
 
 class CameraConfig(BaseModel):
     camera_mode: Literal["orbit", "fixed", "json"] = "orbit"
     cameras_json: str | None = None
-    mpm_space_viewpoint_center: list[float] = Field(
-        default_factory=lambda: [1.0, 1.0, 1.0],
-    )
-    mpm_space_vertical_upward_axis: list[float] = Field(
-        default_factory=lambda: [0, 1, 0],
-    )
     default_camera_index: int = -1
     show_hint: bool = False
     init_azimuth: float = 170.0
