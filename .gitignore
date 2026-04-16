@@ -1,6 +1,7 @@
 data
 .vscode
 output
+output_old
 *.ply
 *.pyc
 *.png
