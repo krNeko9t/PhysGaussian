@@ -3,3 +3,4 @@ model
 gaussian-splatting
 demo
 _resources
+config/legacy
