@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from physics_sim.renderer.backend_base import RasterBackend
+from physics_sim.render.backend_base import RasterBackend
 
 
 def _cov6_to_mat3(cov6: torch.Tensor) -> torch.Tensor:

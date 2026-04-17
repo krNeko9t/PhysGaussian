@@ -35,13 +35,21 @@ def test_legacy_renderer_facade_is_removed():
     assert not (PHYSICS_SIM_ROOT / "renderer/gs_renderer.py").exists()
 
 
-def test_no_legacy_renderer_imports_except_backend_base():
+def test_no_legacy_renderer_imports():
     forbidden = (
         "physics_sim.renderer.gs_renderer",
         "physics_sim.renderer.backend_gsplat",
         "physics_sim.renderer.backend_diffrast",
+        "physics_sim.renderer.backend_base",
     )
     for py in PHYSICS_SIM_ROOT.rglob("*.py"):
         src = py.read_text(encoding="utf-8")
         for token in forbidden:
             assert token not in src, f"{py} contains forbidden import token: {token}"
+
+
+def test_legacy_renderer_package_has_no_python_sources():
+    renderer_dir = PHYSICS_SIM_ROOT / "renderer"
+    if not renderer_dir.exists():
+        return
+    assert list(renderer_dir.glob("*.py")) == []

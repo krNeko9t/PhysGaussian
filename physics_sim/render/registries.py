@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from physics_sim.render.backend_base import create_raster_backend
 from physics_sim.render.camera import CameraFactory
 from physics_sim.render.gaussian_asset_loader import GaussianAssetLoader
 from physics_sim.render.interfaces import Rasterizer
-from physics_sim.renderer.backend_base import create_raster_backend
 
 AssetLoaderFactory = Callable[..., object]
 RasterizerFactory = Callable[..., Rasterizer]

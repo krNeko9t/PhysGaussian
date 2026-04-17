@@ -6,7 +6,7 @@ import math
 
 import torch
 
-from physics_sim.renderer.backend_base import RasterBackend
+from physics_sim.render.backend_base import RasterBackend
 
 
 class DiffRastBackend(RasterBackend):
