@@ -65,11 +65,7 @@ class PipelineOrchestrator:
             raster_backend=raw.raster_backend,
         )
         camera_state = setup_camera(self.cfg, self.scene_data, config_dir=self.config_dir)
-        render_args = RenderArgs(
-            white_bg=raw.white_bg,
-            sh_degree=raw.sh_degree,
-            raster_backend=raw.raster_backend,
-        )
+        render_args = RenderArgs(white_bg=raw.white_bg)
         run_with_rendering(
             self.cfg,
             self.backend,

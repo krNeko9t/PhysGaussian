@@ -33,10 +33,13 @@ if TYPE_CHECKING:
 
 @dataclass
 class RenderArgs:
-    """Rendering-related CLI flags."""
+    """Per-frame simulation/render loop options.
+
+    SH degree and raster backend are fixed when :class:`~physics_sim.render.interfaces.RenderRuntime`
+    is constructed; they are not repeated here.
+    """
+
     white_bg: bool = False
-    sh_degree: int = 3
-    raster_backend: str = "gsplat"
 
 
 def run_headless(
