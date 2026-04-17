@@ -27,8 +27,10 @@ new features can be added by extension instead of core-flow rewrites.
 
 - Scene stage must not import rasterizer implementations.
 - Physics backend must not import render internals.
-- New features should not add imports from `physics_sim/renderer/gs_renderer.py`.
-- `gs_renderer.py` is deprecated compatibility-only glue.
+- New code must not import `physics_sim/renderer/*` directly, except
+  `physics_sim/renderer/backend_base.py` as the raster-backend factory boundary.
+- `physics_sim/renderer/gs_renderer.py` has been removed; do not reintroduce
+  facade-style entrypoints.
 
 ## Extension Points
 

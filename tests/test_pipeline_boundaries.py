@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PHYSICS_SIM_ROOT = REPO_ROOT / "physics_sim"
 
 
 def test_pipeline_no_longer_imports_gaussian_renderer():
@@ -28,3 +29,19 @@ def test_camera_mode_registry_has_all_builtin_modes():
     src = (REPO_ROOT / "physics_sim/render/registries.py").read_text(encoding="utf-8")
     for mode in ("json", "orbit", "fixed"):
         assert f'register_camera_mode(\n    "{mode}"' in src
+
+
+def test_legacy_renderer_facade_is_removed():
+    assert not (PHYSICS_SIM_ROOT / "renderer/gs_renderer.py").exists()
+
+
+def test_no_legacy_renderer_imports_except_backend_base():
+    forbidden = (
+        "physics_sim.renderer.gs_renderer",
+        "physics_sim.renderer.backend_gsplat",
+        "physics_sim.renderer.backend_diffrast",
+    )
+    for py in PHYSICS_SIM_ROOT.rglob("*.py"):
+        src = py.read_text(encoding="utf-8")
+        for token in forbidden:
+            assert token not in src, f"{py} contains forbidden import token: {token}"

@@ -1,2 +1,1 @@
-from physics_sim.renderer.gs_renderer import GaussianRenderer
 from physics_sim.renderer.backend_base import RasterBackend, create_raster_backend
