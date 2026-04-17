@@ -15,17 +15,17 @@ downstream code always sees Y-up.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
 
 from physics_sim.config.models import (
     IdMapSource,
-    ObjectConfig,
     PlySource,
     SimConfig,
 )
+from physics_sim.render.interfaces import SceneAssetLoader
+from physics_sim.render.types import GaussianAsset
 from physics_sim.coord import (
     SourceAxes,
     align_covariances,
@@ -52,7 +52,7 @@ def _resolve_path(path: str, config_dir: str | None) -> str:
 
 def assemble_scene(
     cfg: SimConfig,
-    renderer: Any,
+    loader: SceneAssetLoader,
     config_dir: str | None = None,
 ) -> list[SceneObject]:
     """Build a list of :class:`SceneObject` from a :class:`SimConfig`.
@@ -67,14 +67,14 @@ def assemble_scene(
     if not cfg.objects:
         raise ValueError("Config must declare at least one object.")
 
-    ply_cache: dict[str, dict] = {}
+    ply_cache: dict[str, GaussianAsset] = {}
     id_map_cache: dict[str, np.ndarray] = {}
 
-    def _load_ply(path: str) -> dict:
+    def _load_ply(path: str) -> GaussianAsset:
         resolved = _resolve_path(path, config_dir)
         if resolved not in ply_cache:
             print(f"  [assembler] Loading PLY: {resolved}")
-            ply_cache[resolved] = renderer.load_ply(resolved)
+            ply_cache[resolved] = loader.load_ply(resolved)
         return ply_cache[resolved]
 
     def _load_id_map(path: str) -> np.ndarray:
@@ -96,27 +96,27 @@ def assemble_scene(
         # ── Load GS data ──────────────────────────────────────────────
         if isinstance(source, PlySource):
             ply_data = _load_ply(source.ply_path)
-            pos = ply_data["pos"]
-            cov = ply_data["cov3D_precomp"]
-            opacity = ply_data["opacity"]
-            shs = ply_data["shs"]
-            quats = ply_data["quats"]
-            scales = ply_data["scales"]
-            gs_type = ply_data["gs_type"]
+            pos = ply_data.pos
+            cov = ply_data.cov3D_precomp
+            opacity = ply_data.opacity
+            shs = ply_data.shs
+            quats = ply_data.quats
+            scales = ply_data.scales
+            gs_type = ply_data.gs_type
 
         elif isinstance(source, IdMapSource):
             ply_data = _load_ply(source.ply_path)
             id_map = _load_id_map(source.id_map)
             id_mask = torch.from_numpy(id_map == source.object_id).to(
-                device=ply_data["pos"].device,
+                device=ply_data.pos.device,
             )
-            pos = ply_data["pos"][id_mask]
-            cov = ply_data["cov3D_precomp"][id_mask]
-            opacity = ply_data["opacity"][id_mask]
-            shs = ply_data["shs"][id_mask]
-            quats = ply_data["quats"][id_mask]
-            scales = ply_data["scales"][id_mask]
-            gs_type = ply_data["gs_type"]
+            pos = ply_data.pos[id_mask]
+            cov = ply_data.cov3D_precomp[id_mask]
+            opacity = ply_data.opacity[id_mask]
+            shs = ply_data.shs[id_mask]
+            quats = ply_data.quats[id_mask]
+            scales = ply_data.scales[id_mask]
+            gs_type = ply_data.gs_type
 
         else:
             raise ValueError(f"Object '{name}': unsupported source type {type(source)}")

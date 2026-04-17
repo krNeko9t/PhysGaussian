@@ -2,21 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 
 from physics_sim.renderer.backend_base import RasterBackend
 
-if TYPE_CHECKING:
-    from physics_sim.render.camera import SimpleCamera
-
 
 def _cov6_to_mat3(cov6: torch.Tensor) -> torch.Tensor:
-    """Convert (N, 6) upper-triangle covariance to (N, 3, 3) symmetric matrix.
-
-    Input order: ``[c00, c01, c02, c11, c12, c22]``.
-    """
     N = cov6.shape[0]
     mat = torch.zeros((N, 3, 3), device=cov6.device, dtype=cov6.dtype)
     mat[:, 0, 0] = cov6[:, 0]
@@ -32,11 +23,9 @@ def _cov6_to_mat3(cov6: torch.Tensor) -> torch.Tensor:
 
 
 class GsplatBackend(RasterBackend):
-    """Wraps ``gsplat.rendering.rasterization`` for 3DGS and 2DGS."""
-
     def render(
         self,
-        camera: SimpleCamera,
+        camera,
         means: torch.Tensor,
         colors: torch.Tensor,
         opacities: torch.Tensor,
@@ -47,18 +36,14 @@ class GsplatBackend(RasterBackend):
         scales: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict]:
         if quats is not None and scales is not None:
-            return self._render_2dgs(camera, means, quats, scales,
-                                     colors, opacities, bg_color)
+            return self._render_2dgs(camera, means, quats, scales, colors, opacities, bg_color)
         if cov6 is not None:
-            return self._render_3dgs(camera, means, cov6,
-                                     colors, opacities, bg_color)
+            return self._render_3dgs(camera, means, cov6, colors, opacities, bg_color)
         raise ValueError("GsplatBackend.render requires either cov6 or quats+scales.")
-
-    # ── 3DGS path (covars mode) ──────────────────────────────────────
 
     def _render_3dgs(
         self,
-        camera: SimpleCamera,
+        camera,
         means: torch.Tensor,
         cov6: torch.Tensor,
         colors: torch.Tensor,
@@ -88,16 +73,13 @@ class GsplatBackend(RasterBackend):
             backgrounds=bg_color,
             sh_degree=None,
         )
-
         rendered = render_colors[0].permute(2, 0, 1)
         meta["render_alphas"] = render_alphas
         return rendered, meta
 
-    # ── 2DGS path (quats + scales mode) ──────────────────────────────
-
     def _render_2dgs(
         self,
-        camera: SimpleCamera,
+        camera,
         means: torch.Tensor,
         quats: torch.Tensor,
         scales: torch.Tensor,
@@ -116,7 +98,15 @@ class GsplatBackend(RasterBackend):
         colors = colors.unsqueeze(0)
         bg_color = bg_color.unsqueeze(0)
 
-        (render_colors, render_alphas, _render_normals, _normals_from_depth, render_distort, _render_median, meta) = rasterization_2dgs(
+        (
+            render_colors,
+            render_alphas,
+            _render_normals,
+            _normals_from_depth,
+            render_distort,
+            _render_median,
+            meta,
+        ) = rasterization_2dgs(
             means=means,
             quats=quats,
             scales=scales,
@@ -130,7 +120,6 @@ class GsplatBackend(RasterBackend):
             far_plane=camera.zfar,
             backgrounds=bg_color,
         )
-
         rendered = render_colors[0].permute(2, 0, 1)
         meta["render_alphas"] = render_alphas
         return rendered, meta

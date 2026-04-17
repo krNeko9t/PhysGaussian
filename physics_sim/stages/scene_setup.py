@@ -15,7 +15,7 @@ import torch
 
 from physics_sim.config.models import SimConfig
 from physics_sim.coord import SourceAxes
-from physics_sim.renderer.gs_renderer import GaussianRenderer
+from physics_sim.render.interfaces import SceneAssetLoader
 from physics_sim.scene import SceneObject, assemble_scene
 
 
@@ -77,7 +77,7 @@ def _build_per_object_info(sim_objects: list[SceneObject]) -> list[dict]:
 
 def setup_scene(
     cfg: SimConfig,
-    renderer: GaussianRenderer,
+    loader: SceneAssetLoader,
     config_dir: str = "",
     device: str = "cuda:0",
     sh_degree: int = 3,
@@ -92,7 +92,7 @@ def setup_scene(
         cfg.preprocess.source_up, cfg.preprocess.source_front,
     )
 
-    objects = assemble_scene(cfg, renderer, config_dir=config_dir)
+    objects = assemble_scene(cfg, loader, config_dir=config_dir)
 
     sim_objects = [o for o in objects if o.role == "dynamic"]
     static_objects = [o for o in objects if o.role == "render_only"]

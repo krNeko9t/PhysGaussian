@@ -13,16 +13,8 @@ of type :class:`~physics_sim.config.models.SimConfig`.
 from __future__ import annotations
 
 import argparse
-import os
 
-from physics_sim.config.loader import load_config
-from physics_sim.renderer.gs_renderer import GaussianRenderer
-from physics_sim.stages.runtime import init_runtime
-from physics_sim.stages.scene_setup import setup_scene
-from physics_sim.stages.backend_init import init_backend
-from physics_sim.stages.camera_setup import setup_camera
-from physics_sim.stages.sim_loop import RenderArgs, run_headless, run_with_rendering
-from physics_sim.stages.video import compile_video
+from physics_sim.pipeline_orchestrator import PipelineOrchestrator, PipelineRequest
 
 
 def main():
@@ -46,44 +38,15 @@ def main():
     )
     raw = parser.parse_args()
 
-    assert os.path.exists(raw.config), f"Config not found: {raw.config}"
-
-    print("Loading config...")
-    cfg = load_config(raw.config)
-    config_dir = os.path.dirname(os.path.abspath(raw.config))
-    os.makedirs(cfg.output, exist_ok=True)
-
-    init_runtime(cfg.backend.type)
-
-    raster_be = "gsplat" if raw.no_render else raw.raster_backend
-    renderer = GaussianRenderer(
+    req = PipelineRequest(
+        config_path=raw.config,
+        white_bg=raw.white_bg,
+        compile_video=raw.compile_video,
+        no_render=raw.no_render,
         sh_degree=raw.sh_degree,
-        raster_backend=raster_be,
+        raster_backend=raw.raster_backend,
     )
-
-    scene_data = setup_scene(
-        cfg, renderer,
-        config_dir=config_dir,
-        sh_degree=raw.sh_degree,
-    )
-
-    backend = init_backend(cfg, scene_data)
-
-    if raw.no_render:
-        run_headless(cfg, backend, scene_data)
-    else:
-        camera_state = setup_camera(cfg, scene_data, config_dir=config_dir)
-        render_args = RenderArgs(
-            white_bg=raw.white_bg,
-            sh_degree=raw.sh_degree,
-            raster_backend=raw.raster_backend,
-        )
-        run_with_rendering(
-            cfg, backend, scene_data, camera_state,
-            renderer, render_args,
-        )
-        if raw.compile_video:
-            compile_video(cfg.output, cfg.time.frame_dt, cfg.time.frame_num)
+    PipelineOrchestrator(req).run()
 
 
 if __name__ == "__main__":

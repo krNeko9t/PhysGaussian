@@ -22,10 +22,11 @@ import torch
 from tqdm import tqdm
 
 from physics_sim.config.models import SimConfig
+from physics_sim.render.interfaces import RenderRuntime
+from physics_sim.render.registries import resolve_camera_for_mode
 
 if TYPE_CHECKING:
     from physics_sim.backend.base import PhysicsBackend
-    from physics_sim.renderer.gs_renderer import GaussianRenderer
     from physics_sim.stages.camera_setup import CameraState
     from physics_sim.stages.scene_setup import SceneData
 
@@ -75,7 +76,7 @@ def run_with_rendering(
     backend: PhysicsBackend,
     scene_data: SceneData,
     camera_state: CameraState,
-    renderer: GaussianRenderer,
+    render_runtime: RenderRuntime,
     render_args: RenderArgs,
     device: str = "cuda:0",
 ) -> None:
@@ -126,27 +127,16 @@ def run_with_rendering(
     width: Optional[int] = None
 
     for frame in tqdm(range(frame_num), desc="Simulating"):
-        # Build camera for this frame
-        if camera_mode == "json":
-            camera = renderer.build_camera_from_json(
-                cameras_json,
-                camera_state.camera_params,
-                center_view_world_space=camera_state.viewpoint_center_worldspace,
-                observant_coordinates=camera_state.observant_coordinates,
-                current_frame=frame,
-                source_axes=source_axes,
-            )
-        elif camera_mode == "orbit":
-            camera = renderer.build_camera_orbit(
-                camera_params=camera_state.camera_params,
-                center_view_world_space=camera_state.viewpoint_center_worldspace,
-                observant_coordinates=camera_state.observant_coordinates,
-                current_frame=frame,
-            )
-        else:
-            camera = renderer.build_camera_fixed(
-                camera_params=camera_state.camera_params,
-            )
+        camera = resolve_camera_for_mode(
+            camera_mode,
+            camera_builder=render_runtime,
+            cameras_json=cameras_json,
+            camera_params=camera_state.camera_params,
+            center_view_world_space=camera_state.viewpoint_center_worldspace,
+            observant_coordinates=camera_state.observant_coordinates,
+            current_frame=frame,
+            source_axes=source_axes,
+        )
 
         # Physics substeps
         for _ in range(step_per_frame):
@@ -211,12 +201,12 @@ def run_with_rendering(
                 )
 
         # SH -> RGB (alignment_inv transforms view dirs to PLY-native space)
-        colors_precomp = renderer.convert_sh(
+        colors_precomp = render_runtime.convert_sh(
             cur_shs, camera, pos, rot,
             alignment_inv=alignment_inv,
         )
         if scene_data.gs_type == "2dgs" and render_quats is not None:
-            rendering, _ = renderer.render(
+            rendering, _ = render_runtime.render(
                 camera=camera,
                 means=pos,
                 colors=colors_precomp,
@@ -226,7 +216,7 @@ def run_with_rendering(
                 scales=render_scales,
             )
         else:
-            rendering, _ = renderer.render(
+            rendering, _ = render_runtime.render(
                 camera=camera,
                 means=pos,
                 colors=colors_precomp,

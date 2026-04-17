@@ -3,25 +3,19 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
 import torch
 
 from physics_sim.renderer.backend_base import RasterBackend
 
-if TYPE_CHECKING:
-    from physics_sim.render.camera import SimpleCamera
-
 
 class DiffRastBackend(RasterBackend):
-    """Wraps the original ``diff_gaussian_rasterization`` CUDA extension."""
-
     def __init__(self, sh_degree: int = 3):
         self.sh_degree = sh_degree
 
     def render(
         self,
-        camera: SimpleCamera,
+        camera,
         means: torch.Tensor,
         colors: torch.Tensor,
         opacities: torch.Tensor,
@@ -33,7 +27,7 @@ class DiffRastBackend(RasterBackend):
     ) -> tuple[torch.Tensor, dict]:
         if cov6 is None:
             raise ValueError(
-                "DiffRastBackend requires cov6.  Native 2DGS (quats+scales) "
+                "DiffRastBackend requires cov6. Native 2DGS (quats+scales) "
                 "is not supported — use the gsplat backend instead."
             )
 
@@ -53,7 +47,6 @@ class DiffRastBackend(RasterBackend):
 
         tanfovx = math.tan(camera.FoVx * 0.5)
         tanfovy = math.tan(camera.FoVy * 0.5)
-
         settings = GaussianRasterizationSettings(
             image_height=int(camera.image_height),
             image_width=int(camera.image_width),
@@ -69,7 +62,6 @@ class DiffRastBackend(RasterBackend):
             debug=False,
         )
         rasterizer = GaussianRasterizer(raster_settings=settings)
-
         screen_points = torch.zeros(
             (means.shape[0], 3), device=means.device, requires_grad=False
         )

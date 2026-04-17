@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from physics_sim.renderer.gs_renderer import SimpleCamera
+    from physics_sim.render.camera import SimpleCamera
 
 
 class RasterBackend(ABC):
@@ -64,11 +64,11 @@ def create_raster_backend(name: str, sh_degree: int = 3) -> RasterBackend:
         sh_degree: SH degree forwarded to backends that need it.
     """
     if name == "gsplat":
-        from physics_sim.renderer.backend_gsplat import GsplatBackend
+        from physics_sim.render.rasterizers.gsplat import GsplatBackend
 
         return GsplatBackend()
     if name == "diffrast":
-        from physics_sim.renderer.backend_diffrast import DiffRastBackend
+        from physics_sim.render.rasterizers.diffrast import DiffRastBackend
 
         return DiffRastBackend(sh_degree=sh_degree)
     raise ValueError(f"Unknown raster backend: {name!r}. Choose 'gsplat' or 'diffrast'.")
