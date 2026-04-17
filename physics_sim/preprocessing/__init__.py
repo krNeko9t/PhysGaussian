@@ -1,23 +1,10 @@
 """Preprocessing utilities.
 
 .. note::
-    Coordinate alignment is now handled by :mod:`physics_sim.coord`.
-    The functions here are retained for backward compatibility and for
-    MPM-domain mapping used internally by backends.
+    Coordinate alignment is handled by :mod:`physics_sim.coord`.
+    This package currently exposes optional Taichi-based particle filling
+    for MPM-style pipelines.
 """
-
-from physics_sim.preprocessing.transform import (
-    transform2origin,
-    undotransform2origin,
-    shift2center111,
-    undoshift2center111,
-    generate_rotation_matrices,
-    apply_rotations,
-    apply_inverse_rotations,
-    apply_cov_rotations,
-    apply_inverse_cov_rotations,
-    undo_all_transforms,
-)
 
 # Particle filling depends on Taichi; make it an optional import so users can
 # still run render-only or rigid-only pipelines without installing Taichi.

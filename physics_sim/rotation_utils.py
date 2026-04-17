@@ -5,8 +5,8 @@ Unified rotation / quaternion utilities.
 (w, x, y, z)** order, matching the 3DGS PLY format.
 
 This module consolidates quaternion math that was previously scattered
-across ``preprocessing/quaternions.py``, ``renderer/gs_renderer.py``,
-and experiment scripts.  Taichi kernels may keep their own ``@ti.func``
+across ad-hoc helpers, ``renderer/gs_renderer.py``, and experiment
+scripts.  Taichi kernels may keep their own ``@ti.func``
 copies for GPU execution, but must mirror the logic here.
 """
 
