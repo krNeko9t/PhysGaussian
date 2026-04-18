@@ -16,6 +16,11 @@ import newton
 from newton.solvers import SolverImplicitMPM
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
+from physics_sim.coord import (
+    E_GRAVITY_MISSING,
+    gravity_contract_error,
+    normalize_internal_gravity,
+)
 from physics_sim.backend.newton_mpm.kernels import (
     compute_cov_from_F,
     compute_R_from_F,
@@ -282,10 +287,21 @@ class NewtonMPMBackend(PhysicsBackend):
         assert self._volumes is not None
 
         # ── Gravity ──────────────────────────────────────────────────
-        g = material_params.get("g", [0.0, 0.0, -9.8])
-        if isinstance(g, (int, float)):
-            g = [0.0, 0.0, -abs(g)]
-        model.set_gravity(tuple(g))
+        if "g" not in material_params:
+            raise gravity_contract_error(
+                E_GRAVITY_MISSING,
+                backend="newton_mpm",
+                config_path="material.g",
+                detail="_apply_material_to_model() missing required gravity vector",
+                suggestion="pass g as [0, -|g|, 0], usually from backend_init._resolve_gravity",
+            )
+        g = normalize_internal_gravity(
+            material_params.get("g"),
+            backend="newton_mpm",
+            config_path="material.g",
+            allow_scalar=False,
+        )
+        model.set_gravity(g)
 
         # ── Material preset ──────────────────────────────────────────
         mat_name = material_params.get("material", "jelly")

@@ -38,6 +38,11 @@ import newton
 from newton.solvers import SolverVBD
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
+from physics_sim.coord import (
+    E_GRAVITY_MISSING,
+    gravity_contract_error,
+    normalize_internal_gravity,
+)
 
 # Geometry helpers
 from physics_sim.geometry.convex_hull import compute_convex_hull
@@ -364,7 +369,7 @@ class NewtonVBDBackend(PhysicsBackend):
         self._init_covariances: Optional[torch.Tensor] = None
 
         # Config
-        self._gravity = (0.0, 0.0, -9.8)
+        self._gravity: tuple[float, float, float] | None = None
         self._solver_iterations = 10
         self._collision_geo = "convex_hull"  # for rigid bodies
         self._alpha = None
@@ -481,10 +486,20 @@ class NewtonVBDBackend(PhysicsBackend):
         assert builder is not None
 
         # Gravity
-        g = material_params.get("g", [0.0, 0.0, -9.8])
-        if isinstance(g, (int, float)):
-            g = [0.0, 0.0, -abs(float(g))]
-        self._gravity = tuple(g)
+        if "g" not in material_params:
+            raise gravity_contract_error(
+                E_GRAVITY_MISSING,
+                backend="newton_vbd",
+                config_path="material.g",
+                detail="set_material() missing required gravity vector",
+                suggestion="pass g as [0, -|g|, 0], usually from backend_init._resolve_gravity",
+            )
+        self._gravity = normalize_internal_gravity(
+            material_params.get("g"),
+            backend="newton_vbd",
+            config_path="material.g",
+            allow_scalar=False,
+        )
 
         # Solver options
         solver_opts = material_params.get("newton_solver_opts", {})

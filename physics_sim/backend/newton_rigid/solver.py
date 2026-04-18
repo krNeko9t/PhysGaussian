@@ -29,6 +29,11 @@ import newton
 from newton.solvers import SolverXPBD
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
+from physics_sim.coord import (
+    E_GRAVITY_MISSING,
+    gravity_contract_error,
+    normalize_internal_gravity,
+)
 from physics_sim.geometry.convex_hull import compute_convex_hull
 from physics_sim.geometry.primitives import fit_obb, fit_ellipsoid
 
@@ -197,7 +202,7 @@ class NewtonRigidBackend(PhysicsBackend):
         self._last_valid_body_q: Optional[np.ndarray] = None
 
         # Deferred configuration
-        self._gravity: tuple = (0.0, 0.0, -9.8)
+        self._gravity: tuple[float, float, float] | None = None
         self._solver_iterations: int = 10
 
         # Recorded plane equations for diagnostics: list of (normal_3, d)
@@ -286,10 +291,20 @@ class NewtonRigidBackend(PhysicsBackend):
         assert builder is not None, "initialize() must be called first"
 
         # ── Gravity ─────────────────────────────────────────────────
-        g = material_params.get("g", [0.0, 0.0, -9.8])
-        if isinstance(g, (int, float)):
-            g = [0.0, 0.0, -abs(float(g))]
-        self._gravity = tuple(g)
+        if "g" not in material_params:
+            raise gravity_contract_error(
+                E_GRAVITY_MISSING,
+                backend="newton_rigid",
+                config_path="material.g",
+                detail="set_material() missing required gravity vector",
+                suggestion="pass g as [0, -|g|, 0], usually from backend_init._resolve_gravity",
+            )
+        self._gravity = normalize_internal_gravity(
+            material_params.get("g"),
+            backend="newton_rigid",
+            config_path="material.g",
+            allow_scalar=False,
+        )
 
         # ── Solver options ──────────────────────────────────────────
         solver_opts = material_params.get("newton_solver_opts", {})

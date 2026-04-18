@@ -9,12 +9,13 @@ Gravity
 -------
 Direction is always ``[0, -g_magnitude, 0]`` in internal Y-up space.
 The user only specifies ``g_magnitude`` (default 9.8) in the material
-dict.  Legacy ``g=[x,y,z]`` vectors are accepted with a warning.
+dict. ``g`` is still accepted for compatibility:
+- scalar ``g`` is normalized to ``[0, -|g|, 0]`` with context log;
+- vector ``g`` must already satisfy the internal Y-up contract.
 """
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -23,10 +24,13 @@ import torch
 from physics_sim.backend.registry import create_backend, resolve_material
 from physics_sim.config.models import SimConfig
 from physics_sim.coord import (
+    E_GRAVITY_SHAPE,
     SourceAxes,
     align_directions,
     align_positions,
+    gravity_contract_error,
     gravity_vector,
+    normalize_internal_gravity,
 )
 from physics_sim.geometry.plane_fit import fit_plane_svd
 
@@ -38,32 +42,61 @@ if TYPE_CHECKING:
 def _resolve_gravity(per_object_info: list[dict]) -> list[float]:
     """Determine gravity vector in internal Y-up coordinates.
 
-    Reads ``g_magnitude`` from the first object's material (default 9.8).
-    Legacy ``g=[x,y,z]`` vectors are accepted but emit a deprecation
-    warning; only the magnitude is used, direction is always -Y.
+    Contract:
+    - ``g_magnitude``: scalar magnitude, direction fixed to -Y.
+    - ``g`` scalar: accepted and normalized to ``[0, -|g|, 0]`` with context log.
+    - ``g`` vector: must already satisfy internal Y-up ``[0, -|g|, 0]``.
     """
-    magnitude = 9.8
-    for info in per_object_info:
+    default_magnitude = 9.8
+    for idx, info in enumerate(per_object_info):
         mat = info.get("material", {})
-        if "g_magnitude" in mat:
-            magnitude = float(mat["g_magnitude"])
-            break
-        if "g" in mat:
-            g_vec = mat["g"]
-            if isinstance(g_vec, (list, tuple)):
-                magnitude = float(np.linalg.norm(g_vec))
-                warnings.warn(
-                    f"material['g'] = {g_vec} is deprecated. "
-                    f"Use material['g_magnitude'] = {magnitude:.4f} instead. "
-                    f"Gravity direction is always -Y in internal coordinates.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-            else:
-                magnitude = abs(float(g_vec))
-            break
+        material_name = info.get("name", f"per_object[{idx}]")
+        cfg_path = f"per_object[{idx}].material.g"
 
-    return gravity_vector(magnitude, device="cpu").tolist()
+        if "g_magnitude" in mat:
+            try:
+                magnitude = abs(float(mat["g_magnitude"]))
+            except (TypeError, ValueError) as exc:
+                raise gravity_contract_error(
+                    E_GRAVITY_SHAPE,
+                    backend="backend_init",
+                    config_path=f"per_object[{idx}].material.g_magnitude",
+                    material_name=material_name,
+                    raw_g=mat.get("g_magnitude"),
+                    detail="g_magnitude must be a numeric scalar",
+                    suggestion="set g_magnitude to a finite number, e.g. 9.8",
+                ) from exc
+            if not np.isfinite(magnitude):
+                raise gravity_contract_error(
+                    E_GRAVITY_SHAPE,
+                    backend="backend_init",
+                    config_path=f"per_object[{idx}].material.g_magnitude",
+                    material_name=material_name,
+                    raw_g=mat.get("g_magnitude"),
+                    detail="g_magnitude must be finite",
+                    suggestion="set g_magnitude to a finite number, e.g. 9.8",
+                )
+            return gravity_vector(magnitude, device="cpu").tolist()
+
+        if "g" in mat:
+            raw_g = mat.get("g")
+            resolved_g = normalize_internal_gravity(
+                raw_g,
+                backend="backend_init",
+                config_path=cfg_path,
+                allow_scalar=True,
+                material_name=material_name,
+            )
+            if isinstance(raw_g, (int, float)):
+                print(
+                    "[Gravity][backend=backend_init]"
+                    f"[material={material_name}]"
+                    f"[config_path={cfg_path}]"
+                    f" scalar_g={raw_g!r} resolved_g={list(resolved_g)}"
+                )
+            return list(resolved_g)
+
+    return gravity_vector(default_magnitude, device="cpu").tolist()
 
 
 def _resolve_collider_bc(
@@ -186,8 +219,8 @@ def init_backend(
             resolved_info.append(resolved)
         material_params["per_object"] = resolved_info
 
-    # Gravity: always -Y in internal Y-up space; magnitude from config
-    material_params.setdefault("g", _resolve_gravity(scene_data.per_object_info))
+    # Gravity: always -Y in internal Y-up space; resolved once at stage boundary.
+    material_params["g"] = _resolve_gravity(scene_data.per_object_info)
 
     backend.set_material(material_params)
 
