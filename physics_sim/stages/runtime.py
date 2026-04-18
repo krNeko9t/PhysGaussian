@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from physics_sim.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
+
 
 def init_runtime(backend_type: str) -> None:
     """Initialize warp (and optionally taichi) for physics backends."""
@@ -25,4 +29,6 @@ def init_runtime(backend_type: str) -> None:
         import taichi as ti  # type: ignore
         ti.init(arch=ti.cuda, device_memory_GB=8.0)
     except ModuleNotFoundError:
-        pass
+        LOGGER.warning(
+            "Taichi is not installed; continuing without taichi runtime support."
+        )

@@ -142,7 +142,11 @@ class CameraFactory:
         current_frame: int = 0,
         source_axes=None,
     ) -> SimpleCamera:
-        from physics_sim.coord import SourceAxes as _SA, align_camera_w2c_rotation, align_camera_position
+        from physics_sim.coord import SourceAxes as _SA, alignment_matrix_np
+        from physics_sim.coord_camera import (
+            align_camera_position,
+            align_camera_w2c_rotation,
+        )
 
         with open(cameras_json_path) as f:
             data = json.load(f)
@@ -161,18 +165,21 @@ class CameraFactory:
             r, a, e = get_current_radius_azimuth_and_elevation(
                 data[default_idx]["position"], center_view_world_space, observant_coordinates
             )
-            print(f"Default camera {default_idx} has azimuth={a}, elevation={e}, radius={r}")
-            print("Now exit program and set your own input!")
-            raise SystemExit(0)
+            raise RuntimeError(
+                "camera.show_hint requested. "
+                f"default_camera_index={default_idx}, azimuth={a}, elevation={e}, radius={r}. "
+                "Please update camera parameters and rerun."
+            )
 
         if default_idx > -1:
             raw_camera = dict(data[default_idx])
             if need_align:
+                A_np = alignment_matrix_np(source_axes)
                 raw_camera["rotation"] = align_camera_w2c_rotation(
-                    np.array(raw_camera["rotation"]), source_axes
+                    np.array(raw_camera["rotation"]), A_np
                 ).tolist()
                 raw_camera["position"] = align_camera_position(
-                    np.array(raw_camera["position"]), source_axes
+                    np.array(raw_camera["position"]), A_np
                 ).tolist()
         else:
             raw_camera = dict(data[0])

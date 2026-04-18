@@ -22,8 +22,11 @@ import torch
 from tqdm import tqdm
 
 from physics_sim.config.models import SimConfig
+from physics_sim.logging_utils import get_logger
 from physics_sim.render.interfaces import RenderRuntime
 from physics_sim.render.registries import resolve_camera_for_mode
+
+LOGGER = get_logger(__name__)
 
 if TYPE_CHECKING:
     from physics_sim.backend.base import PhysicsBackend
@@ -53,7 +56,7 @@ def run_headless(
     substep_dt = tc.substep_dt
     step_per_frame = int(tc.frame_dt / substep_dt)
 
-    print("Running simulation (no rendering)...")
+    LOGGER.info("Running simulation (no rendering)...")
     for frame in tqdm(range(tc.frame_num), desc="Simulating"):
         for _ in range(step_per_frame):
             backend.step(substep_dt, frame)
@@ -71,7 +74,7 @@ def run_headless(
         covariances=cov3D.detach().cpu().numpy(),
         rotations=rot.detach().cpu().numpy(),
     )
-    print(f"Saved final state to {out_path}")
+    LOGGER.info("Saved final state to %s", out_path)
 
 
 def run_with_rendering(
@@ -95,10 +98,13 @@ def run_with_rendering(
     camera_mode = cam_cfg.camera_mode
     cameras_json = cam_cfg.cameras_json
 
-    print("Running simulation and rendering...")
-    print(
-        f"  substep_dt={substep_dt:.2e}  frame_dt={frame_dt:.2e}  "
-        f"steps/frame={step_per_frame}  frames={frame_num}"
+    LOGGER.info("Running simulation and rendering...")
+    LOGGER.info(
+        "substep_dt=%.2e frame_dt=%.2e steps/frame=%s frames=%s",
+        substep_dt,
+        frame_dt,
+        step_per_frame,
+        frame_num,
     )
 
     # Clean up stale frame PNGs
@@ -109,7 +115,7 @@ def run_with_rendering(
         }
         to_remove = [p for p in stale if p not in expected]
         if to_remove:
-            print(f"  Removing {len(to_remove)} stale frame PNG(s)")
+            LOGGER.info("Removing stale frame PNGs: %s", len(to_remove))
             for p in to_remove:
                 os.remove(p)
 
@@ -160,11 +166,18 @@ def run_with_rendering(
                 dist_str = "  ".join(
                     f"plane{pi}={sd:+.4f}" for pi, sd in pdists
                 )
-                print(
-                    f"  [DIAG] Frame {frame} {bd['name']}: "
-                    f"pos=[{p[0]:.4f},{p[1]:.4f},{p[2]:.4f}] "
-                    f"vel=[{v[0]:.4f},{v[1]:.4f},{v[2]:.4f}] "
-                    f"{dist_str}{nan_flag}"
+                LOGGER.info(
+                    "[DIAG] frame=%s name=%s pos=[%.4f,%.4f,%.4f] vel=[%.4f,%.4f,%.4f] %s%s",
+                    frame,
+                    bd["name"],
+                    p[0],
+                    p[1],
+                    p[2],
+                    v[0],
+                    v[1],
+                    v[2],
+                    dist_str,
+                    nan_flag,
                 )
 
         # Sanitize bad particles
@@ -174,12 +187,10 @@ def run_with_rendering(
         if bad_mask.any():
             n_nan = int(nan_mask.sum().item())
             n_ext = int((extreme_mask & ~nan_mask).sum().item())
-            print(
-                f"[WARNING] Frame {frame}: "
-                f"{n_nan} NaN/Inf + {n_ext} extreme particles"
+            raise RuntimeError(
+                "Simulation diverged with invalid particles: "
+                f"frame={frame}, nan_or_inf={n_nan}, extreme={n_ext}"
             )
-            pos[bad_mask] = 0.0
-            cov3D[bad_mask] = 0.0
 
         # 2DGS quats/scales — already in Y-up, no inverse needed
         render_quats = render_scales = None
@@ -238,4 +249,4 @@ def run_with_rendering(
             255 * cv2_img,
         )
 
-    print("Done!")
+    LOGGER.info("Rendering loop finished.")

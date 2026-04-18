@@ -38,108 +38,17 @@ import newton
 from newton.solvers import SolverVBD
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
+from physics_sim.backend.newton_vbd.barycentric import compute_barycentric
+from physics_sim.backend.newton_vbd.rigid_mesh import create_rigid_body
+from physics_sim.backend.newton_vbd.state_export import export_state
 from physics_sim.coord import (
     E_GRAVITY_MISSING,
     gravity_contract_error,
     normalize_internal_gravity,
 )
+from physics_sim.logging_utils import get_logger
 
-# Geometry helpers
-from physics_sim.geometry.convex_hull import compute_convex_hull
-from physics_sim.geometry.primitives import fit_obb, fit_ellipsoid
-
-try:
-    from physics_sim.geometry.alpha_shape import compute_alpha_shape
-    _HAS_ALPHA_SHAPE = True
-except ImportError:
-    _HAS_ALPHA_SHAPE = False
-
-
-# ── Shared helpers (same as newton_rigid) ────────────────────────────
-
-def _rotmat_to_wp_quat(R: np.ndarray) -> tuple[float, float, float, float]:
-    """3×3 rotation matrix → Warp quaternion (x, y, z, w)."""
-    trace = R[0, 0] + R[1, 1] + R[2, 2]
-    if trace > 0:
-        s = 0.5 / np.sqrt(trace + 1.0)
-        w = 0.25 / s
-        x = (R[2, 1] - R[1, 2]) * s
-        y = (R[0, 2] - R[2, 0]) * s
-        z = (R[1, 0] - R[0, 1]) * s
-    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
-        w = (R[2, 1] - R[1, 2]) / s
-        x = 0.25 * s
-        y = (R[0, 1] + R[1, 0]) / s
-        z = (R[0, 2] + R[2, 0]) / s
-    elif R[1, 1] > R[2, 2]:
-        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
-        w = (R[0, 2] - R[2, 0]) / s
-        x = (R[0, 1] + R[1, 0]) / s
-        y = 0.25 * s
-        z = (R[1, 2] + R[2, 1]) / s
-    else:
-        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
-        w = (R[1, 0] - R[0, 1]) / s
-        x = (R[0, 2] + R[2, 0]) / s
-        y = (R[1, 2] + R[2, 1]) / s
-        z = 0.25 * s
-    norm = np.sqrt(x * x + y * y + z * z + w * w)
-    return (x / norm, y / norm, z / norm, w / norm)
-
-
-def _quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
-    """Quaternion (x, y, z, w) → 3×3 rotation matrix."""
-    x, y, z, w = q[0], q[1], q[2], q[3]
-    R = torch.zeros((3, 3), device=q.device, dtype=q.dtype)
-    R[0, 0] = 1 - 2 * (y * y + z * z)
-    R[0, 1] = 2 * (x * y - w * z)
-    R[0, 2] = 2 * (x * z + w * y)
-    R[1, 0] = 2 * (x * y + w * z)
-    R[1, 1] = 1 - 2 * (x * x + z * z)
-    R[1, 2] = 2 * (y * z - w * x)
-    R[2, 0] = 2 * (x * z - w * y)
-    R[2, 1] = 2 * (y * z + w * x)
-    R[2, 2] = 1 - 2 * (x * x + y * y)
-    return R
-
-
-def _compose_body_quat_wxyz(
-    body_quat_xyzw: torch.Tensor,
-    init_quats_wxyz: torch.Tensor,
-) -> torch.Tensor:
-    """Compose a single body quaternion with per-particle initial quaternions.
-
-    ``body_quat_xyzw`` is (4,) in Newton's xyzw convention.
-    ``init_quats_wxyz`` is (N, 4) in 3DGS wxyz convention.
-    Returns (N, 4) in wxyz: ``q_body * q_init``.
-    """
-    bx, by, bz, bw = body_quat_xyzw[0], body_quat_xyzw[1], body_quat_xyzw[2], body_quat_xyzw[3]
-    iw, ix, iy, iz = init_quats_wxyz[:, 0], init_quats_wxyz[:, 1], init_quats_wxyz[:, 2], init_quats_wxyz[:, 3]
-    ow = bw * iw - bx * ix - by * iy - bz * iz
-    ox = bw * ix + bx * iw + by * iz - bz * iy
-    oy = bw * iy - bx * iz + by * iw + bz * ix
-    oz = bw * iz + bx * iy - by * ix + bz * iw
-    out = torch.stack([ow, ox, oy, oz], dim=1)
-    return torch.nn.functional.normalize(out, dim=1)
-
-
-def _unpack_cov6_to_3x3(cov6: torch.Tensor) -> torch.Tensor:
-    """(N, 6) upper-triangle → (N, 3, 3) symmetric matrix."""
-    N = cov6.shape[0]
-    out = torch.zeros((N, 3, 3), device=cov6.device, dtype=cov6.dtype)
-    out[:, 0, 0] = cov6[:, 0]; out[:, 0, 1] = cov6[:, 1]; out[:, 0, 2] = cov6[:, 2]
-    out[:, 1, 0] = cov6[:, 1]; out[:, 1, 1] = cov6[:, 3]; out[:, 1, 2] = cov6[:, 4]
-    out[:, 2, 0] = cov6[:, 2]; out[:, 2, 1] = cov6[:, 4]; out[:, 2, 2] = cov6[:, 5]
-    return out
-
-
-def _pack_cov3x3_to_6(cov3x3: torch.Tensor) -> torch.Tensor:
-    """(N, 3, 3) symmetric matrix → (N, 6) upper-triangle."""
-    out = torch.zeros((cov3x3.shape[0], 6), device=cov3x3.device, dtype=cov3x3.dtype)
-    out[:, 0] = cov3x3[:, 0, 0]; out[:, 1] = cov3x3[:, 0, 1]; out[:, 2] = cov3x3[:, 0, 2]
-    out[:, 3] = cov3x3[:, 1, 1]; out[:, 4] = cov3x3[:, 1, 2]; out[:, 5] = cov3x3[:, 2, 2]
-    return out
+LOGGER = get_logger(__name__)
 
 
 # ── Per-object data structures ───────────────────────────────────────
@@ -166,179 +75,6 @@ class _SoftInfo:
     tet_cells: np.ndarray            # (T, 4)  for computing deformation gradient
     rest_verts: np.ndarray           # (V, 3)  rest-pose tet vertices
     init_cov_6: torch.Tensor         # (N, 6)
-
-
-# ── Embedding: GS particles inside tet mesh ──────────────────────────
-
-# Numerical tolerances for barycentric computation.
-# These are machine-precision-derived values, NOT physics parameters.
-# They should NOT need per-scene tuning.
-
-# Determinant below this → tet is truly singular (flat plane).
-_BARY_DET_SINGULAR = 1e-12
-# Max absolute value of inv(shape_matrix) entries.  Above this the
-# tet is ill-conditioned and barycentric coords are unreliable.
-_BARY_INV_ABS_MAX = 1e6
-# Tolerance for "inside tet" check.  A barycentric coord ≥ -eps is
-# considered non-negative (accounts for floating-point rounding).
-_BARY_INSIDE_EPS = 1e-4
-
-
-def _compute_barycentric(
-    points: np.ndarray,
-    tet_verts: np.ndarray,
-    tet_cells: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, int]:
-    """For each point, find the containing tet and barycentric coords.
-
-    Points outside all tets are assigned to the **nearest** tet (by
-    centroid distance) with clamped barycentric coordinates.
-
-    Args:
-        points:    (P, 3)
-        tet_verts: (V, 3)
-        tet_cells: (T, 4)
-
-    Returns:
-        tet_ids:       (P,) int32   — index of the containing tet
-        bary:          (P, 4) float32 — barycentric coordinates
-        outside_count: int — number of particles that were outside all tets
-    """
-    P = points.shape[0]
-    T = tet_cells.shape[0]
-
-    # Precompute tet inverse matrices  (T, 3, 3)
-    v0 = tet_verts[tet_cells[:, 0]]  # (T, 3)
-    v1 = tet_verts[tet_cells[:, 1]]
-    v2 = tet_verts[tet_cells[:, 2]]
-    v3 = tet_verts[tet_cells[:, 3]]
-
-    # Columns of the matrix: (v0-v3, v1-v3, v2-v3)
-    mat = np.stack([v0 - v3, v1 - v3, v2 - v3], axis=-1)  # (T, 3, 3)
-
-    # Invert each 3×3 matrix; detect degenerate tets.
-    # Near-singular tets (det ≈ 0) produce inv_mat with huge values,
-    # which would give extreme barycentric coords.  We mark them so
-    # they are **skipped** during the candidate search.
-    inv_mat = np.zeros_like(mat)
-    tet_is_degenerate = np.zeros(T, dtype=bool)
-    degenerate_count = 0
-    for t in range(T):
-        det_val = np.linalg.det(mat[t])
-        if abs(det_val) < _BARY_DET_SINGULAR:
-            # Truly singular
-            inv_mat[t] = np.eye(3)
-            tet_is_degenerate[t] = True
-            degenerate_count += 1
-            continue
-        try:
-            inv_t = np.linalg.inv(mat[t])
-        except np.linalg.LinAlgError:
-            inv_t = np.eye(3)
-            tet_is_degenerate[t] = True
-            degenerate_count += 1
-            continue
-        if np.abs(inv_t).max() > _BARY_INV_ABS_MAX:
-            # Near-singular: inv has extreme values
-            inv_mat[t] = np.eye(3)
-            tet_is_degenerate[t] = True
-            degenerate_count += 1
-        else:
-            inv_mat[t] = inv_t
-    if degenerate_count > 0:
-        print(
-            f"[Barycentric] WARNING: {degenerate_count}/{T} degenerate "
-            f"(singular/near-singular) tets detected — will be skipped "
-            f"as candidates!"
-        )
-
-    # Centroids for nearest-tet fallback
-    centroids = (v0 + v1 + v2 + v3) / 4.0  # (T, 3)
-
-    tet_ids = np.zeros(P, dtype=np.int32)
-    bary = np.zeros((P, 4), dtype=np.float32)
-    outside_count = 0
-
-    # Use more candidates for better surface-particle coverage.
-    # Surface particles may sit in tets whose centroids are far inside.
-    N_CAND = min(128, T)
-
-    # Process in batches for memory efficiency
-    BATCH = 4096
-    for start in range(0, P, BATCH):
-        end = min(start + BATCH, P)
-        pts = points[start:end]  # (B, 3)
-        B = pts.shape[0]
-
-        # For each point, find closest N_CAND tets by centroid
-        dists = np.linalg.norm(
-            centroids[None, :, :] - pts[:, None, :], axis=2
-        )  # (B, T)
-        if N_CAND < T:
-            cand_idx = np.argpartition(
-                dists, N_CAND, axis=1
-            )[:, :N_CAND]  # (B, N_CAND)
-        else:
-            cand_idx = np.tile(np.arange(T), (B, 1))  # full search
-
-        for i in range(B):
-            found = False
-            best_tet = -1
-            best_min_bary = -np.inf  # track "least outside" tet
-
-            n_cand = cand_idx.shape[1]
-            for c in range(n_cand):
-                t = cand_idx[i, c]
-                # Skip degenerate tets — their inv_mat is unreliable
-                if tet_is_degenerate[t]:
-                    continue
-                p_local = pts[i] - v3[t]
-                lam = inv_mat[t] @ p_local  # (3,)
-                lam3 = 1.0 - lam[0] - lam[1] - lam[2]
-                min_lam = min(lam[0], lam[1], lam[2], lam3)
-                # Inside tet if all bary coords >= -eps
-                if min_lam >= -_BARY_INSIDE_EPS:
-                    tet_ids[start + i] = t
-                    bary[start + i] = [lam[0], lam[1], lam[2], lam3]
-                    found = True
-                    break
-                # Track the tet where point is "least outside"
-                if min_lam > best_min_bary:
-                    best_min_bary = min_lam
-                    best_tet = t
-
-            if not found:
-                outside_count += 1
-                # Fallback: use the tet where point is least outside
-                t = best_tet
-                if t < 0 or tet_is_degenerate[t]:
-                    # All candidates were degenerate; pick nearest
-                    # non-degenerate tet by centroid distance.
-                    non_degen = np.where(~tet_is_degenerate)[0]
-                    if len(non_degen) > 0:
-                        cd = np.linalg.norm(
-                            centroids[non_degen] - pts[i], axis=1
-                        )
-                        t = non_degen[np.argmin(cd)]
-                    else:
-                        t = 0  # last resort
-                p_local = pts[i] - v3[t]
-                lam = inv_mat[t] @ p_local
-                lam3 = 1.0 - lam[0] - lam[1] - lam[2]
-                # Clamp to [0, 1] and re-normalize
-                raw = np.array(
-                    [lam[0], lam[1], lam[2], lam3], dtype=np.float32
-                )
-                raw = np.maximum(raw, 0.0)
-                s = raw.sum()
-                if s > 0:
-                    raw /= s
-                else:
-                    raw[:] = 0.25
-                tet_ids[start + i] = t
-                bary[start + i] = raw
-
-    return tet_ids, bary, outside_count
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -434,12 +170,12 @@ class NewtonVBDBackend(PhysicsBackend):
         self._sv_clamp_min = float(kwargs.get("sv_clamp_min", 0.1))
         self._sv_clamp_max = float(kwargs.get("sv_clamp_max", 5.0))
         if self._debug_soft_no_deformation:
-            print(
+            LOGGER.info(
                 "[NewtonVBD] DEBUG: soft body deformation gradient DISABLED "
                 "(positions only, no cov/rot update)"
             )
         else:
-            print(
+            LOGGER.info(
                 f"[NewtonVBD] F singular value clamp: "
                 f"[{self._sv_clamp_min}, {self._sv_clamp_max}]"
             )
@@ -476,7 +212,7 @@ class NewtonVBDBackend(PhysicsBackend):
         self._builder = newton.ModelBuilder()
         self._builder.default_shape_cfg.contact_margin = float(contact_margin)
 
-        print(
+        LOGGER.info(
             f"[NewtonVBD] collision_geometry={self._collision_geo}, "
             f"contact_margin={contact_margin}"
         )
@@ -582,7 +318,7 @@ class NewtonVBDBackend(PhysicsBackend):
                            float(normal[2]), float(d)),
                     cfg=plane_cfg,
                 )
-                print(
+                LOGGER.info(
                     f"[NewtonVBD] Plane: normal={normal}, "
                     f"point={point}, mu={mu}"
                 )
@@ -596,7 +332,7 @@ class NewtonVBDBackend(PhysicsBackend):
 
         self._model = builder.finalize(device=self._device)
         self._model.set_gravity(self._gravity)
-        print(f"[NewtonVBD] Gravity: {self._gravity}")
+        LOGGER.info("[NewtonVBD] gravity=%s", self._gravity)
 
         # Soft contact parameters (particle-shape and self-contact)
         self._model.soft_contact_ke = self._soft_contact_ke
@@ -614,12 +350,12 @@ class NewtonVBDBackend(PhysicsBackend):
             particle_self_contact_radius=self._particle_self_contact_radius,
             particle_self_contact_margin=self._particle_self_contact_margin,
         )
-        print(
+        LOGGER.info(
             f"[NewtonVBD] SolverVBD: iterations={self._solver_iterations}, "
             f"self_contact={self._particle_self_contact}"
         )
         if self._particle_self_contact:
-            print(
+            LOGGER.info(
                 f"[NewtonVBD]   self_contact_radius="
                 f"{self._particle_self_contact_radius}, "
                 f"margin={self._particle_self_contact_margin}, "
@@ -659,213 +395,20 @@ class NewtonVBDBackend(PhysicsBackend):
         self._state_0, self._state_1 = self._state_1, self._state_0
 
     def get_state(self) -> SimulationState:
-        positions = torch.zeros(
-            (self._n_particles, 3), device=self._device, dtype=torch.float32
+        state, self._frame_counter = export_state(
+            state_0=self._state_0,
+            rigid_bodies=self._rigid_bodies,
+            soft_bodies=self._soft_bodies,
+            n_particles=self._n_particles,
+            device=self._device,
+            init_quats=self._init_quats,
+            init_scales=self._init_scales,
+            frame_counter=self._frame_counter,
+            debug_soft_no_deformation=self._debug_soft_no_deformation,
+            sv_clamp_min=self._sv_clamp_min,
+            sv_clamp_max=self._sv_clamp_max,
         )
-        covariances = torch.zeros(
-            (self._n_particles, 6), device=self._device, dtype=torch.float32
-        )
-        rotations = torch.zeros(
-            (self._n_particles, 3, 3), device=self._device, dtype=torch.float32
-        )
-
-        has_2dgs = self._init_quats is not None
-        if has_2dgs:
-            out_quats = torch.zeros(
-                (self._n_particles, 4), device=self._device, dtype=torch.float32,
-            )
-            out_scales = torch.zeros(
-                (self._n_particles, self._init_scales.shape[1]),
-                device=self._device, dtype=torch.float32,
-            )
-
-        # ── Rigid bodies ─────────────────────────────────────────────
-        if self._rigid_bodies:
-            body_q = self._state_0.body_q.numpy()  # (n_bodies, 7)
-
-            for body in self._rigid_bodies:
-                t = body_q[body.body_idx]
-                body_pos = torch.tensor(
-                    t[:3], device=self._device, dtype=torch.float32
-                )
-                body_quat = torch.tensor(
-                    t[3:7], device=self._device, dtype=torch.float32
-                )
-                R = _quat_to_rotmat(body_quat)
-
-                idx = body.particle_indices
-                local_pos = body.init_local_pos
-                new_pos = (R @ local_pos.T).T + body_pos
-                positions[idx] = new_pos
-
-                init_cov = body.init_cov_3x3
-                new_cov_3x3 = R @ init_cov @ R.T
-                covariances[idx] = _pack_cov3x3_to_6(new_cov_3x3)
-
-                R_batch = R.unsqueeze(0).expand(len(idx), -1, -1)
-                rotations[idx] = R_batch
-
-                if has_2dgs and body.init_quats is not None:
-                    out_quats[idx] = _compose_body_quat_wxyz(body_quat, body.init_quats)
-                    out_scales[idx] = body.init_scales
-
-        # ── Soft bodies ──────────────────────────────────────────────
-        if self._soft_bodies:
-            particle_q = self._state_0.particle_q.numpy()  # (total_verts, 3)
-            self._frame_counter += 1
-            do_diag = (self._frame_counter <= 3) or (
-                self._frame_counter % 50 == 0
-            )
-
-            for soft in self._soft_bodies:
-                idx = soft.particle_indices
-                N = len(idx)
-
-                # Get current tet vertex positions
-                off = soft.vert_offset
-                cur_verts = particle_q[off:off + soft.vert_count]  # (V, 3)
-
-                # ── Diagnostics (lightweight) ──────────────────────
-                if do_diag:
-                    z_min = cur_verts[:, 2].min()
-                    z_max = cur_verts[:, 2].max()
-                    delta = cur_verts - soft.rest_verts
-                    max_delta = np.abs(delta).max()
-                    mean_dz = delta[:, 2].mean()
-                    nan_v = np.isnan(cur_verts).any()
-                    inf_v = np.isinf(cur_verts).any()
-                    print(
-                        f"[VBD-DIAG] frame={self._frame_counter}: "
-                        f"z=[{z_min:.4f},{z_max:.4f}], "
-                        f"max_delta={max_delta:.6f}, "
-                        f"mean_dz={mean_dz:.6f}, "
-                        f"NaN={nan_v}, Inf={inf_v}"
-                    )
-
-                # Interpolate GS positions from barycentric coords
-                tet_idx = soft.tet_ids       # (N,)
-                bary = soft.bary_coords      # (N, 4)
-                cells = soft.tet_cells       # (T, 4)
-
-                # Gather the 4 tet vertices for each GS particle
-                cell_verts = cells[tet_idx]  # (N, 4) — vertex indices
-                v0 = cur_verts[cell_verts[:, 0]]  # (N, 3)
-                v1 = cur_verts[cell_verts[:, 1]]
-                v2 = cur_verts[cell_verts[:, 2]]
-                v3 = cur_verts[cell_verts[:, 3]]
-
-                # Barycentric interpolation
-                new_pos_np = (
-                    bary[:, 0:1] * v0 +
-                    bary[:, 1:2] * v1 +
-                    bary[:, 2:3] * v2 +
-                    bary[:, 3:4] * v3
-                )
-                positions[idx] = torch.from_numpy(
-                    new_pos_np.astype(np.float32)
-                ).to(self._device)
-
-                # ── Debug mode: skip deformation gradient ──────────
-                if self._debug_soft_no_deformation:
-                    # Keep original covariance & identity rotation
-                    covariances[idx] = soft.init_cov_6.to(self._device)
-                    eye = torch.eye(
-                        3, device=self._device, dtype=torch.float32
-                    )
-                    rotations[idx] = eye.unsqueeze(0).expand(N, -1, -1)
-                    continue
-
-                # ── Compute deformation gradient F per-tet ─────────
-                rest = soft.rest_verts
-                rest_cells = cells[tet_idx]
-                r0 = rest[rest_cells[:, 0]]
-                r1 = rest[rest_cells[:, 1]]
-                r2 = rest[rest_cells[:, 2]]
-                r3 = rest[rest_cells[:, 3]]
-
-                # Rest-pose edge matrix columns: (N, 3, 3)
-                D_rest = np.stack(
-                    [r0 - r3, r1 - r3, r2 - r3], axis=-1
-                )
-                # Current edge matrix
-                D_cur = np.stack(
-                    [v0 - v3, v1 - v3, v2 - v3], axis=-1
-                )
-
-                # F = D_cur @ inv(D_rest), per unique tet
-                F_np = np.zeros((N, 3, 3), dtype=np.float32)
-                unique_tets = np.unique(tet_idx)
-                inv_cache: dict[int, np.ndarray] = {}
-                for ut in unique_tets:
-                    t_cells = cells[ut]
-                    dr = np.stack([
-                        rest[t_cells[0]] - rest[t_cells[3]],
-                        rest[t_cells[1]] - rest[t_cells[3]],
-                        rest[t_cells[2]] - rest[t_cells[3]],
-                    ], axis=-1)
-                    try:
-                        inv_cache[ut] = np.linalg.inv(dr).astype(
-                            np.float32
-                        )
-                    except np.linalg.LinAlgError:
-                        inv_cache[ut] = np.eye(3, dtype=np.float32)
-
-                for i in range(N):
-                    F_np[i] = D_cur[i] @ inv_cache[tet_idx[i]]
-
-                F_t = torch.from_numpy(F_np).to(self._device)
-
-                # ── Clamp F via SVD to prevent extreme deformation ─
-                U, S, Vh = torch.linalg.svd(F_t)
-
-                # Diagnostics
-                if do_diag:
-                    s_min = S.min().item()
-                    s_max = S.max().item()
-                    det_F = torch.det(F_t)
-                    n_inv = (det_F < 0).sum().item()
-                    n_nan = torch.isnan(F_t).any(dim=(1, 2)).sum().item()
-                    print(
-                        f"[VBD-DIAG] frame={self._frame_counter}: "
-                        f"F sv_range=[{s_min:.4f}, {s_max:.4f}], "
-                        f"inverted_tets={n_inv}/{N}, "
-                        f"nan_F={n_nan}"
-                    )
-
-                # Clamp singular values
-                S_clamped = S.clamp(
-                    min=self._sv_clamp_min, max=self._sv_clamp_max
-                )
-
-                # Reconstruct clamped F
-                F_clamped = U @ torch.diag_embed(S_clamped) @ Vh
-
-                # Update covariances: cov' = F_clamped @ cov_init @ F_clamped^T
-                init_cov_6 = soft.init_cov_6.to(self._device)
-                init_cov_3x3 = _unpack_cov6_to_3x3(init_cov_6)
-                new_cov_3x3 = (
-                    F_clamped @ init_cov_3x3 @ F_clamped.transpose(1, 2)
-                )
-                covariances[idx] = _pack_cov3x3_to_6(new_cov_3x3)
-
-                # Extract rotation: R = U @ V^T (from the same SVD)
-                R_batch = U @ Vh
-                # Ensure proper rotation (det > 0)
-                det = torch.det(R_batch)
-                mask = det < 0
-                if mask.any():
-                    U_fix = U[mask].clone()
-                    U_fix[:, :, -1] *= -1
-                    R_batch[mask] = U_fix @ Vh[mask]
-                rotations[idx] = R_batch
-
-        return SimulationState(
-            positions=positions,
-            covariances=covariances,
-            rotations=rotations,
-            quats=out_quats if has_2dgs else None,
-            scales=out_scales if has_2dgs else None,
-        )
+        return state
 
     # ── Rigid body creation ──────────────────────────────────────────
 
@@ -878,166 +421,31 @@ class NewtonVBDBackend(PhysicsBackend):
     ) -> None:
         builder = self._builder
         assert builder is not None
-
-        idx_t = torch.tensor(particle_indices, dtype=torch.long)
-        pos = self._init_positions[idx_t].float()
-        pos_np = pos.detach().cpu().numpy()
-
-        geo = collision_geo or self._collision_geo
-        center = pos.mean(dim=0)
-        center_np = center.detach().cpu().numpy()
-
-        # ── Collision shape ──────────────────────────────────────────
-        if geo in ("obb", "ellipsoid"):
-            self._create_rigid_primitive(
-                geo, pos_np, idx_t, pos, particle_indices,
-                shape_cfg, name,
-            )
-        else:
-            self._create_rigid_mesh(
-                geo, pos_np, idx_t, pos, particle_indices,
-                shape_cfg, name,
-            )
-
-    def _create_rigid_primitive(
-        self, geo, pos_np, idx_t, positions, particle_indices,
-        shape_cfg, name,
-    ):
-        builder = self._builder
-        if geo == "obb":
-            info = fit_obb(pos_np)
-            hx, hy, hz = (float(v) for v in info["half_extents"])
-        else:
-            info = fit_ellipsoid(pos_np)
-
-        center_np = info["center"]
-        axes = info["axes"]
-        R = axes.T
-        quat = _rotmat_to_wp_quat(R)
-
-        body_idx = builder.add_body(
-            xform=wp.transform(
-                p=wp.vec3(*center_np.astype(float)),
-                q=wp.quat(*quat),
-            ),
-            label=name,
-        )
-
-        if geo == "obb":
-            builder.add_shape_box(body_idx, hx=hx, hy=hy, hz=hz, cfg=shape_cfg)
-            desc = f"box({hx:.3f},{hy:.3f},{hz:.3f})"
-        else:
-            sa = info["semi_axes"]
-            a, b, c = (float(v) for v in sa)
-            builder.add_shape_ellipsoid(body_idx, rx=a, ry=b, rz=c, cfg=shape_cfg)
-            desc = f"ellipsoid({a:.3f},{b:.3f},{c:.3f})"
-
-        # Body-local positions
-        R_inv = np.linalg.inv(R).astype(np.float32)
-        local_pos_np = (pos_np - center_np) @ R_inv.T
-        local_pos = torch.from_numpy(local_pos_np).to(self._device)
-        cov6 = self._init_covariances[idx_t]
-        cov_3x3 = _unpack_cov6_to_3x3(cov6)
-
-        iq = self._init_quats[idx_t] if self._init_quats is not None else None
-        isc = self._init_scales[idx_t] if self._init_scales is not None else None
-
-        self._rigid_bodies.append(_RigidInfo(
-            body_idx=body_idx,
+        result = create_rigid_body(
+            builder=builder,
+            init_positions=self._init_positions,
+            init_covariances=self._init_covariances,
+            init_quats=self._init_quats,
+            init_scales=self._init_scales,
+            device=self._device,
             particle_indices=particle_indices,
-            init_local_pos=local_pos,
-            init_cov_3x3=cov_3x3,
-            init_quats=iq,
-            init_scales=isc,
-        ))
-        print(f"[NewtonVBD] Rigid '{name}': {len(particle_indices)} particles, {desc}")
-
-    def _create_rigid_mesh(
-        self, geo, pos_np, idx_t, positions, particle_indices,
-        shape_cfg, name,
-    ):
-        builder = self._builder
-        center = positions.mean(dim=0)
-        center_np = center.detach().cpu().numpy()
-
-        if geo == "alpha_shape" and _HAS_ALPHA_SHAPE:
-            try:
-                mesh_verts, mesh_faces = compute_alpha_shape(
-                    pos_np, alpha=self._alpha,
-                    max_triangles=self._max_triangles,
-                )
-            except Exception as e:
-                print(f"[NewtonVBD] Alpha shape failed for '{name}': {e}")
-                geo = "convex_hull"
-
-        if geo == "convex_hull":
-            try:
-                mesh_verts, mesh_faces = compute_convex_hull(pos_np)
-            except Exception:
-                mesh_verts, mesh_faces = self._bbox_mesh(pos_np)
-
-        local_verts = mesh_verts - center_np
-        collision_mesh = newton.Mesh(
-            local_verts.astype(np.float32),
-            mesh_faces.flatten().astype(np.int32),
+            shape_cfg=shape_cfg,
+            name=name,
+            collision_geo=collision_geo,
+            default_collision_geo=self._collision_geo,
+            alpha=self._alpha,
+            max_triangles=self._max_triangles,
         )
-
-        body_idx = builder.add_body(
-            xform=wp.transform(
-                p=wp.vec3(*center_np.astype(float)),
-                q=wp.quat_identity(),
-            ),
-            label=name,
+        self._rigid_bodies.append(
+            _RigidInfo(
+                body_idx=result.body_idx,
+                particle_indices=particle_indices,
+                init_local_pos=result.init_local_pos,
+                init_cov_3x3=result.init_cov_3x3,
+                init_quats=result.init_quats,
+                init_scales=result.init_scales,
+            )
         )
-        builder.add_shape_mesh(body_idx, mesh=collision_mesh, cfg=shape_cfg)
-
-        local_pos = (positions - center).to(self._device)
-        cov6 = self._init_covariances[idx_t]
-        cov_3x3 = _unpack_cov6_to_3x3(cov6)
-
-        iq = self._init_quats[idx_t] if self._init_quats is not None else None
-        isc = self._init_scales[idx_t] if self._init_scales is not None else None
-
-        self._rigid_bodies.append(_RigidInfo(
-            body_idx=body_idx,
-            particle_indices=particle_indices,
-            init_local_pos=local_pos,
-            init_cov_3x3=cov_3x3,
-            init_quats=iq,
-            init_scales=isc,
-        ))
-        print(
-            f"[NewtonVBD] Rigid '{name}': {len(particle_indices)} particles, "
-            f"mesh({geo})={mesh_verts.shape[0]}v/{mesh_faces.shape[0]}f"
-        )
-
-    @staticmethod
-    def _bbox_mesh(positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Fallback: axis-aligned bounding box mesh with correct normals."""
-        lo = positions.min(axis=0)
-        hi = positions.max(axis=0)
-        extent = np.maximum(hi - lo, 1e-3)
-        lo -= 0.01 * extent
-        hi += 0.01 * extent
-        verts = np.array([
-            [lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]],
-            [hi[0], hi[1], lo[2]], [lo[0], hi[1], lo[2]],
-            [lo[0], lo[1], hi[2]], [hi[0], lo[1], hi[2]],
-            [hi[0], hi[1], hi[2]], [lo[0], hi[1], hi[2]],
-        ], dtype=np.float32)
-        faces = np.array([
-            [0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7],
-            [0, 1, 5], [0, 5, 4], [2, 3, 7], [2, 7, 6],
-            [0, 4, 7], [0, 7, 3], [1, 2, 6], [1, 6, 5],
-        ], dtype=np.int32)
-        center = (lo + hi) / 2.0
-        for i in range(faces.shape[0]):
-            v0, v1, v2 = verts[faces[i]]
-            fn = np.cross(v1 - v0, v2 - v0)
-            fc = (v0 + v1 + v2) / 3.0
-            if np.dot(fn, fc - center) < 0:
-                faces[i, 1], faces[i, 2] = faces[i, 2], faces[i, 1]
-        return verts, faces
 
     # ── Soft body creation ───────────────────────────────────────────
 
@@ -1181,22 +589,22 @@ class NewtonVBDBackend(PhysicsBackend):
         tet_cells = np.array(tet_list, dtype=np.int32)
 
         # ── Embed GS particles in tet grid ─────────────────────────────
-        print(
+        LOGGER.info(
             f"[NewtonVBD] Embedding {len(particle_indices)} GS particles "
             f"in {tet_cells.shape[0]} tets..."
         )
-        tet_ids, bary, outside_count = _compute_barycentric(
+        tet_ids, bary, outside_count = compute_barycentric(
             pos_np, grid_verts, tet_cells
         )
 
         if outside_count > 0:
             pct = 100.0 * outside_count / len(particle_indices)
-            print(
+            LOGGER.warning(
                 f"[NewtonVBD] WARNING: {outside_count}/{len(particle_indices)} "
                 f"({pct:.1f}%) GS particles outside grid → clamped"
             )
         else:
-            print(
+            LOGGER.info(
                 f"[NewtonVBD] All {len(particle_indices)} particles "
                 f"inside grid"
             )
@@ -1213,7 +621,7 @@ class NewtonVBDBackend(PhysicsBackend):
             rest_verts=grid_verts.copy(),
             init_cov_6=cov6,
         ))
-        print(
+        LOGGER.info(
             f"[NewtonVBD] Soft '{name}': {len(particle_indices)} GS particles, "
             f"grid {dim_x}x{dim_y}x{dim_z} = {vert_count} verts, "
             f"{tet_cells.shape[0]} tets, "

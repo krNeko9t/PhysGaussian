@@ -56,7 +56,7 @@ def test_solver_files_enforce_contract_without_z_up_defaults():
     solver_paths = (
         "physics_sim/backend/newton_rigid/solver.py",
         "physics_sim/backend/newton_vbd/solver.py",
-        "physics_sim/backend/newton_mpm/solver.py",
+        "physics_sim/backend/newton_mpm/materials.py",
     )
     for rel_path in solver_paths:
         src = (REPO_ROOT / rel_path).read_text(encoding="utf-8")

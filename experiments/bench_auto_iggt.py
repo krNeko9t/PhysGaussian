@@ -17,13 +17,13 @@ config = SimConfig(
         n_grid=200,
         collision_geometry="convex_hull",
         use_sdf=True,
-        solver_iterations=1200,
+        solver_iterations=20,
         contact_relaxation=0.5,
     ),
     time=TimeConfig(
         substep_dt=0.0001,
         frame_dt=0.01,
-        frame_num=20,
+        frame_num=1,
     ),
     preprocess=PreprocessConfig(
         opacity_threshold=0.1,
