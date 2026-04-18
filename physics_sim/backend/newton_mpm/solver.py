@@ -332,10 +332,6 @@ class NewtonMPMBackend(PhysicsBackend):
         inv_mass_wp = wp.from_numpy(inv_mass_np, dtype=float, device=self._device)
         wp.copy(inv_mass_wp, model.particle_inv_mass)
 
-        # Additional material params for sub-regions (cuboid material overrides)
-        if "additional_material_params" in material_params:
-            self._apply_additional_materials(material_params["additional_material_params"])
-
         # Per-object material overrides (multi-object mode)
         if "per_object" in material_params:
             self._apply_per_object_materials(material_params["per_object"])
@@ -419,34 +415,6 @@ class NewtonMPMBackend(PhysicsBackend):
                 f"friction={friction}, "
                 f"density={mat.get('density','(base)')}"
             )
-
-    def _apply_additional_materials(self, additional_params: list) -> None:
-        """Apply per-region material overrides (cuboid areas with different E/nu)."""
-        model = self._model
-        state = model.state()  # temporary state to read particle positions
-        pos = state.particle_q.numpy()  # (N, 3)
-
-        for params in additional_params:
-            point = np.array(params["point"], dtype=np.float32)
-            size = np.array(params["size"], dtype=np.float32)
-            lo = point - size
-            hi = point + size
-            mask = np.all((pos >= lo) & (pos <= hi), axis=1)
-            indices = np.where(mask)[0].astype(np.int32)
-            if len(indices) == 0:
-                continue
-            idx_wp = wp.from_numpy(indices, dtype=int, device=self._device)
-
-            if "E" in params:
-                model.mpm.young_modulus[idx_wp].fill_(float(params["E"]))
-            if "nu" in params:
-                model.mpm.poisson_ratio[idx_wp].fill_(float(params["nu"]))
-            if "density" in params:
-                density = params["density"]
-                for i in indices:
-                    new_mass = float(self._volumes[i] * density)
-                    model.particle_mass.numpy()[i] = new_mass
-                    model.particle_inv_mass.numpy()[i] = 1.0 / new_mass if new_mass > 0 else 0.0
 
     def set_boundary_conditions(self, bc_params: list, time_params: dict) -> None:
         """Register boundary conditions.
