@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-import time
 from dataclasses import dataclass
 
 from physics_sim.config.loader import load_config
@@ -19,32 +17,6 @@ from physics_sim.stages.sim_loop import RenderArgs, run_headless, run_with_rende
 from physics_sim.stages.video import compile_video
 
 LOGGER = get_logger(__name__)
-_DEBUG_LOG_PATH = "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/.cursor/debug-e9c2ff.log"
-_DEBUG_SESSION_ID = "e9c2ff"
-
-
-def _agent_debug_log(
-    *,
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict,
-) -> None:
-    try:
-        payload = {
-            "sessionId": _DEBUG_SESSION_ID,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
 
 
 @dataclass
@@ -109,19 +81,6 @@ class PipelineOrchestrator:
         )
         camera_state = setup_camera(self.cfg, self.scene_data, config_dir=self.config_dir)
         render_args = RenderArgs(white_bg=raw.white_bg)
-        # region agent log
-        _agent_debug_log(
-            run_id="run2",
-            hypothesis_id="N1",
-            location="physics_sim/pipeline_orchestrator.py:run_rendering:before_sim_loop",
-            message="run_with_rendering about to start",
-            data={
-                "compile_video_flag": bool(raw.compile_video),
-                "frame_num": int(self.cfg.time.frame_num),
-                "output_dir": self.cfg.output,
-            },
-        )
-        # endregion
         run_with_rendering(
             self.cfg,
             self.backend,
@@ -130,35 +89,8 @@ class PipelineOrchestrator:
             runtime,
             render_args,
         )
-        # region agent log
-        _agent_debug_log(
-            run_id="run2",
-            hypothesis_id="N2",
-            location="physics_sim/pipeline_orchestrator.py:run_rendering:after_sim_loop",
-            message="run_with_rendering returned",
-            data={"compile_video_flag": bool(raw.compile_video)},
-        )
-        # endregion
         if raw.compile_video:
-            # region agent log
-            _agent_debug_log(
-                run_id="run2",
-                hypothesis_id="N3",
-                location="physics_sim/pipeline_orchestrator.py:run_rendering:before_compile_video",
-                message="compile_video about to start",
-                data={"output_dir": self.cfg.output},
-            )
-            # endregion
             compile_video(self.cfg.output, self.cfg.time.frame_dt, self.cfg.time.frame_num)
-            # region agent log
-            _agent_debug_log(
-                run_id="run2",
-                hypothesis_id="N4",
-                location="physics_sim/pipeline_orchestrator.py:run_rendering:after_compile_video",
-                message="compile_video returned",
-                data={"output_dir": self.cfg.output},
-            )
-            # endregion
 
     def run(self) -> None:
         self.prepare_scene()

@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import os
 import glob as _glob
-import json
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -29,32 +27,6 @@ from physics_sim.render.interfaces import RenderRuntime
 from physics_sim.render.registries import resolve_camera_for_mode
 
 LOGGER = get_logger(__name__)
-_DEBUG_LOG_PATH = "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/.cursor/debug-e9c2ff.log"
-_DEBUG_SESSION_ID = "e9c2ff"
-
-
-def _agent_debug_log(
-    *,
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict,
-) -> None:
-    try:
-        payload = {
-            "sessionId": _DEBUG_SESSION_ID,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
 
 if TYPE_CHECKING:
     from physics_sim.backend.base import PhysicsBackend
@@ -183,22 +155,6 @@ def _compose_render_inputs(
         if quats is not None and scene_data.static_quats is not None:
             quats = torch.cat([quats, scene_data.static_quats], dim=0)
             scales = torch.cat([scales, scene_data.static_scales], dim=0)
-
-    # region agent log
-    _agent_debug_log(
-        run_id="run1",
-        hypothesis_id="H1",
-        location="physics_sim/stages/sim_loop.py:_compose_render_inputs:return",
-        message="compose_render_inputs output signature",
-        data={
-            "returns_shs": shs is not None,
-            "positions_n": int(positions.shape[0]),
-            "opacities_n": int(opacities.shape[0]),
-            "shs_n": int(shs.shape[0]),
-            "has_quats": quats is not None,
-        },
-    )
-    # endregion
     return positions, covariances, dynamic_state.rotations, opacities, shs, quats, scales
 
 
@@ -353,38 +309,8 @@ def run_with_rendering(
             render_quats,
             render_scales,
         ) = _compose_render_inputs(scene_data, dynamic_state)
-        if frame == 0:
-            # region agent log
-            _agent_debug_log(
-                run_id="run1",
-                hypothesis_id="H2",
-                location="physics_sim/stages/sim_loop.py:run_with_rendering:post_unpack",
-                message="locals after compose unpack",
-                data={
-                    "has_cur_opacity": "cur_opacity" in locals(),
-                    "has_cur_shs": "cur_shs" in locals(),
-                    "has_pos": "pos" in locals(),
-                    "has_rot": "rot" in locals(),
-                },
-            )
-            # endregion
 
         # SH -> RGB (alignment_inv transforms view dirs to PLY-native space)
-        if frame == 0:
-            # region agent log
-            _agent_debug_log(
-                run_id="run1",
-                hypothesis_id="H3",
-                location="physics_sim/stages/sim_loop.py:run_with_rendering:before_convert_sh",
-                message="convert_sh precondition check",
-                data={
-                    "has_cur_shs": "cur_shs" in locals(),
-                    "scene_has_sim_shs": scene_data.sim_shs is not None,
-                    "scene_sim_shs_n": int(scene_data.sim_shs.shape[0]),
-                    "has_static_chunks": len(scene_data.static_chunks) > 0,
-                },
-            )
-            # endregion
         colors_precomp = render_runtime.convert_sh(
             cur_shs, camera, pos, rot,
             alignment_inv=alignment_inv,
