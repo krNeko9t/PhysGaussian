@@ -154,10 +154,19 @@ class PreprocessConfig(BaseModel):
 
 
 class CameraConfig(BaseModel):
-    camera_mode: Literal["orbit", "fixed", "json"] = "orbit"
-    cameras_json: str | None = None
-    default_camera_index: int = -1
-    show_hint: bool = False
+    camera_mode: Literal["orbit", "fixed", "external"] = "orbit"
+    camera_format: Literal[
+        "colmap",
+        "blender",
+        "nerfstudio",
+        "physgaussian",
+        "opencv",
+        "opengl",
+    ] | None = None
+    camera_path: str | None = None
+    camera_pose_convention: Literal["opencv_w2c", "opengl_c2w"] | None = None
+    camera_world_frame: Literal["source", "internal"] | None = None
+    camera_index: int = Field(default=0, ge=0)
     init_azimuth: float = 170.0
     init_elevation: float = 0.0
     init_radius: float = 1.6
@@ -165,7 +174,8 @@ class CameraConfig(BaseModel):
     delta_a: float = -2.4
     delta_e: float = 0.8
     delta_r: float = 0.0
-    # Procedural orbit/fixed cameras need a framebuffer size; json mode reads W/H from cameras.json.
+    # Procedural orbit/fixed cameras need a framebuffer size; external mode reads
+    # intrinsics directly from the external camera payload.
     width: int = 800
     height: int = 600
     fovx_deg: float = 60

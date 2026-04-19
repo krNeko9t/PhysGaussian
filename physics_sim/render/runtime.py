@@ -25,17 +25,16 @@ class GaussianRenderRuntime(RenderRuntime):
         self._colorizer = ShColorizer(sh_degree=sh_degree)
         self._rasterizer = create_rasterizer(raster_backend)
 
-    def build_camera_from_json(
+    def build_camera_external(
         self,
-        cameras_json_path: str,
+        *,
         camera_params: dict,
         center_view_world_space=None,
         observant_coordinates=None,
         current_frame: int = 0,
         source_axes=None,
     ) -> SimpleCamera:
-        return self._camera.build_camera_from_json(
-            cameras_json_path=cameras_json_path,
+        return self._camera.build_camera_external(
             camera_params=camera_params,
             center_view_world_space=center_view_world_space,
             observant_coordinates=observant_coordinates,

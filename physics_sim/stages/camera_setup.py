@@ -71,17 +71,26 @@ def setup_camera(
     state.viewpoint_center_worldspace = scene_center
     state.observant_coordinates = STANDARD_OBSERVANT_COORDINATES
 
-    if cam.camera_mode == "json":
-        cameras_json = cam.cameras_json
-        if cameras_json is None:
-            raise FileNotFoundError(
-                "camera_mode='json' requires 'cameras_json' in the config."
-            )
-        cameras_json = str(cameras_json)
-        if not os.path.isabs(cameras_json):
-            cameras_json = os.path.join(config_dir, cameras_json)
-
     cam_dict = cam.model_dump()
+    if cam.camera_mode == "external":
+        required = (
+            "camera_path",
+            "camera_format",
+            "camera_pose_convention",
+            "camera_world_frame",
+        )
+        missing = [name for name in required if getattr(cam, name) in (None, "")]
+        if missing:
+            missing_fields = ", ".join(missing)
+            raise ValueError(
+                "camera_mode='external' requires fields: "
+                f"{missing_fields}"
+            )
+        camera_path = str(cam.camera_path)
+        if not os.path.isabs(camera_path):
+            camera_path = os.path.join(config_dir, camera_path)
+        cam_dict["camera_path"] = os.path.abspath(camera_path)
+
     state.camera_params = {k: v for k, v in cam_dict.items() if v is not None}
 
     return state

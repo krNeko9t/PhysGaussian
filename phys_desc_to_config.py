@@ -293,9 +293,6 @@ _SCENE_DEFAULTS: dict[str, Any] = {
 
     "boundary_conditions": [],
 
-    "default_camera_index": -1,
-    "show_hint": False,
-
     "width": 800,
     "height": 600,
     "fovx_deg": 60.0,

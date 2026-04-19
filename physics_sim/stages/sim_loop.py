@@ -256,9 +256,7 @@ def run_with_rendering(
     step_per_frame = int(frame_dt / substep_dt)
     output_dir = cfg.output
 
-    cam_cfg = cfg.camera
-    camera_mode = cam_cfg.camera_mode
-    cameras_json = cam_cfg.cameras_json
+    camera_mode = cfg.camera.camera_mode
 
     LOGGER.info("Running simulation and rendering...")
     LOGGER.info(
@@ -284,7 +282,6 @@ def run_with_rendering(
         camera = resolve_camera_for_mode(
             camera_mode,
             camera_builder=render_runtime,
-            cameras_json=cameras_json,
             camera_params=camera_state.camera_params,
             center_view_world_space=camera_state.viewpoint_center_worldspace,
             observant_coordinates=camera_state.observant_coordinates,

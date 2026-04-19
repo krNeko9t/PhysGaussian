@@ -27,7 +27,7 @@ def test_scene_assembler_uses_typed_gaussian_asset():
 
 def test_camera_mode_registry_has_all_builtin_modes():
     src = (REPO_ROOT / "physics_sim/render/registries.py").read_text(encoding="utf-8")
-    for mode in ("json", "orbit", "fixed"):
+    for mode in ("external", "orbit", "fixed"):
         assert f'register_camera_mode(\n    "{mode}"' in src
 
 

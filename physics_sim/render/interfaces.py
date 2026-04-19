@@ -20,9 +20,9 @@ class SceneAssetLoader(Protocol):
 class CameraBuilder(Protocol):
     """Build a runtime camera from scene and config state."""
 
-    def build_camera_from_json(
+    def build_camera_external(
         self,
-        cameras_json_path: str,
+        *,
         camera_params: dict,
         center_view_world_space=None,
         observant_coordinates=None,

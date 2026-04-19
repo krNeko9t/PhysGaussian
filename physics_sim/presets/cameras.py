@@ -19,10 +19,21 @@ def fixed_camera(**kw) -> CameraConfig:
     return CameraConfig(**{**defaults, **kw})
 
 
-def json_camera(cameras_json: str, **kw) -> CameraConfig:
+def external_camera(
+    camera_path: str,
+    *,
+    camera_format: str,
+    camera_pose_convention: str,
+    camera_world_frame: str = "source",
+    camera_index: int = 0,
+    **kw,
+) -> CameraConfig:
     defaults = dict(
-        camera_mode="json",
-        cameras_json=cameras_json,
-        default_camera_index=0,
+        camera_mode="external",
+        camera_path=camera_path,
+        camera_format=camera_format,
+        camera_pose_convention=camera_pose_convention,
+        camera_world_frame=camera_world_frame,
+        camera_index=camera_index,
     )
     return CameraConfig(**{**defaults, **kw})

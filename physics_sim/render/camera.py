@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
-
 import numpy as np
 import torch
 
+from physics_sim.render.camera_external import load_external_camera_raw
 from physics_sim.render.camera_math import (
     camera_extrinsics_from_raw,
     focal2fov,
@@ -14,7 +13,6 @@ from physics_sim.render.camera_math import (
     getProjectionMatrix,
     getWorld2View2,
     get_camera_position_and_rotation,
-    get_current_radius_azimuth_and_elevation,
 )
 
 
@@ -56,82 +54,20 @@ class SimpleCamera:
 class CameraFactory:
     """Build cameras from json and procedural camera params."""
 
-    def build_camera_from_json(
+    def build_camera_external(
         self,
-        cameras_json_path: str,
+        *,
         camera_params: dict,
         center_view_world_space=None,
         observant_coordinates=None,
         current_frame: int = 0,
         source_axes=None,
     ) -> SimpleCamera:
-        from physics_sim.coord import (
-            SourceAxes as _SA,
-            align_camera_position,
-            align_camera_w2c_rotation,
-            alignment_matrix_np,
+        _ = (center_view_world_space, observant_coordinates, current_frame)
+        raw_camera = load_external_camera_raw(
+            camera_params=camera_params,
+            source_axes=source_axes,
         )
-
-        with open(cameras_json_path) as f:
-            data = json.load(f)
-
-        default_idx = camera_params.get("default_camera_index", 0)
-        show_hint = camera_params.get("show_hint", False)
-        need_align = (
-            source_axes is not None
-            and isinstance(source_axes, _SA)
-            and not source_axes.is_identity
-        )
-
-        if show_hint:
-            if default_idx < 0:
-                default_idx = 0
-            r, a, e = get_current_radius_azimuth_and_elevation(
-                data[default_idx]["position"], center_view_world_space, observant_coordinates
-            )
-            raise RuntimeError(
-                "camera.show_hint requested. "
-                f"default_camera_index={default_idx}, azimuth={a}, elevation={e}, radius={r}. "
-                "Please update camera parameters and rerun."
-            )
-
-        if default_idx > -1:
-            raw_camera = dict(data[default_idx])
-            if need_align:
-                A_np = alignment_matrix_np(source_axes)
-                raw_camera["rotation"] = align_camera_w2c_rotation(
-                    np.array(raw_camera["rotation"]), A_np
-                ).tolist()
-                raw_camera["position"] = align_camera_position(
-                    np.array(raw_camera["position"]), A_np
-                ).tolist()
-        else:
-            raw_camera = dict(data[0])
-            init_a = camera_params["init_azimuth"]
-            init_e = camera_params["init_elevation"]
-            init_r = camera_params["init_radius"]
-            if init_a is None or init_e is None or init_r is None:
-                raise ValueError(
-                    "camera mode=json with default_camera_index<0 requires "
-                    "init_azimuth/init_elevation/init_radius"
-                )
-            if camera_params.get("move_camera", False):
-                da = camera_params.get("delta_a", 0) or 0
-                de = camera_params.get("delta_e", 0) or 0
-                dr = camera_params.get("delta_r", 0) or 0
-                position, R = get_camera_position_and_rotation(
-                    init_a + current_frame * da,
-                    init_e + current_frame * de,
-                    init_r + current_frame * dr,
-                    center_view_world_space, observant_coordinates,
-                )
-            else:
-                position, R = get_camera_position_and_rotation(
-                    init_a, init_e, init_r, center_view_world_space, observant_coordinates
-                )
-            raw_camera["rotation"] = R.tolist()
-            raw_camera["position"] = position.tolist()
-
         R, T, width, height, fovx, fovy = camera_extrinsics_from_raw(raw_camera)
         return SimpleCamera(R=R, T=T, FoVx=fovx, FoVy=fovy, width=width, height=height)
 

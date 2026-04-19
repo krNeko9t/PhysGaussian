@@ -89,10 +89,9 @@ register_rasterizer(
 )
 register_camera_builder("default", lambda: CameraFactory())
 register_camera_mode(
-    "json",
-    lambda *, camera_builder, cameras_json, camera_params, center_view_world_space,
-    observant_coordinates, current_frame, source_axes: camera_builder.build_camera_from_json(
-        cameras_json_path=cameras_json,
+    "external",
+    lambda *, camera_builder, camera_params, center_view_world_space,
+    observant_coordinates, current_frame, source_axes: camera_builder.build_camera_external(
         camera_params=camera_params,
         center_view_world_space=center_view_world_space,
         observant_coordinates=observant_coordinates,

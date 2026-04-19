@@ -42,8 +42,6 @@ config = SimConfig(
         delta_a=-0.1,
         delta_e=0.0,
         delta_r=0.0,
-        default_camera_index=-1,
-        show_hint=False,
     ),
     objects=[
         ObjectConfig(
