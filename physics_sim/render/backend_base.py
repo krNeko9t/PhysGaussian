@@ -31,7 +31,7 @@ class RasterBackend(ABC):
         ...
 
 
-def create_raster_backend(name: str, sh_degree: int = 3) -> RasterBackend:
+def create_raster_backend(name: str) -> RasterBackend:
     """Factory: instantiate a raster backend by name."""
     if name == "gsplat":
         from physics_sim.render.rasterizers.gsplat import GsplatBackend
@@ -40,5 +40,5 @@ def create_raster_backend(name: str, sh_degree: int = 3) -> RasterBackend:
     if name == "diffrast":
         from physics_sim.render.rasterizers.diffrast import DiffRastBackend
 
-        return DiffRastBackend(sh_degree=sh_degree)
+        return DiffRastBackend()
     raise ValueError(f"Unknown raster backend: {name!r}. Choose 'gsplat' or 'diffrast'.")

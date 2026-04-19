@@ -18,6 +18,7 @@ from physics_sim.preprocessing.particle_filling_chunks import (
     run_densify_stage,
     run_internal_fill_stage,
 )
+from physics_sim.sh_contract import flatten_sh_coeffs, restore_sh_coeffs
 
 # Hard safety cap for densify neighborhood radius.
 DEFAULT_DENSIFY_R_CAP = 8
@@ -545,23 +546,21 @@ def get_attr_from_closest(
 
 def init_filled_particles(pos, shs, cov, opacity, new_pos):
     """Initialise SH / opacity / covariance for filled particles from their nearest originals."""
-    shs = shs.reshape(pos.shape[0], -1)
+    shs_flat = flatten_sh_coeffs(shs)
     ti_pos = ti.Vector.field(n=3, dtype=float, shape=pos.shape[0])
     ti_cov = ti.Vector.field(n=6, dtype=float, shape=cov.shape[0])
-    ti_shs = ti.Vector.field(n=shs.shape[1], dtype=float, shape=shs.shape[0])
+    ti_shs = ti.Vector.field(n=shs_flat.shape[1], dtype=float, shape=shs_flat.shape[0])
     ti_opacity = ti.field(dtype=float, shape=opacity.shape[0])
     ti_pos.from_torch(pos.reshape(-1, 3))
     ti_cov.from_torch(cov.reshape(-1, 6))
-    ti_shs.from_torch(shs)
+    ti_shs.from_torch(shs_flat)
     ti_opacity.from_torch(opacity.reshape(-1))
 
-    new_shs = torch.mean(shs, dim=0).repeat(new_pos.shape[0], 1).cuda()
     ti_new_pos = ti.Vector.field(n=3, dtype=float, shape=new_pos.shape[0])
-    ti_new_shs = ti.Vector.field(n=shs.shape[1], dtype=float, shape=new_pos.shape[0])
+    ti_new_shs = ti.Vector.field(n=shs_flat.shape[1], dtype=float, shape=new_pos.shape[0])
     ti_new_opacity = ti.field(dtype=float, shape=new_pos.shape[0])
     ti_new_cov = ti.Vector.field(n=6, dtype=float, shape=new_pos.shape[0])
     ti_new_pos.from_torch(new_pos.reshape(-1, 3))
-    ti_new_shs.from_torch(new_shs)
 
     get_attr_from_closest(
         ti_pos, ti_shs, ti_opacity, ti_cov,
@@ -572,8 +571,8 @@ def init_filled_particles(pos, shs, cov, opacity, new_pos):
     opacity_tensor = ti_new_opacity.to_torch().cuda()
     cov_tensor = ti_new_cov.to_torch().cuda()
 
-    shs_tensor = torch.cat([shs, shs_tensor], dim=0)
-    shs_tensor = shs_tensor.view(shs_tensor.shape[0], -1, 3)
+    shs_tensor = torch.cat([shs_flat, shs_tensor], dim=0)
+    shs_tensor = restore_sh_coeffs(shs_tensor)
     opacity_tensor = torch.cat([opacity, opacity_tensor.reshape(-1, 1)], dim=0)
     cov_tensor = torch.cat([cov, cov_tensor], dim=0)
     return shs_tensor, opacity_tensor, cov_tensor

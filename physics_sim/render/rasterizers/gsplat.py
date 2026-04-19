@@ -71,6 +71,7 @@ class GsplatBackend(RasterBackend):
             near_plane=camera.znear,
             far_plane=camera.zfar,
             backgrounds=bg_color,
+            # SH is evaluated in Python and passed as precomputed colors.
             sh_degree=None,
         )
         rendered = render_colors[0].permute(2, 0, 1)

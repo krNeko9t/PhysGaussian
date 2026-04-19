@@ -23,10 +23,7 @@ class GaussianRenderRuntime(RenderRuntime):
     def __init__(self, sh_degree: int = 3, raster_backend: str = "gsplat"):
         self._camera = create_camera_builder("default")
         self._colorizer = ShColorizer(sh_degree=sh_degree)
-        self._rasterizer = create_rasterizer(
-            raster_backend,
-            sh_degree=sh_degree,
-        )
+        self._rasterizer = create_rasterizer(raster_backend)
 
     def build_camera_from_json(
         self,
@@ -73,14 +70,15 @@ class GaussianRenderRuntime(RenderRuntime):
         shs: torch.Tensor,
         camera: SimpleCamera,
         position: torch.Tensor,
-        rotation: Optional[torch.Tensor] = None,
+        *,
+        view_rotations: Optional[torch.Tensor] = None,
         alignment_inv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self._colorizer.convert_sh(
             shs=shs,
             camera=camera,
             position=position,
-            rotation=rotation,
+            view_rotations=view_rotations,
             alignment_inv=alignment_inv,
         )
 

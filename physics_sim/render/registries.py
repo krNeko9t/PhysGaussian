@@ -81,11 +81,11 @@ def resolve_camera_for_mode(name: str, **kwargs):
 register_asset_loader("ply", lambda *, sh_degree: GaussianAssetLoader(sh_degree=sh_degree))
 register_rasterizer(
     "gsplat",
-    lambda *, sh_degree: create_raster_backend("gsplat", sh_degree=sh_degree),
+    lambda: create_raster_backend("gsplat"),
 )
 register_rasterizer(
     "diffrast",
-    lambda *, sh_degree: create_raster_backend("diffrast", sh_degree=sh_degree),
+    lambda: create_raster_backend("diffrast"),
 )
 register_camera_builder("default", lambda: CameraFactory())
 register_camera_mode(

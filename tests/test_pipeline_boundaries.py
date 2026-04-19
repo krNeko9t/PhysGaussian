@@ -53,3 +53,10 @@ def test_legacy_renderer_package_has_no_python_sources():
     if not renderer_dir.exists():
         return
     assert list(renderer_dir.glob("*.py")) == []
+
+
+def test_orchestrator_has_single_sh_config_resolution():
+    src = (REPO_ROOT / "physics_sim/pipeline_orchestrator.py").read_text(encoding="utf-8")
+    assert "def _resolve_sh_config" in src
+    assert "validate_sh_degree(" in src
+    assert "sh_channels" in src

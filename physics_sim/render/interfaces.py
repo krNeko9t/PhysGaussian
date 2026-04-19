@@ -57,7 +57,8 @@ class ColorComputer(Protocol):
         shs: torch.Tensor,
         camera: SimpleCamera,
         position: torch.Tensor,
-        rotation: Optional[torch.Tensor] = None,
+        *,
+        view_rotations: Optional[torch.Tensor] = None,
         alignment_inv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         ...

@@ -10,9 +10,6 @@ from physics_sim.render.backend_base import RasterBackend
 
 
 class DiffRastBackend(RasterBackend):
-    def __init__(self, sh_degree: int = 3):
-        self.sh_degree = sh_degree
-
     def render(
         self,
         camera,
@@ -56,7 +53,8 @@ class DiffRastBackend(RasterBackend):
             scale_modifier=1.0,
             viewmatrix=camera.world_view_transform,
             projmatrix=camera.full_proj_transform,
-            sh_degree=self.sh_degree,
+            # SH has already been converted to colors_precomp upstream.
+            sh_degree=0,
             campos=camera.camera_center,
             prefiltered=False,
             debug=False,

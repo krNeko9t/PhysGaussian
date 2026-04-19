@@ -16,6 +16,7 @@ import torch
 from physics_sim.config.models import SimConfig
 from physics_sim.coord import SourceAxes
 from physics_sim.render.interfaces import SceneAssetLoader
+from physics_sim.sh_contract import sh_coeff_count
 from physics_sim.scene import SceneObject, assemble_scene
 
 
@@ -81,6 +82,7 @@ def setup_scene(
     config_dir: str = "",
     device: str = "cuda:0",
     sh_degree: int = 3,
+    sh_channels: int | None = None,
 ) -> SceneData:
     """Assemble the scene and concatenate tensors for simulation.
 
@@ -116,7 +118,7 @@ def setup_scene(
         gs_num = sim_init_pos.shape[0]
         per_object_info = _build_per_object_info(sim_objects)
     else:
-        sh_c = (sh_degree + 1) ** 2
+        sh_c = sh_channels if sh_channels is not None else sh_coeff_count(sh_degree)
         sim_init_pos = torch.zeros(0, 3, device=device)
         sim_init_cov = torch.zeros(0, 6, device=device)
         sim_init_vol = torch.zeros(0, device=device)

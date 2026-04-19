@@ -6,7 +6,11 @@ import numpy as np
 import torch
 from plyfile import PlyData
 
-from physics_sim.render.gaussian_math import build_covariance
+from physics_sim.render.gaussian_geometry import build_covariance
+from physics_sim.sh_contract import (
+    assemble_sh_from_ply_features,
+    expected_f_rest_feature_count,
+)
 from physics_sim.render.types import GaussianAsset
 
 
@@ -32,7 +36,7 @@ class GaussianAssetLoader:
             [p.name for p in vtx.properties if p.name.startswith("f_rest_")],
             key=lambda x: int(x.split("_")[-1]),
         )
-        expected_rest = 3 * (self.sh_degree + 1) ** 2 - 3
+        expected_rest = expected_f_rest_feature_count(self.sh_degree)
         assert len(extra_f_names) == expected_rest, (
             f"Expected {expected_rest} f_rest features for SH degree {self.sh_degree}, "
             f"got {len(extra_f_names)}"
@@ -40,8 +44,10 @@ class GaussianAssetLoader:
         features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
         for idx, attr_name in enumerate(extra_f_names):
             features_extra[:, idx] = np.asarray(vtx[attr_name])
-        features_extra = features_extra.reshape(
-            (features_extra.shape[0], 3, (self.sh_degree + 1) ** 2 - 1)
+        shs_np = assemble_sh_from_ply_features(
+            features_dc=features_dc,
+            features_rest=features_extra,
+            sh_degree=self.sh_degree,
         )
 
         scale_names = sorted(
@@ -77,10 +83,7 @@ class GaussianAssetLoader:
         rotation_quat = torch.nn.functional.normalize(rotation_quat, dim=1)
 
         scales_raw = torch.exp(torch.tensor(scales, dtype=torch.float32, device="cuda"))
-        features_dc_t = torch.tensor(features_dc, dtype=torch.float32, device="cuda")
-        features_rest_t = torch.tensor(features_extra, dtype=torch.float32, device="cuda")
-        shs = torch.cat([features_dc_t, features_rest_t], dim=2)
-        shs = shs.transpose(1, 2)
+        shs = torch.tensor(shs_np, dtype=torch.float32, device="cuda")
 
         cov3D = build_covariance(scaling, rotation_quat)
         screen_points = torch.zeros_like(pos, requires_grad=False)

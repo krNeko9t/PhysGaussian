@@ -22,6 +22,8 @@ new features can be added by extension instead of core-flow rewrites.
   camera build + SH color + rasterization runtime contract
 - `GaussianAsset` (`physics_sim/render/types.py`):
   typed payload for scene assembly
+- `SH contract` (`physics_sim/sh_contract.py`):
+  SH shape/count/layout invariants shared across loader, render and preprocessing
 
 ## Dependency Rules
 

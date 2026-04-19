@@ -16,6 +16,8 @@
 - `physics_sim.preprocessing.particle_filling`
   - 保持 `fill_particles`、`get_particle_volume`、`init_filled_particles` 入口。
   - 分块执行逻辑迁移到 `preprocessing/particle_filling_chunks.py`。
+- `physics_sim.sh_contract`
+  - 保持 SH 张量形状、系数计数和 PLY 特征映射规则的稳定定义。
 
 ## 2. 内部可替换实现（允许继续演化）
 

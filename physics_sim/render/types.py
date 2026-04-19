@@ -14,7 +14,7 @@ class GaussianAsset:
     pos: torch.Tensor
     cov3D_precomp: torch.Tensor
     opacity: torch.Tensor
-    shs: torch.Tensor
+    shs: torch.Tensor  # (N, C, 3), C=(sh_degree+1)^2
     screen_points: torch.Tensor
     gs_type: str
     quats: torch.Tensor

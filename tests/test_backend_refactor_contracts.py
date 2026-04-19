@@ -137,3 +137,25 @@ def test_video_stage_no_longer_uses_os_system():
     assert "os.system(" not in video_src
     assert "subprocess.run(" in video_src
     assert "returncode" in video_src
+
+
+def test_sh_math_is_split_by_responsibility():
+    assert (REPO_ROOT / "physics_sim/render/sh_eval.py").exists()
+    assert (REPO_ROOT / "physics_sim/render/gaussian_geometry.py").exists()
+    assert not (REPO_ROOT / "physics_sim/render/gaussian_math.py").exists()
+
+
+def test_sim_loop_uses_explicit_view_rotation_contract():
+    sim_loop_src = _read("physics_sim/stages/sim_loop.py")
+    assert "view_rotations=view_rotations" in sim_loop_src
+    assert "dir_pp[:n]" not in _read("physics_sim/render/sh_colorizer.py")
+
+
+def test_raster_backends_no_longer_accept_sh_degree_wiring():
+    runtime_src = _read("physics_sim/render/runtime.py")
+    registries_src = _read("physics_sim/render/registries.py")
+    backend_src = _read("physics_sim/render/backend_base.py")
+    assert "create_rasterizer(raster_backend)" in runtime_src
+    assert "lambda: create_raster_backend(\"gsplat\")" in registries_src
+    assert "lambda: create_raster_backend(\"diffrast\")" in registries_src
+    assert "def create_raster_backend(name: str)" in backend_src

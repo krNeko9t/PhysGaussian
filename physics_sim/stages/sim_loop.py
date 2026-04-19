@@ -145,6 +145,7 @@ def _compose_render_inputs(
     shs = scene_data.sim_shs
     quats = dynamic_state.quats
     scales = dynamic_state.scales
+    view_rotations = dynamic_state.rotations
 
     has_static = len(scene_data.static_chunks) > 0
     if has_static:
@@ -152,10 +153,17 @@ def _compose_render_inputs(
         covariances = torch.cat([covariances, scene_data.static_cov], dim=0)
         opacities = torch.cat([scene_data.sim_opacity, scene_data.static_opacity], dim=0)
         shs = torch.cat([scene_data.sim_shs, scene_data.static_shs], dim=0)
+        static_count = scene_data.static_pos.shape[0]
+        static_identity = torch.eye(
+            3,
+            device=view_rotations.device,
+            dtype=view_rotations.dtype,
+        ).unsqueeze(0).expand(static_count, -1, -1)
+        view_rotations = torch.cat([view_rotations, static_identity], dim=0)
         if quats is not None and scene_data.static_quats is not None:
             quats = torch.cat([quats, scene_data.static_quats], dim=0)
             scales = torch.cat([scales, scene_data.static_scales], dim=0)
-    return positions, covariances, dynamic_state.rotations, opacities, shs, quats, scales
+    return positions, covariances, view_rotations, opacities, shs, quats, scales
 
 
 def _write_frame_png(*, rendering: torch.Tensor, output_dir: str, frame: int) -> None:
@@ -303,7 +311,7 @@ def run_with_rendering(
         (
             pos,
             cov3D,
-            rot,
+            view_rotations,
             cur_opacity,
             cur_shs,
             render_quats,
@@ -312,7 +320,10 @@ def run_with_rendering(
 
         # SH -> RGB (alignment_inv transforms view dirs to PLY-native space)
         colors_precomp = render_runtime.convert_sh(
-            cur_shs, camera, pos, rot,
+            cur_shs,
+            camera,
+            pos,
+            view_rotations=view_rotations,
             alignment_inv=alignment_inv,
         )
         if scene_data.gs_type == "2dgs" and render_quats is not None:

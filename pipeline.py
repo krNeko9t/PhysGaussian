@@ -31,7 +31,13 @@ def main():
         "--no_render", action="store_true",
         help="Run physics only, skip rendering.",
     )
-    parser.add_argument("--sh_degree", type=int, default=3)
+    parser.add_argument(
+        "--sh_degree",
+        type=int,
+        default=3,
+        choices=range(0, 5),
+        help="Spherical harmonics degree used by loader and colorizer.",
+    )
     parser.add_argument(
         "--raster_backend", type=str, default="gsplat",
         choices=["gsplat", "diffrast"],

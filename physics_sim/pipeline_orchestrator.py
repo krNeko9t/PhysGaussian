@@ -9,6 +9,7 @@ from physics_sim.config.loader import load_config
 from physics_sim.errors import lifecycle_error
 from physics_sim.logging_utils import get_logger
 from physics_sim.render.runtime import create_render_runtime, create_scene_asset_loader
+from physics_sim.sh_contract import sh_coeff_count, validate_sh_degree
 from physics_sim.stages.backend_init import init_backend
 from physics_sim.stages.camera_setup import setup_camera
 from physics_sim.stages.runtime import init_runtime
@@ -38,9 +39,18 @@ class PipelineOrchestrator:
         self.config_dir = ""
         self.scene_data: SceneData | None = None
         self.backend = None
+        self._sh_degree = request.sh_degree
+        self._sh_channels: int | None = None
+
+    def _resolve_sh_config(self) -> tuple[int, int]:
+        validate_sh_degree(self._sh_degree)
+        if self._sh_channels is None:
+            self._sh_channels = sh_coeff_count(self._sh_degree)
+        return self._sh_degree, self._sh_channels
 
     def prepare_scene(self) -> None:
         raw = self.request
+        sh_degree, sh_channels = self._resolve_sh_config()
         if not os.path.exists(raw.config_path):
             raise FileNotFoundError(f"Config not found: {raw.config_path}")
         LOGGER.info("Loading config: %s", raw.config_path)
@@ -49,12 +59,13 @@ class PipelineOrchestrator:
         os.makedirs(self.cfg.output, exist_ok=True)
 
         init_runtime(self.cfg.backend.type)
-        loader = create_scene_asset_loader(sh_degree=raw.sh_degree)
+        loader = create_scene_asset_loader(sh_degree=sh_degree)
         self.scene_data = setup_scene(
             self.cfg,
             loader,
             config_dir=self.config_dir,
-            sh_degree=raw.sh_degree,
+            sh_degree=sh_degree,
+            sh_channels=sh_channels,
         )
         self.backend = init_backend(self.cfg, self.scene_data)
 
@@ -75,8 +86,9 @@ class PipelineOrchestrator:
                 expected="prepare_scene() must run first",
             )
         raw = self.request
+        sh_degree, _ = self._resolve_sh_config()
         runtime = create_render_runtime(
-            sh_degree=raw.sh_degree,
+            sh_degree=sh_degree,
             raster_backend=raw.raster_backend,
         )
         camera_state = setup_camera(self.cfg, self.scene_data, config_dir=self.config_dir)
