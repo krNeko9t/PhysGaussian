@@ -56,7 +56,7 @@ def test_solver_contract_rejects_missing_or_scalar_gravity():
 
 def test_solver_files_enforce_contract_without_z_up_defaults():
     solver_paths = (
-        "physics_sim/backend/newton_rigid/solver.py",
+        "physics_sim/backend/newton_rigid/materials.py",
         "physics_sim/backend/newton_vbd/solver.py",
         "physics_sim/backend/newton_mpm/materials.py",
     )

@@ -39,8 +39,8 @@ from newton.solvers import SolverVBD
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
 from physics_sim.backend.newton_common.boundary import surface_plane_from_bc
-from physics_sim.backend.newton_vbd.barycentric import compute_barycentric
 from physics_sim.backend.newton_vbd.rigid_mesh import create_rigid_body
+from physics_sim.backend.newton_vbd.soft_grid import build_soft_grid_embedding
 from physics_sim.backend.newton_vbd.state_export import export_state
 from physics_sim.coord import (
     E_GRAVITY_MISSING,
@@ -77,146 +77,6 @@ class _SoftInfo:
     tet_cells: np.ndarray            # (T, 4)  for computing deformation gradient
     rest_verts: np.ndarray           # (V, 3)  rest-pose tet vertices
     init_cov_6: torch.Tensor         # (N, 6)
-
-
-@dataclass
-class _SoftGridSpec:
-    """Regular tet-grid parameters for one soft object."""
-
-    bbox_min: np.ndarray
-    dim_x: int
-    dim_y: int
-    dim_z: int
-    cell_x: float
-    cell_y: float
-    cell_z: float
-    density: float
-    k_mu: float
-    k_lambda: float
-    k_damp: float
-
-
-def _compute_soft_grid_spec(pos_np: np.ndarray, material: dict) -> _SoftGridSpec:
-    """Parse and validate grid/material params for add_soft_grid."""
-    if pos_np.ndim != 2 or pos_np.shape[1] != 3 or pos_np.shape[0] == 0:
-        raise ValueError("particle subset must be a non-empty (N, 3) array")
-
-    bbox_min = pos_np.min(axis=0).astype(np.float64, copy=False)
-    bbox_max = pos_np.max(axis=0).astype(np.float64, copy=False)
-
-    padding = float(material.get("grid_padding", 0.05))
-    if padding < 0.0:
-        raise ValueError("grid_padding must be >= 0")
-    bbox_min = bbox_min - padding
-    bbox_max = bbox_max + padding
-    extent = bbox_max - bbox_min
-
-    cell_size = material.get("cell_size", None)
-    if cell_size is not None:
-        cell_size = float(cell_size)
-        if cell_size <= 0.0:
-            raise ValueError("cell_size must be > 0")
-    else:
-        grid_res = int(material.get("grid_resolution", 8))
-        if grid_res <= 0:
-            raise ValueError("grid_resolution must be >= 1")
-        max_extent = float(extent.max())
-        if max_extent <= 0.0:
-            raise ValueError("soft-body bbox extent must be positive")
-        cell_size = max_extent / float(grid_res)
-
-    # Ensure each axis has positive thickness to avoid degenerate tets.
-    extent_safe = np.maximum(extent, cell_size)
-    dim_x = max(1, int(np.ceil(extent_safe[0] / cell_size)))
-    dim_y = max(1, int(np.ceil(extent_safe[1] / cell_size)))
-    dim_z = max(1, int(np.ceil(extent_safe[2] / cell_size)))
-
-    cell_x = float(extent_safe[0] / dim_x)
-    cell_y = float(extent_safe[1] / dim_y)
-    cell_z = float(extent_safe[2] / dim_z)
-
-    density = float(material.get("density", 1e3))
-    if density <= 0.0:
-        raise ValueError("density must be > 0")
-    k_mu = float(material.get("k_mu", 1e5))
-    k_lambda = float(material.get("k_lambda", 1e5))
-    k_damp = float(material.get("k_damp", 1e-3))
-    if k_mu < 0.0 or k_lambda < 0.0 or k_damp < 0.0:
-        raise ValueError("k_mu, k_lambda, k_damp must be >= 0")
-
-    return _SoftGridSpec(
-        bbox_min=bbox_min,
-        dim_x=dim_x,
-        dim_y=dim_y,
-        dim_z=dim_z,
-        cell_x=cell_x,
-        cell_y=cell_y,
-        cell_z=cell_z,
-        density=density,
-        k_mu=k_mu,
-        k_lambda=k_lambda,
-        k_damp=k_damp,
-    )
-
-
-def _build_soft_grid_vertices(spec: _SoftGridSpec) -> np.ndarray:
-    """Rebuild add_soft_grid vertex order (z-major, then y, then x)."""
-    vert_count = (spec.dim_x + 1) * (spec.dim_y + 1) * (spec.dim_z + 1)
-    grid_verts = np.zeros((vert_count, 3), dtype=np.float64)
-
-    vi = 0
-    for z in range(spec.dim_z + 1):
-        for y in range(spec.dim_y + 1):
-            for x in range(spec.dim_x + 1):
-                grid_verts[vi] = [
-                    x * spec.cell_x + spec.bbox_min[0],
-                    y * spec.cell_y + spec.bbox_min[1],
-                    z * spec.cell_z + spec.bbox_min[2],
-                ]
-                vi += 1
-    return grid_verts
-
-
-def _build_soft_tet_cells(dim_x: int, dim_y: int, dim_z: int) -> np.ndarray:
-    """Rebuild Newton's alternating 5-tet decomposition per voxel."""
-
-    def grid_index(x: int, y: int, z: int) -> int:
-        return (dim_x + 1) * (dim_y + 1) * z + (dim_x + 1) * y + x
-
-    tet_list: list[list[int]] = []
-    for z in range(dim_z):
-        for y in range(dim_y):
-            for x in range(dim_x):
-                v0 = grid_index(x, y, z)
-                v1 = grid_index(x + 1, y, z)
-                v2 = grid_index(x + 1, y, z + 1)
-                v3 = grid_index(x, y, z + 1)
-                v4 = grid_index(x, y + 1, z)
-                v5 = grid_index(x + 1, y + 1, z)
-                v6 = grid_index(x + 1, y + 1, z + 1)
-                v7 = grid_index(x, y + 1, z + 1)
-
-                if (x & 1) ^ (y & 1) ^ (z & 1):
-                    tet_list.extend(
-                        [
-                            [v0, v1, v4, v3],
-                            [v2, v3, v6, v1],
-                            [v5, v4, v1, v6],
-                            [v7, v6, v3, v4],
-                            [v4, v1, v6, v3],
-                        ]
-                    )
-                else:
-                    tet_list.extend(
-                        [
-                            [v1, v2, v5, v0],
-                            [v3, v0, v7, v2],
-                            [v4, v7, v0, v5],
-                            [v6, v5, v2, v7],
-                            [v5, v2, v7, v0],
-                        ]
-                    )
-    return np.array(tet_list, dtype=np.int32)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -703,7 +563,7 @@ class NewtonVBDBackend(PhysicsBackend):
         pos = self._init_positions[idx_t].float()
         pos_np = pos.detach().cpu().numpy()
         try:
-            spec = _compute_soft_grid_spec(pos_np=pos_np, material=material)
+            embedding = build_soft_grid_embedding(pos_np=pos_np, material=material)
         except (TypeError, ValueError) as exc:
             detail = f"object={name} reason={exc}"
             LOGGER.error(
@@ -723,44 +583,37 @@ class NewtonVBDBackend(PhysicsBackend):
 
         builder.add_soft_grid(
             pos=wp.vec3(
-                float(spec.bbox_min[0]),
-                float(spec.bbox_min[1]),
-                float(spec.bbox_min[2]),
+                float(embedding.spec.bbox_min[0]),
+                float(embedding.spec.bbox_min[1]),
+                float(embedding.spec.bbox_min[2]),
             ),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=spec.dim_x,
-            dim_y=spec.dim_y,
-            dim_z=spec.dim_z,
-            cell_x=spec.cell_x,
-            cell_y=spec.cell_y,
-            cell_z=spec.cell_z,
-            density=spec.density,
-            k_mu=spec.k_mu,
-            k_lambda=spec.k_lambda,
-            k_damp=spec.k_damp,
+            dim_x=embedding.spec.dim_x,
+            dim_y=embedding.spec.dim_y,
+            dim_z=embedding.spec.dim_z,
+            cell_x=embedding.spec.cell_x,
+            cell_y=embedding.spec.cell_y,
+            cell_z=embedding.spec.cell_z,
+            density=embedding.spec.density,
+            k_mu=embedding.spec.k_mu,
+            k_lambda=embedding.spec.k_lambda,
+            k_damp=embedding.spec.k_damp,
         )
 
-        vert_count = (spec.dim_x + 1) * (spec.dim_y + 1) * (spec.dim_z + 1)
+        vert_count = embedding.vert_count
         self._particle_offset += vert_count
-
-        # Rebuild geometry exactly as Newton's add_soft_grid does.
-        grid_verts = _build_soft_grid_vertices(spec)
-        tet_cells = _build_soft_tet_cells(spec.dim_x, spec.dim_y, spec.dim_z)
 
         # ── Embed GS particles in tet grid ─────────────────────────────
         LOGGER.info(
             f"[NewtonVBD] Embedding {len(particle_indices)} GS particles "
-            f"in {tet_cells.shape[0]} tets..."
-        )
-        tet_ids, bary, outside_count = compute_barycentric(
-            pos_np, grid_verts, tet_cells
+            f"in {embedding.tet_cells.shape[0]} tets..."
         )
 
-        if outside_count > 0:
-            pct = 100.0 * outside_count / len(particle_indices)
+        if embedding.outside_count > 0:
+            pct = 100.0 * embedding.outside_count / len(particle_indices)
             LOGGER.warning(
-                f"[NewtonVBD] WARNING: {outside_count}/{len(particle_indices)} "
+                f"[NewtonVBD] WARNING: {embedding.outside_count}/{len(particle_indices)} "
                 f"({pct:.1f}%) GS particles outside grid → clamped"
             )
         else:
@@ -773,19 +626,20 @@ class NewtonVBDBackend(PhysicsBackend):
 
         self._soft_bodies.append(_SoftInfo(
             particle_indices=particle_indices,
-            tet_ids=tet_ids,
-            bary_coords=bary,
+            tet_ids=embedding.tet_ids,
+            bary_coords=embedding.bary_coords,
             vert_offset=vert_offset,
             vert_count=vert_count,
-            tet_cells=tet_cells,
-            rest_verts=grid_verts.copy(),
+            tet_cells=embedding.tet_cells,
+            rest_verts=embedding.grid_vertices.copy(),
             init_cov_6=cov6,
         ))
         LOGGER.info(
             f"[NewtonVBD] Soft '{name}': {len(particle_indices)} GS particles, "
-            f"grid {spec.dim_x}x{spec.dim_y}x{spec.dim_z} = {vert_count} verts, "
-            f"{tet_cells.shape[0]} tets, "
-            f"cell=[{spec.cell_x:.4f},{spec.cell_y:.4f},{spec.cell_z:.4f}], "
-            f"density={spec.density}, k_mu={spec.k_mu:.0e}, "
-            f"k_lambda={spec.k_lambda:.0e}, k_damp={spec.k_damp:.0e}"
+            f"grid {embedding.spec.dim_x}x{embedding.spec.dim_y}x{embedding.spec.dim_z} = "
+            f"{vert_count} verts, {embedding.tet_cells.shape[0]} tets, "
+            f"cell=[{embedding.spec.cell_x:.4f},{embedding.spec.cell_y:.4f},"
+            f"{embedding.spec.cell_z:.4f}], "
+            f"density={embedding.spec.density}, k_mu={embedding.spec.k_mu:.0e}, "
+            f"k_lambda={embedding.spec.k_lambda:.0e}, k_damp={embedding.spec.k_damp:.0e}"
         )

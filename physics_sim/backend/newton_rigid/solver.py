@@ -17,7 +17,6 @@ Lifecycle (called by the pipeline):
 
 from __future__ import annotations
 
-from copy import copy
 from dataclasses import dataclass
 from typing import Optional
 
@@ -28,20 +27,19 @@ import newton
 from newton.solvers import SolverXPBD
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
-from physics_sim.backend.newton_common.boundary import (
-    build_bounding_box_planes,
-    surface_plane_from_bc,
-)
+from physics_sim.backend.newton_rigid.boundary_conditions import register_boundary_conditions
 from physics_sim.backend.newton_rigid.collider_builders import (
     create_rigid_body,
     normalize_collision_geo,
 )
-from physics_sim.backend.newton_rigid.state_export import export_rigid_state
-from physics_sim.coord import (
-    E_GRAVITY_MISSING,
-    gravity_contract_error,
-    normalize_internal_gravity,
+from physics_sim.backend.newton_rigid.materials import (
+    build_base_shape_config,
+    build_shape_config_for_body,
+    iter_body_specs,
+    resolve_gravity,
+    resolve_solver_options,
 )
+from physics_sim.backend.newton_rigid.state_export import export_rigid_state
 from physics_sim.errors import configuration_error, lifecycle_error
 from physics_sim.logging_utils import get_logger
 
@@ -189,112 +187,23 @@ class NewtonRigidBackend(PhysicsBackend):
         """
         self._require_builder("set_material")
 
-        # ── Gravity ─────────────────────────────────────────────────
-        if "g" not in material_params:
-            raise gravity_contract_error(
-                E_GRAVITY_MISSING,
-                backend="newton_rigid",
-                config_path="material.g",
-                detail="set_material() missing required gravity vector",
-                suggestion="pass g as [0, -|g|, 0], usually from backend_init._resolve_gravity",
-            )
-        self._gravity = normalize_internal_gravity(
-            material_params.get("g"),
-            backend="newton_rigid",
-            config_path="material.g",
-            allow_scalar=False,
+        self._gravity = resolve_gravity(material_params)
+        self._solver_iterations, self._solver_relaxation = resolve_solver_options(material_params)
+        base_cfg = build_base_shape_config(
+            material_params=material_params,
+            use_sdf=self._use_sdf,
+            sdf_resolution=self._sdf_resolution,
+            sdf_narrow_band=self._sdf_narrow_band,
         )
-
-        # ── Solver options ──────────────────────────────────────────
-        solver_opts = material_params.get("newton_solver_opts", {})
-        self._solver_iterations = solver_opts.get("iterations", 10)
-        # Relaxation < 1.0 avoids over-correction at contacts (Newton
-        # example_sdf uses 0.8; 1.0 = no damping → can oscillate/explode).
-        self._solver_relaxation = float(solver_opts.get("contact_relaxation", 0.8))
-
-        # ── Contact parameters ────────────────────────────────────────
-        # For XPBD, Newton's default ke/kd work best — only override if
-        # the user explicitly sets them in the config.
-        default_mu = float(material_params.get("mu", 0.5))
-        default_density = float(material_params.get("density", 1000.0))
-
-        # ── Default shape config ────────────────────────────────────
-        # Start from Newton's built-in defaults, then layer on config.
-        base_cfg = newton.ModelBuilder.ShapeConfig(
-            density=default_density,
-            mu=default_mu,
-        )
-        # Only override ke/kd if explicitly provided (not with arbitrary
-        # defaults — Newton's own defaults are tuned for XPBD stability).
-        if "ke" in material_params:
-            base_cfg.ke = float(material_params["ke"])
-        if "kd" in material_params:
-            base_cfg.kd = float(material_params["kd"])
-        # SDF collision parameters — Newton generates an SDF from the mesh
-        # internally and uses it for robust distance-field collision.
-        if self._use_sdf:
-            base_cfg.sdf_max_resolution = self._sdf_resolution
-            base_cfg.sdf_narrow_band_range = tuple(self._sdf_narrow_band)
-            base_cfg.contact_margin = 0.01
-
-        # ── Create bodies ───────────────────────────────────────────
-        per_object = material_params.get("per_object")
-        if per_object is not None and not isinstance(per_object, list):
-            detail = f"per_object_type={type(per_object).__name__}"
-            LOGGER.error(
-                "[NewtonRigid] backend=newton_rigid operation=set_material detail=%s",
-                detail,
-            )
-            raise configuration_error(
-                owner="newton_rigid",
-                operation="set_material",
-                expected="material.per_object must be a list",
-                detail=detail,
-            )
-
-        if per_object is not None:
-            for obj in per_object:
-                if not isinstance(obj, dict):
-                    detail = f"per_object_item_type={type(obj).__name__}"
-                    LOGGER.error(
-                        "[NewtonRigid] backend=newton_rigid operation=set_material "
-                        "detail=%s",
-                        detail,
-                    )
-                    raise configuration_error(
-                        owner="newton_rigid",
-                        operation="set_material",
-                        expected="each material.per_object item must be dict",
-                        detail=detail,
-                    )
-                mat = obj.get("material", {})
-                cfg = copy(base_cfg)
-                cfg.density = float(mat.get("density", cfg.density))
-                if "mu" in mat:
-                    cfg.mu = float(mat["mu"])
-                elif "friction" in mat:
-                    cfg.mu = float(mat["friction"])
-                if "ke" in mat:
-                    cfg.ke = float(mat["ke"])
-                if "kd" in mat:
-                    cfg.kd = float(mat["kd"])
-                # Per-object collision_geometry override
-                obj_geo = mat.get("collision_geometry", None)
-                # Per-object initial velocity [vx, vy, vz]
-                init_vel = mat.get("initial_velocity", None)
-                self._create_body(
-                    particle_indices=obj["particle_indices"],
-                    shape_cfg=cfg,
-                    name=obj.get("name", "?"),
-                    collision_geo=obj_geo,
-                    initial_velocity=init_vel,
-                )
-        else:
-            # Single body: all particles
+        specs = iter_body_specs(material_params, n_particles=self._n_particles)
+        for spec in specs:
+            cfg = build_shape_config_for_body(base_cfg=base_cfg, body_material=spec.material)
             self._create_body(
-                particle_indices=list(range(self._n_particles)),
-                shape_cfg=base_cfg,
-                name="single_body",
+                particle_indices=spec.particle_indices,
+                shape_cfg=cfg,
+                name=spec.name,
+                collision_geo=spec.material.get("collision_geometry"),
+                initial_velocity=spec.material.get("initial_velocity"),
             )
 
     def set_boundary_conditions(
@@ -302,71 +211,27 @@ class NewtonRigidBackend(PhysicsBackend):
     ) -> None:
         """Add collision planes for ground / walls."""
         builder = self._require_builder("set_boundary_conditions")
-
-        if not isinstance(bc_params, list):
-            detail = f"bc_params_type={type(bc_params).__name__}"
-            LOGGER.error(
-                "[NewtonRigid] backend=newton_rigid operation=set_boundary_conditions "
-                "detail=%s",
-                detail,
+        new_planes = register_boundary_conditions(
+            builder=builder,
+            bc_params=bc_params,
+            bbox_lo=self._bbox_lo,
+            bbox_hi=self._bbox_hi,
+        )
+        base_idx = len(self._plane_equations)
+        self._plane_equations.extend(new_planes)
+        for idx, (normal, d_value) in enumerate(new_planes, start=base_idx):
+            LOGGER.info(
+                "[NewtonRigid] Plane #%s: normal=[%.6f, %.6f, %.6f], d=%.6f",
+                idx,
+                normal[0],
+                normal[1],
+                normal[2],
+                d_value,
             )
-            raise configuration_error(
-                owner="newton_rigid",
-                operation="set_boundary_conditions",
-                expected="bc_params must be list",
-                detail=detail,
-            )
-
-        for bc in bc_params:
-            if not isinstance(bc, dict):
-                detail = f"bc_item_type={type(bc).__name__}"
-                LOGGER.error(
-                    "[NewtonRigid] backend=newton_rigid operation=set_boundary_conditions "
-                    "detail=%s",
-                    detail,
-                )
-                raise configuration_error(
-                    owner="newton_rigid",
-                    operation="set_boundary_conditions",
-                    expected="each bc item must be dict",
-                    detail=detail,
-                )
-            bc_type = bc.get("type", "")
-
-            if bc_type == "surface_collider":
-                plane, mu = surface_plane_from_bc(bc)
-                plane_cfg = newton.ModelBuilder.ShapeConfig(mu=mu)
-                builder.add_shape_plane(plane=plane, cfg=plane_cfg)
-                n_list = [plane[0], plane[1], plane[2]]
-                d_f = plane[3]
-                self._plane_equations.append((n_list, d_f))
-                LOGGER.info(
-                    f"[NewtonRigid] Plane #{len(self._plane_equations)-1}: "
-                    f"normal=[{n_list[0]:.6f}, {n_list[1]:.6f}, {n_list[2]:.6f}], "
-                    f"d={d_f:.6f}, point={bc['point']}, mu={mu}"
-                )
-
-            elif bc_type == "bounding_box":
-                if self._bbox_lo is None or self._bbox_hi is None:
-                    detail = "bounding box unavailable; initialize() did not set bbox"
-                    LOGGER.error(
-                        "[NewtonRigid] backend=newton_rigid operation=set_boundary_conditions "
-                        "detail=%s",
-                        detail,
-                    )
-                    raise lifecycle_error(
-                        owner="newton_rigid",
-                        operation="set_boundary_conditions",
-                        expected="initialize() must set bbox before bounding_box BC",
-                        detail=detail,
-                    )
-                margin = 0.01
-                wall_cfg = newton.ModelBuilder.ShapeConfig(mu=0.3)
-                lo = self._bbox_lo
-                hi = self._bbox_hi
-                planes = build_bounding_box_planes(lo=lo, hi=hi, margin=margin)
-                for p in planes:
-                    builder.add_shape_plane(plane=p, cfg=wall_cfg)
+        if any(isinstance(bc, dict) and bc.get("type") == "bounding_box" for bc in bc_params):
+            lo = self._bbox_lo
+            hi = self._bbox_hi
+            if lo is not None and hi is not None:
                 LOGGER.info(
                     f"[NewtonRigid] Bounding box "
                     f"[{lo[0]:.2f},{lo[1]:.2f},{lo[2]:.2f}] – "

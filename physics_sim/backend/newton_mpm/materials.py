@@ -13,9 +13,20 @@ from physics_sim.coord import (
     gravity_contract_error,
     normalize_internal_gravity,
 )
+from physics_sim.errors import configuration_error
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
+
+_SOLVER_OPT_TYPES = {
+    "max_iterations": int,
+    "tolerance": float,
+    "solver": str,
+    "grid_type": str,
+    "transfer_scheme": str,
+    "air_drag": float,
+    "grid_padding": int,
+}
 
 MATERIAL_PRESETS: dict[str, dict[str, float | None]] = {
     "sand": dict(
@@ -162,6 +173,72 @@ def apply_material_to_model(
             per_object=per_object,
             device=device,
         )
+
+
+def apply_solver_options(
+    *,
+    solver_opts: Any,
+    material_params: dict[str, Any],
+) -> None:
+    """Apply Newton solver options encoded in material params."""
+    try:
+        rpic = float(material_params.get("rpic_damping", 0.0))
+    except (TypeError, ValueError) as exc:
+        detail = f"invalid rpic_damping={material_params.get('rpic_damping')!r}"
+        raise configuration_error(
+            owner="newton_mpm",
+            operation="set_material",
+            expected="rpic_damping must be numeric",
+            detail=detail,
+        ) from exc
+    solver_opts.transfer_scheme = "pic" if rpic < 0 else "apic"
+
+    newton_opts = material_params.get("newton_solver_opts", {})
+    if not isinstance(newton_opts, dict):
+        detail = f"newton_solver_opts_type={type(newton_opts).__name__}"
+        raise configuration_error(
+            owner="newton_mpm",
+            operation="set_material",
+            expected="newton_solver_opts must be dict",
+            detail=detail,
+        )
+
+    available_opts = {
+        name
+        for name in dir(solver_opts)
+        if not name.startswith("_") and not callable(getattr(solver_opts, name))
+    }
+    for key, val in newton_opts.items():
+        if key not in available_opts:
+            detail = (
+                f"unknown newton_solver_opts key={key!r} "
+                f"available={sorted(available_opts)}"
+            )
+            raise configuration_error(
+                owner="newton_mpm",
+                operation="set_material",
+                expected="newton_solver_opts keys must match SolverImplicitMPM.Config",
+                detail=detail,
+            )
+        cast = _SOLVER_OPT_TYPES.get(key)
+        if cast is None:
+            current = getattr(solver_opts, key)
+            cast = type(current) if current is not None else type(val)
+        try:
+            cast_val = cast(val)
+        except (TypeError, ValueError) as exc:
+            detail = (
+                f"solver option {key!r} expects {cast.__name__}, "
+                f"got value={val!r}"
+            )
+            raise configuration_error(
+                owner="newton_mpm",
+                operation="set_material",
+                expected=f"newton_solver_opts.{key} must be {cast.__name__}",
+                detail=detail,
+            ) from exc
+        setattr(solver_opts, key, cast_val)
+        LOGGER.info("[NewtonMPM] solver.%s=%s", key, cast_val)
 
 
 def apply_per_object_materials(

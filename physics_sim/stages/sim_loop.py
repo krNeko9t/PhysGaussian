@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import os
 import glob as _glob
+import json
+import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -27,6 +29,32 @@ from physics_sim.render.interfaces import RenderRuntime
 from physics_sim.render.registries import resolve_camera_for_mode
 
 LOGGER = get_logger(__name__)
+_DEBUG_LOG_PATH = "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/PhysGaussian/.cursor/debug-e9c2ff.log"
+_DEBUG_SESSION_ID = "e9c2ff"
+
+
+def _agent_debug_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict,
+) -> None:
+    try:
+        payload = {
+            "sessionId": _DEBUG_SESSION_ID,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
 
 if TYPE_CHECKING:
     from physics_sim.backend.base import PhysicsBackend
@@ -45,6 +73,174 @@ class RenderArgs:
     white_bg: bool = False
 
 
+@dataclass
+class _DynamicStateSlice:
+    """Per-frame dynamic tensors for the simulated particles."""
+
+    positions: torch.Tensor
+    covariances: torch.Tensor
+    rotations: torch.Tensor
+    quats: torch.Tensor | None
+    scales: torch.Tensor | None
+
+
+def _advance_simulation_substeps(
+    backend: PhysicsBackend,
+    *,
+    substep_dt: float,
+    step_per_frame: int,
+    frame: int,
+) -> None:
+    for _ in range(step_per_frame):
+        backend.step(substep_dt, frame)
+
+
+def _slice_dynamic_state(
+    backend: PhysicsBackend,
+    *,
+    gs_num: int,
+    gs_type: str,
+    device: str,
+) -> _DynamicStateSlice:
+    state = backend.get_state()
+    quats = scales = None
+    if gs_type == "2dgs" and state.quats is not None and state.scales is not None:
+        quats = state.quats[:gs_num].to(device)
+        scales = state.scales[:gs_num].to(device)
+    return _DynamicStateSlice(
+        positions=state.positions[:gs_num].to(device),
+        covariances=state.covariances[:gs_num].to(device),
+        rotations=state.rotations[:gs_num].to(device),
+        quats=quats,
+        scales=scales,
+    )
+
+
+def _log_backend_diagnostics(backend: PhysicsBackend, *, frame: int) -> None:
+    diag = backend.get_diagnostics()
+    if not diag:
+        return
+    bodies = diag.get("bodies", [])
+    for bd in bodies:
+        p, v = bd["pos"], bd["vel"]
+        pdists = bd["plane_distances"]
+        nan_flag = " *** NaN! ***" if bd["has_nan"] else ""
+        dist_str = "  ".join(f"plane{pi}={sd:+.4f}" for pi, sd in pdists)
+        LOGGER.info(
+            "[DIAG] frame=%s name=%s pos=[%.4f,%.4f,%.4f] vel=[%.4f,%.4f,%.4f] %s%s",
+            frame,
+            bd["name"],
+            p[0],
+            p[1],
+            p[2],
+            v[0],
+            v[1],
+            v[2],
+            dist_str,
+            nan_flag,
+        )
+
+
+def _validate_particle_positions(positions: torch.Tensor, *, frame: int) -> None:
+    nan_mask = ~torch.isfinite(positions).all(dim=1)
+    extreme_mask = (positions.abs() > 100.0).any(dim=1)
+    bad_mask = nan_mask | extreme_mask
+    if not bad_mask.any():
+        return
+    n_nan = int(nan_mask.sum().item())
+    n_ext = int((extreme_mask & ~nan_mask).sum().item())
+    raise RuntimeError(
+        "Simulation diverged with invalid particles: "
+        f"frame={frame}, nan_or_inf={n_nan}, extreme={n_ext}"
+    )
+
+
+def _compose_render_inputs(
+    scene_data: SceneData,
+    dynamic_state: _DynamicStateSlice,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
+    positions = dynamic_state.positions
+    covariances = dynamic_state.covariances
+    opacities = scene_data.sim_opacity
+    shs = scene_data.sim_shs
+    quats = dynamic_state.quats
+    scales = dynamic_state.scales
+
+    has_static = len(scene_data.static_chunks) > 0
+    if has_static:
+        positions = torch.cat([positions, scene_data.static_pos], dim=0)
+        covariances = torch.cat([covariances, scene_data.static_cov], dim=0)
+        opacities = torch.cat([scene_data.sim_opacity, scene_data.static_opacity], dim=0)
+        shs = torch.cat([scene_data.sim_shs, scene_data.static_shs], dim=0)
+        if quats is not None and scene_data.static_quats is not None:
+            quats = torch.cat([quats, scene_data.static_quats], dim=0)
+            scales = torch.cat([scales, scene_data.static_scales], dim=0)
+
+    # region agent log
+    _agent_debug_log(
+        run_id="run1",
+        hypothesis_id="H1",
+        location="physics_sim/stages/sim_loop.py:_compose_render_inputs:return",
+        message="compose_render_inputs output signature",
+        data={
+            "returns_shs": shs is not None,
+            "positions_n": int(positions.shape[0]),
+            "opacities_n": int(opacities.shape[0]),
+            "shs_n": int(shs.shape[0]),
+            "has_quats": quats is not None,
+        },
+    )
+    # endregion
+    return positions, covariances, dynamic_state.rotations, opacities, shs, quats, scales
+
+
+def _write_frame_png(*, rendering: torch.Tensor, output_dir: str, frame: int) -> None:
+    cv2_img = rendering.permute(1, 2, 0).detach().cpu().numpy()
+    cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+    cv2.imwrite(
+        os.path.join(output_dir, f"{frame:04d}.png"),
+        255 * cv2_img,
+    )
+
+
+def _cleanup_stale_frames(*, output_dir: str, frame_num: int) -> None:
+    stale = sorted(_glob.glob(os.path.join(output_dir, "[0-9]*.png")))
+    if not stale:
+        return
+    expected = {os.path.join(output_dir, f"{i:04d}.png") for i in range(frame_num)}
+    to_remove = [p for p in stale if p not in expected]
+    if not to_remove:
+        return
+    LOGGER.info("Removing stale frame PNGs: %s", len(to_remove))
+    for path in to_remove:
+        os.remove(path)
+
+
+def _save_final_state_npz(
+    *,
+    output_dir: str,
+    positions: torch.Tensor,
+    covariances: torch.Tensor,
+    rotations: torch.Tensor,
+) -> None:
+    out_path = os.path.join(output_dir, "final_state.npz")
+    np.savez_compressed(
+        out_path,
+        positions=positions.detach().cpu().numpy(),
+        covariances=covariances.detach().cpu().numpy(),
+        rotations=rotations.detach().cpu().numpy(),
+    )
+    LOGGER.info("Saved final state to %s", out_path)
+
+
 def run_headless(
     cfg: SimConfig,
     backend: PhysicsBackend,
@@ -58,23 +254,25 @@ def run_headless(
 
     LOGGER.info("Running simulation (no rendering)...")
     for frame in tqdm(range(tc.frame_num), desc="Simulating"):
-        for _ in range(step_per_frame):
-            backend.step(substep_dt, frame)
+        _advance_simulation_substeps(
+            backend,
+            substep_dt=substep_dt,
+            step_per_frame=step_per_frame,
+            frame=frame,
+        )
 
-    state = backend.get_state()
-    gs_num = scene_data.gs_num
-    pos = state.positions[:gs_num].to(device)
-    cov3D = state.covariances[:gs_num].to(device)
-    rot = state.rotations[:gs_num].to(device)
-
-    out_path = os.path.join(cfg.output, "final_state.npz")
-    np.savez_compressed(
-        out_path,
-        positions=pos.detach().cpu().numpy(),
-        covariances=cov3D.detach().cpu().numpy(),
-        rotations=rot.detach().cpu().numpy(),
+    state = _slice_dynamic_state(
+        backend,
+        gs_num=scene_data.gs_num,
+        gs_type=scene_data.gs_type,
+        device=device,
     )
-    LOGGER.info("Saved final state to %s", out_path)
+    _save_final_state_npz(
+        output_dir=cfg.output,
+        positions=state.positions,
+        covariances=state.covariances,
+        rotations=state.rotations,
+    )
 
 
 def run_with_rendering(
@@ -107,17 +305,7 @@ def run_with_rendering(
         frame_num,
     )
 
-    # Clean up stale frame PNGs
-    stale = sorted(_glob.glob(os.path.join(output_dir, "[0-9]*.png")))
-    if stale:
-        expected = {
-            os.path.join(output_dir, f"{i:04d}.png") for i in range(frame_num)
-        }
-        to_remove = [p for p in stale if p not in expected]
-        if to_remove:
-            LOGGER.info("Removing stale frame PNGs: %s", len(to_remove))
-            for p in to_remove:
-                os.remove(p)
+    _cleanup_stale_frames(output_dir=output_dir, frame_num=frame_num)
 
     bg_color = (
         torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda")
@@ -125,15 +313,8 @@ def run_with_rendering(
         else torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
     )
 
-    gs_num = scene_data.gs_num
-    opacity_render = scene_data.sim_opacity
-    shs_render = scene_data.sim_shs
-    has_static = len(scene_data.static_chunks) > 0
     alignment_inv = scene_data.alignment_inv
     source_axes = scene_data.source_axes
-
-    height: Optional[int] = None
-    width: Optional[int] = None
 
     for frame in tqdm(range(frame_num), desc="Simulating"):
         camera = resolve_camera_for_mode(
@@ -147,74 +328,63 @@ def run_with_rendering(
             source_axes=source_axes,
         )
 
-        # Physics substeps
-        for _ in range(step_per_frame):
-            backend.step(substep_dt, frame)
+        _advance_simulation_substeps(
+            backend,
+            substep_dt=substep_dt,
+            step_per_frame=step_per_frame,
+            frame=frame,
+        )
 
-        state = backend.get_state()
-        pos = state.positions[:gs_num].to(device)
-        cov3D = state.covariances[:gs_num].to(device)
-        rot = state.rotations[:gs_num].to(device)
+        dynamic_state = _slice_dynamic_state(
+            backend,
+            gs_num=scene_data.gs_num,
+            gs_type=scene_data.gs_type,
+            device=device,
+        )
+        _log_backend_diagnostics(backend, frame=frame)
+        _validate_particle_positions(dynamic_state.positions, frame=frame)
 
-        # Diagnostics
-        if hasattr(backend, "get_diagnostics"):
-            diag = backend.get_diagnostics()
-            for bd in diag["bodies"]:
-                p, v = bd["pos"], bd["vel"]
-                pdists = bd["plane_distances"]
-                nan_flag = " *** NaN! ***" if bd["has_nan"] else ""
-                dist_str = "  ".join(
-                    f"plane{pi}={sd:+.4f}" for pi, sd in pdists
-                )
-                LOGGER.info(
-                    "[DIAG] frame=%s name=%s pos=[%.4f,%.4f,%.4f] vel=[%.4f,%.4f,%.4f] %s%s",
-                    frame,
-                    bd["name"],
-                    p[0],
-                    p[1],
-                    p[2],
-                    v[0],
-                    v[1],
-                    v[2],
-                    dist_str,
-                    nan_flag,
-                )
-
-        # Sanitize bad particles
-        nan_mask = ~torch.isfinite(pos).all(dim=1)
-        extreme_mask = (pos.abs() > 100.0).any(dim=1)
-        bad_mask = nan_mask | extreme_mask
-        if bad_mask.any():
-            n_nan = int(nan_mask.sum().item())
-            n_ext = int((extreme_mask & ~nan_mask).sum().item())
-            raise RuntimeError(
-                "Simulation diverged with invalid particles: "
-                f"frame={frame}, nan_or_inf={n_nan}, extreme={n_ext}"
+        (
+            pos,
+            cov3D,
+            rot,
+            cur_opacity,
+            cur_shs,
+            render_quats,
+            render_scales,
+        ) = _compose_render_inputs(scene_data, dynamic_state)
+        if frame == 0:
+            # region agent log
+            _agent_debug_log(
+                run_id="run1",
+                hypothesis_id="H2",
+                location="physics_sim/stages/sim_loop.py:run_with_rendering:post_unpack",
+                message="locals after compose unpack",
+                data={
+                    "has_cur_opacity": "cur_opacity" in locals(),
+                    "has_cur_shs": "cur_shs" in locals(),
+                    "has_pos": "pos" in locals(),
+                    "has_rot": "rot" in locals(),
+                },
             )
-
-        # 2DGS quats/scales — already in Y-up, no inverse needed
-        render_quats = render_scales = None
-        if scene_data.gs_type == "2dgs" and state.quats is not None:
-            render_quats = state.quats[:gs_num].to(device)
-            render_scales = state.scales[:gs_num].to(device)
-
-        # Combine with static geometry
-        cur_opacity = opacity_render
-        cur_shs = shs_render
-        if has_static:
-            pos = torch.cat([pos, scene_data.static_pos], dim=0)
-            cov3D = torch.cat([cov3D, scene_data.static_cov], dim=0)
-            cur_opacity = torch.cat([opacity_render, scene_data.static_opacity], dim=0)
-            cur_shs = torch.cat([shs_render, scene_data.static_shs], dim=0)
-            if render_quats is not None and scene_data.static_quats is not None:
-                render_quats = torch.cat(
-                    [render_quats, scene_data.static_quats], dim=0,
-                )
-                render_scales = torch.cat(
-                    [render_scales, scene_data.static_scales], dim=0,
-                )
+            # endregion
 
         # SH -> RGB (alignment_inv transforms view dirs to PLY-native space)
+        if frame == 0:
+            # region agent log
+            _agent_debug_log(
+                run_id="run1",
+                hypothesis_id="H3",
+                location="physics_sim/stages/sim_loop.py:run_with_rendering:before_convert_sh",
+                message="convert_sh precondition check",
+                data={
+                    "has_cur_shs": "cur_shs" in locals(),
+                    "scene_has_sim_shs": scene_data.sim_shs is not None,
+                    "scene_sim_shs_n": int(scene_data.sim_shs.shape[0]),
+                    "has_static_chunks": len(scene_data.static_chunks) > 0,
+                },
+            )
+            # endregion
         colors_precomp = render_runtime.convert_sh(
             cur_shs, camera, pos, rot,
             alignment_inv=alignment_inv,
@@ -239,14 +409,10 @@ def run_with_rendering(
                 cov6=cov3D,
             )
 
-        cv2_img = rendering.permute(1, 2, 0).detach().cpu().numpy()
-        cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-        if height is None or width is None:
-            height = cv2_img.shape[0] // 2 * 2
-            width = cv2_img.shape[1] // 2 * 2
-        cv2.imwrite(
-            os.path.join(output_dir, f"{frame:04d}.png"),
-            255 * cv2_img,
+        _write_frame_png(
+            rendering=rendering,
+            output_dir=output_dir,
+            frame=frame,
         )
 
     LOGGER.info("Rendering loop finished.")

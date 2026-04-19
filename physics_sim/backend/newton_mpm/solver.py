@@ -7,7 +7,6 @@ through PhysicsBackend / SimulationState, matching the existing WarpMPMBackend.
 
 from __future__ import annotations
 
-import math
 import numpy as np
 import warp as wp
 import torch
@@ -20,22 +19,13 @@ from physics_sim.backend.newton_mpm.boundary_conditions import (
     BoundaryConditionRuntime,
     register_boundary_conditions,
 )
-from physics_sim.backend.newton_mpm.materials import apply_material_to_model
+from physics_sim.backend.newton_mpm.initialization import build_mpm_initialization
+from physics_sim.backend.newton_mpm.materials import apply_material_to_model, apply_solver_options
 from physics_sim.backend.newton_mpm.state_export import export_mpm_state
 from physics_sim.errors import configuration_error, lifecycle_error
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
-
-_SOLVER_OPT_TYPES = {
-    "max_iterations": int,
-    "tolerance": float,
-    "solver": str,
-    "grid_type": str,
-    "transfer_scheme": str,
-    "air_drag": float,
-    "grid_padding": int,
-}
 
 
 class NewtonMPMBackend(PhysicsBackend):
@@ -103,61 +93,27 @@ class NewtonMPMBackend(PhysicsBackend):
             grid_lim:    Ignored (kept for interface compat).  voxel_size
                          is computed from particle bounding box / n_grid.
         """
-        self._n_particles = positions.shape[0]
-        n = self._n_particles
-
-        # ── Compute voxel_size from particle bounding box ────────────
-        pos_np = positions.detach().cpu().numpy().astype(np.float32)
-        lo = pos_np.min(axis=0)
-        hi = pos_np.max(axis=0)
-        max_extent = float((hi - lo).max())
-        if max_extent < 1e-8:
-            max_extent = 1.0
-        voxel_size = max_extent / max(n_grid, 1)
-        self._grid_lim = max_extent
-        self._bbox_lo = lo.tolist()
-        self._bbox_hi = hi.tolist()
-        self._solver_opts.voxel_size = voxel_size
-        LOGGER.info(
-            "[NewtonMPM] bbox_extent=%.4f voxel_size=%.6f", max_extent, voxel_size
+        self._n_particles = int(positions.shape[0])
+        init_result = build_mpm_initialization(
+            positions=positions,
+            volumes=volumes,
+            covariances=covariances,
+            n_grid=n_grid,
         )
-
-        # ── Build Newton ModelBuilder (finalized in finalize()) ──────
-        builder = newton.ModelBuilder()
-        SolverImplicitMPM.register_custom_attributes(builder)
-
-        vol_np = volumes.detach().cpu().numpy().astype(np.float32)
-
-        # Compute per-particle mass from volume (density set later in set_material)
-        # Use a placeholder density of 1.0; actual mass will be recomputed.
-        mass_np = vol_np.copy()  # mass = vol * density, density=1 placeholder
-
-        # Compute radius from volume (sphere approximation)
-        radius_np = np.cbrt(vol_np * 3.0 / (4.0 * math.pi)).astype(np.float32)
-        radius_np = np.maximum(radius_np, 1e-6)
-
-        # Batch add particles
-        pos_list = [wp.vec3(float(pos_np[i, 0]), float(pos_np[i, 1]), float(pos_np[i, 2]))
-                    for i in range(n)]
-        vel_list = [wp.vec3(0.0, 0.0, 0.0)] * n
-        mass_list = [float(mass_np[i]) for i in range(n)]
-        radius_list = [float(radius_np[i]) for i in range(n)]
-        flags_list = [int(newton.ParticleFlags.ACTIVE)] * n
-
-        builder.add_particles(
-            pos=pos_list,
-            vel=vel_list,
-            mass=mass_list,
-            radius=radius_list,
-            flags=flags_list,
+        self._grid_lim = init_result.grid_lim
+        self._bbox_lo = init_result.bbox_lo
+        self._bbox_hi = init_result.bbox_hi
+        self._solver_opts.voxel_size = init_result.voxel_size
+        LOGGER.info(
+            "[NewtonMPM] bbox_extent=%.4f voxel_size=%.6f",
+            init_result.grid_lim,
+            init_result.voxel_size,
         )
 
         # Store builder + arrays; finalize() will create model + solver.
-        self._builder = builder
-        self._cov_np = (
-            covariances.detach().cpu().numpy().astype(np.float32).reshape(-1)
-        )
-        self._volumes = vol_np
+        self._builder = init_result.builder
+        self._cov_np = init_result.cov_flat
+        self._volumes = init_result.volumes
 
         # 2DGS: store initial quats + scales for SVD-based output
         iq = kwargs.get("init_quats")
@@ -207,92 +163,10 @@ class NewtonMPMBackend(PhysicsBackend):
 
         # Store material params; applied to the finalized model in finalize().
         self._material_params = dict(material_params)
-
-        # ── Solver options from material params ──────────────────────
-        # Transfer scheme: map rpic_damping → "pic" / "apic"
-        try:
-            rpic = float(material_params.get("rpic_damping", 0.0))
-        except (TypeError, ValueError) as exc:
-            detail = f"invalid rpic_damping={material_params.get('rpic_damping')!r}"
-            LOGGER.error(
-                "[NewtonMPM] backend=newton_mpm operation=set_material detail=%s",
-                detail,
-            )
-            raise configuration_error(
-                owner="newton_mpm",
-                operation="set_material",
-                expected="rpic_damping must be numeric",
-                detail=detail,
-            ) from exc
-        if rpic < 0:
-            self._solver_opts.transfer_scheme = "pic"
-        else:
-            self._solver_opts.transfer_scheme = "apic"
-
-        # Apply solver option overrides from config ("newton_mpm" → "solver").
-        # Any key that exists as an attribute on SolverImplicitMPM.Config
-        # can be overridden here.
-        newton_opts = material_params.get("newton_solver_opts", {})
-        if not isinstance(newton_opts, dict):
-            detail = f"newton_solver_opts_type={type(newton_opts).__name__}"
-            LOGGER.error(
-                "[NewtonMPM] backend=newton_mpm operation=set_material detail=%s",
-                detail,
-            )
-            raise configuration_error(
-                owner="newton_mpm",
-                operation="set_material",
-                expected="newton_solver_opts must be dict",
-                detail=detail,
-            )
-
-        available_opts = {
-            name
-            for name in dir(self._solver_opts)
-            if not name.startswith("_") and not callable(getattr(self._solver_opts, name))
-        }
-        for key, val in newton_opts.items():
-            if key not in available_opts:
-                detail = (
-                    f"unknown newton_solver_opts key={key!r} "
-                    f"available={sorted(available_opts)}"
-                )
-                LOGGER.error(
-                    "[NewtonMPM] backend=newton_mpm operation=set_material detail=%s",
-                    detail,
-                )
-                raise configuration_error(
-                    owner="newton_mpm",
-                    operation="set_material",
-                    expected="newton_solver_opts keys must match SolverImplicitMPM.Config",
-                    detail=detail,
-                )
-            cast = _SOLVER_OPT_TYPES.get(key)
-            if cast is None:
-                current = getattr(self._solver_opts, key)
-                cast = type(current) if current is not None else type(val)
-            try:
-                cast_val = cast(val)
-            except (TypeError, ValueError) as exc:
-                detail = (
-                    f"solver option {key!r} expects {cast.__name__}, "
-                    f"got value={val!r}"
-                )
-                LOGGER.error(
-                    "[NewtonMPM] backend=newton_mpm operation=set_material detail=%s",
-                    detail,
-                )
-                raise configuration_error(
-                    owner="newton_mpm",
-                    operation="set_material",
-                    expected=f"newton_solver_opts.{key} must be {cast.__name__}",
-                    detail=detail,
-                ) from exc
-            setattr(self._solver_opts, key, cast_val)
-            LOGGER.info("[NewtonMPM] solver.%s=%s", key, cast_val)
-
-        # NOTE: Material fields on the Newton model are not available until
-        # builder.finalize() is called. We apply physical parameters in finalize().
+        apply_solver_options(
+            solver_opts=self._solver_opts,
+            material_params=self._material_params,
+        )
 
     def set_boundary_conditions(self, bc_params: list, time_params: dict) -> None:
         """Register BCs and build per-step BC runtime."""

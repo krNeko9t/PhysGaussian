@@ -82,3 +82,11 @@ class PhysicsBackend(ABC):
         (original + filled), so the caller can slice [:gs_num] as needed.
         """
         ...
+
+    def get_diagnostics(self) -> Optional[dict]:
+        """Optional diagnostics hook consumed by the stage loop.
+
+        Backends that do not expose runtime diagnostics should keep
+        the default ``None`` implementation.
+        """
+        return None

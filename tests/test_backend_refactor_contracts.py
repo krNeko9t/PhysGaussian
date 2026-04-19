@@ -12,6 +12,8 @@ def _read(rel_path: str) -> str:
 
 def test_newton_common_helpers_are_single_source():
     rigid_src = _read("physics_sim/backend/newton_rigid/solver.py")
+    rigid_builders = _read("physics_sim/backend/newton_rigid/collider_builders.py")
+    rigid_export = _read("physics_sim/backend/newton_rigid/state_export.py")
     vbd_src = _read("physics_sim/backend/newton_vbd/solver.py")
 
     for token in (
@@ -23,7 +25,8 @@ def test_newton_common_helpers_are_single_source():
     ):
         assert token not in rigid_src
         assert token not in vbd_src
-    assert "backend.newton_common" in rigid_src
+    assert "backend.newton_common" in rigid_builders
+    assert "backend.newton_common" in rigid_export
 
 
 def test_solver_modules_are_split_and_keep_orchestrator_role():
@@ -35,8 +38,8 @@ def test_solver_modules_are_split_and_keep_orchestrator_role():
     assert "from physics_sim.backend.newton_rigid.state_export import" in rigid_src
     assert "def _create_body_mesh(" not in rigid_src
 
-    assert "from physics_sim.backend.newton_vbd.barycentric import" in vbd_src
     assert "from physics_sim.backend.newton_vbd.rigid_mesh import" in vbd_src
+    assert "from physics_sim.backend.newton_vbd.soft_grid import" in vbd_src
     assert "from physics_sim.backend.newton_vbd.state_export import" in vbd_src
     assert "def _create_rigid_mesh(" not in vbd_src
     assert "def _compute_barycentric(" not in vbd_src
@@ -62,7 +65,7 @@ def test_coord_domain_split_keeps_public_facade():
 def test_surface_friction_resolution_logic_is_centralized():
     shared = _read("physics_sim/backend/newton_common/boundary.py")
     mpm = _read("physics_sim/backend/newton_mpm/boundary_conditions.py")
-    rigid = _read("physics_sim/backend/newton_rigid/solver.py")
+    rigid = _read("physics_sim/backend/newton_rigid/boundary_conditions.py")
     vbd = _read("physics_sim/backend/newton_vbd/solver.py")
 
     assert "def resolve_surface_friction" in shared
@@ -75,6 +78,7 @@ def test_surface_friction_resolution_logic_is_centralized():
 def test_material_friction_resolution_has_single_path():
     src = _read("physics_sim/backend/newton_mpm/materials.py")
     assert "def resolve_friction(" in src
+    assert "def apply_solver_options(" in src
     assert 'if "friction" in material_cfg' in src
     assert 'if "friction_angle" in material_cfg' in src
     assert 'if mat_name == "sand":' in src
