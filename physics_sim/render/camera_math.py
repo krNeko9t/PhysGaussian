@@ -129,7 +129,18 @@ def get_current_radius_azimuth_and_elevation(
 def camera_extrinsics_from_raw(
     raw_camera: dict,
 ) -> tuple[np.ndarray, np.ndarray, int, int, float, float]:
-    """Convert camera dict payload to renderer-ready extrinsics/intrinsics."""
+    """Convert normalized camera payload into renderer-ready extrinsics/intrinsics.
+
+    Contract for ``raw_camera``:
+    - ``rotation`` / ``position`` represent a camera-to-world pose (c2w) in the
+      internal world frame.
+    - Camera axes are expected in the renderer's camera frame convention
+      (+X right, +Y down, +Z forward).
+    - ``width`` / ``height`` / ``fx`` / ``fy`` are pixel-space intrinsics.
+
+    This function converts c2w into the legacy ``R, T`` representation consumed by
+    ``getWorld2View2`` and downstream rasterizers.
+    """
     tmp = np.zeros((4, 4))
     tmp[:3, :3] = raw_camera["rotation"]
     tmp[:3, 3] = raw_camera["position"]

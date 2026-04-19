@@ -21,6 +21,19 @@ When `camera_mode="external"`, config must provide:
 
 The parser normalizes all formats to internal `c2w` and then builds `SimpleCamera`.
 
+### Coordinate Responsibilities
+
+- `camera_pose_convention` decides how storage pose is interpreted:
+  - `opencv_w2c`: payload stores world-to-camera; parser inverts to c2w.
+  - `opengl_c2w`: payload stores c2w in OpenGL camera axes; parser converts
+    camera axes to renderer camera axes before continuing.
+- `camera_world_frame` decides whether c2w is already in internal world:
+  - `internal`: keep pose unchanged.
+  - `source`: align pose with the same `SourceAxes` used by scene assembly.
+
+Keep these two axes independent: pose convention is about camera axes and matrix
+direction, while world frame is about source/internal basis alignment.
+
 ## Add a New Camera Format
 
 1. Add format name to `CameraConfig.camera_format` in `physics_sim/config/models.py`.

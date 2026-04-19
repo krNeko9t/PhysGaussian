@@ -92,7 +92,12 @@ def test_external_camera_source_frame_alignment(tmp_path):
     )
     raw = load_external_camera_raw(camera_params=params, source_axes=source_axes)
     align = alignment_matrix_np(source_axes)
-    assert np.allclose(np.asarray(raw["rotation"], dtype=np.float32), align, atol=1e-6)
+    opengl_axis_fix = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
+    assert np.allclose(
+        np.asarray(raw["rotation"], dtype=np.float32),
+        align @ opengl_axis_fix,
+        atol=1e-6,
+    )
     assert np.allclose(
         np.asarray(raw["position"], dtype=np.float32),
         align @ np.array([1.0, 2.0, 3.0], dtype=np.float32),
@@ -100,7 +105,7 @@ def test_external_camera_source_frame_alignment(tmp_path):
     )
 
 
-def test_external_pose_conventions_normalize_to_same_c2w(tmp_path):
+def test_external_pose_conventions_apply_expected_axis_semantics(tmp_path):
     camera_path = _write_json(
         tmp_path,
         "camera.json",
@@ -138,5 +143,24 @@ def test_external_pose_conventions_normalize_to_same_c2w(tmp_path):
         camera_params={**common, "camera_pose_convention": "opencv_w2c", "camera_index": 1},
         source_axes=SourceAxes.identity(),
     )
-    assert np.allclose(c2w_raw["rotation"], w2c_raw["rotation"], atol=1e-6)
-    assert np.allclose(c2w_raw["position"], w2c_raw["position"], atol=1e-6)
+    opengl_expected_rot = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
+    assert np.allclose(
+        np.asarray(c2w_raw["rotation"], dtype=np.float32),
+        opengl_expected_rot,
+        atol=1e-6,
+    )
+    assert np.allclose(
+        np.asarray(c2w_raw["position"], dtype=np.float32),
+        np.array([0.0, 0.0, 2.0], dtype=np.float32),
+        atol=1e-6,
+    )
+    assert np.allclose(
+        np.asarray(w2c_raw["rotation"], dtype=np.float32),
+        np.eye(3, dtype=np.float32),
+        atol=1e-6,
+    )
+    assert np.allclose(
+        np.asarray(w2c_raw["position"], dtype=np.float32),
+        np.array([0.0, 0.0, 2.0], dtype=np.float32),
+        atol=1e-6,
+    )

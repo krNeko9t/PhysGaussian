@@ -7,7 +7,12 @@ from typing import Any
 
 import numpy as np
 
-from physics_sim.coord import SourceAxes, alignment_matrix_np
+from physics_sim.coord import (
+    SourceAxes,
+    align_c2w_world_frame,
+    normalize_pose_to_c2w,
+    to_raw_camera_payload,
+)
 
 _SUPPORTED_FORMATS = {"colmap", "blender", "nerfstudio", "physgaussian", "opencv", "opengl"}
 _SUPPORTED_CONVENTIONS = {"opencv_w2c", "opengl_c2w"}
@@ -52,12 +57,12 @@ def load_external_camera_raw(
             payload, camera_index, camera_path
         )
 
-    rot_c2w, pos_c2w = _to_c2w(
+    rot_c2w, pos_c2w = normalize_pose_to_c2w(
         rotation=rotation,
         position=position,
         pose_convention=pose_convention,
     )
-    rot_c2w, pos_c2w = _to_internal_world(
+    rot_c2w, pos_c2w = align_c2w_world_frame(
         rotation_c2w=rot_c2w,
         position_c2w=pos_c2w,
         world_frame=world_frame,
@@ -65,7 +70,14 @@ def load_external_camera_raw(
     )
     _validate_rotation(rot_c2w, camera_path)
     _validate_intrinsics(width, height, fx, fy, camera_path)
-    return dict(rotation=rot_c2w.tolist(), position=pos_c2w.tolist(), width=width, height=height, fx=fx, fy=fy)
+    return to_raw_camera_payload(
+        rotation_c2w=rot_c2w,
+        position_c2w=pos_c2w,
+        width=width,
+        height=height,
+        fx=fx,
+        fy=fy,
+    )
 
 
 def _load_json_payload(camera_path: str) -> Any:
@@ -178,42 +190,6 @@ def _parse_intrinsics(
             "Need width/height/fx/fy (or w/h/fl_x/fl_y)."
         )
     return int(width), int(height), float(fx), float(fy)
-
-
-def _to_c2w(
-    *,
-    rotation: np.ndarray,
-    position: np.ndarray,
-    pose_convention: str,
-) -> tuple[np.ndarray, np.ndarray]:
-    if pose_convention == "opengl_c2w":
-        return rotation, position
-    if pose_convention == "opencv_w2c":
-        w2c = np.eye(4, dtype=np.float32)
-        w2c[:3, :3] = rotation
-        w2c[:3, 3] = position
-        c2w = np.linalg.inv(w2c)
-        return c2w[:3, :3], c2w[:3, 3]
-    raise ValueError(f"Unsupported pose convention: {pose_convention}")
-
-
-def _to_internal_world(
-    *,
-    rotation_c2w: np.ndarray,
-    position_c2w: np.ndarray,
-    world_frame: str,
-    source_axes: SourceAxes | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    if world_frame == "internal":
-        return rotation_c2w, position_c2w
-    if world_frame != "source":
-        raise ValueError(f"Unsupported camera_world_frame: {world_frame}")
-    if source_axes is None:
-        raise ValueError("camera_world_frame='source' requires source_axes from scene setup")
-    if source_axes.is_identity:
-        return rotation_c2w, position_c2w
-    align = alignment_matrix_np(source_axes)
-    return align @ rotation_c2w, align @ position_c2w
 
 
 def _validate_rotation(rotation: np.ndarray, camera_path: str) -> None:
