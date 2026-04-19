@@ -162,4 +162,3 @@ def inverse_alignment_matrix(
 
 def alignment_matrix_np(axes: SourceAxes) -> np.ndarray:
     return axes.A.numpy()
-

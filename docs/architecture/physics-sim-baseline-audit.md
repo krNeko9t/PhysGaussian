@@ -9,7 +9,7 @@
 - `physics_sim/backend/newton_vbd/solver.py`（631）
 - `physics_sim/preprocessing/particle_filling.py`（577）
 - `physics_sim/backend/newton_rigid/solver.py`（496）
-- `physics_sim/coord.py`（415）
+- `physics_sim/coord/axes.py`（164）
 - `physics_sim/render/camera.py`（334）
 - `physics_sim/backend/newton_mpm/solver.py`（333）
 
@@ -47,7 +47,7 @@
 当前结构主干：
 
 - 编排层：`pipeline_orchestrator.py`、`stages/*`
-- 契约层：`backend/base.py`、`coord_gravity.py`
+- 契约层：`backend/base.py`、`physics_sim/coord/gravity.py`
 - 实现层：`backend/newton_*/*`、`render/*`、`preprocessing/*`
 
 主要边界风险：

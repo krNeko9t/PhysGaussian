@@ -6,7 +6,7 @@
 
 - `physics_sim.coord`
   - 保持门面导出：`SourceAxes`、`UpAxis`、`align_*`、`inverse_align_*`、`alignment_matrix*`、重力契约相关符号。
-  - 内部已拆分到 `coord_axes.py` 与 `coord_ops.py`，调用方不应直接依赖私有实现。
+  - 内部实现位于 `physics_sim/coord/` 包（如 `axes.py`、`ops.py`、`gravity.py`、`camera.py`），调用方不应直接依赖子模块。
 - `physics_sim.backend.base`
   - `PhysicsBackend` 生命周期：`initialize -> set_material -> set_boundary_conditions -> finalize -> step/get_state`。
   - 违反顺序统一抛结构化生命周期异常（`[E_LIFECYCLE]`）。
@@ -34,7 +34,7 @@
 
 ## 4. 回归检查清单
 
-- 门面文件仍导出既有核心符号（`coord.py`、`render/camera.py`、`preprocessing/particle_filling.py`）。
+- 门面仍导出既有核心符号（`physics_sim.coord` 包、`render/camera.py`、`preprocessing/particle_filling.py`）。
 - backend/render registry 未知项错误类型一致。
 - 重力契约错误保持可定位上下文。
 - Rigid/VBD/MPM 共享逻辑由 `newton_common` 归口，避免重复实现回流。

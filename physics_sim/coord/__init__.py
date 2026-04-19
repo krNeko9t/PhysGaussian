@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from physics_sim.coord_axes import (
+from .axes import (
     PRESETS,
     UpAxis,
     SourceAxes,
@@ -11,7 +11,7 @@ from physics_sim.coord_axes import (
     inverse_alignment_matrix,
     parse_axis,
 )
-from physics_sim.coord_gravity import (
+from .gravity import (
     E_GRAVITY_AXIS,
     E_GRAVITY_MISSING,
     E_GRAVITY_SHAPE,
@@ -19,7 +19,7 @@ from physics_sim.coord_gravity import (
     gravity_vector,
     normalize_internal_gravity,
 )
-from physics_sim.coord_ops import (
+from .ops import (
     align_camera_position,
     align_camera_w2c_rotation,
     align_covariances,

@@ -52,14 +52,14 @@ def test_solver_modules_are_split_and_keep_orchestrator_role():
 
 
 def test_coord_domain_split_keeps_public_facade():
-    coord_src = _read("physics_sim/coord.py")
-    assert "from physics_sim.coord_gravity import" in coord_src
-    assert "from physics_sim.coord_axes import" in coord_src
-    assert "from physics_sim.coord_ops import" in coord_src
-    assert (REPO_ROOT / "physics_sim/coord_gravity.py").exists()
-    assert (REPO_ROOT / "physics_sim/coord_camera.py").exists()
-    assert (REPO_ROOT / "physics_sim/coord_axes.py").exists()
-    assert (REPO_ROOT / "physics_sim/coord_ops.py").exists()
+    init_src = _read("physics_sim/coord/__init__.py")
+    assert "from .gravity import" in init_src
+    assert "from .axes import" in init_src
+    assert "from .ops import" in init_src
+    assert (REPO_ROOT / "physics_sim/coord/gravity.py").exists()
+    assert (REPO_ROOT / "physics_sim/coord/camera.py").exists()
+    assert (REPO_ROOT / "physics_sim/coord/axes.py").exists()
+    assert (REPO_ROOT / "physics_sim/coord/ops.py").exists()
 
 
 def test_surface_friction_resolution_logic_is_centralized():

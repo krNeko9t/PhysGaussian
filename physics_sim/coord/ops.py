@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from physics_sim.coord_axes import SourceAxes, alignment_matrix_np
-from physics_sim.coord_camera import (
+from .axes import SourceAxes, alignment_matrix_np
+from .camera import (
     align_camera_position as _align_camera_position_impl,
     align_camera_w2c_rotation as _align_camera_w2c_rotation_impl,
 )
@@ -130,4 +130,3 @@ def align_camera_position(
 ) -> np.ndarray:
     A = alignment_matrix_np(axes)
     return _align_camera_position_impl(position, A)
-

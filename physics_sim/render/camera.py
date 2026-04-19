@@ -65,10 +65,11 @@ class CameraFactory:
         current_frame: int = 0,
         source_axes=None,
     ) -> SimpleCamera:
-        from physics_sim.coord import SourceAxes as _SA, alignment_matrix_np
-        from physics_sim.coord_camera import (
+        from physics_sim.coord import (
+            SourceAxes as _SA,
             align_camera_position,
             align_camera_w2c_rotation,
+            alignment_matrix_np,
         )
 
         with open(cameras_json_path) as f:
