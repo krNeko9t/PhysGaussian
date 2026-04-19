@@ -38,6 +38,7 @@ import newton
 from newton.solvers import SolverVBD
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
+from physics_sim.backend.newton_common.boundary import surface_plane_from_bc
 from physics_sim.backend.newton_vbd.barycentric import compute_barycentric
 from physics_sim.backend.newton_vbd.rigid_mesh import create_rigid_body
 from physics_sim.backend.newton_vbd.state_export import export_state
@@ -46,6 +47,7 @@ from physics_sim.coord import (
     gravity_contract_error,
     normalize_internal_gravity,
 )
+from physics_sim.errors import lifecycle_error
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -141,6 +143,16 @@ class NewtonVBDBackend(PhysicsBackend):
 
     # ── PhysicsBackend interface ─────────────────────────────────────
 
+    def _require_builder(self, operation: str) -> newton.ModelBuilder:
+        builder = self._builder
+        if builder is None:
+            raise lifecycle_error(
+                owner="newton_vbd",
+                operation=operation,
+                expected="initialize() must run before this operation",
+            )
+        return builder
+
     def initialize(
         self,
         positions: torch.Tensor,
@@ -218,8 +230,7 @@ class NewtonVBDBackend(PhysicsBackend):
         )
 
     def set_material(self, material_params: dict) -> None:
-        builder = self._builder
-        assert builder is not None
+        self._require_builder("set_material")
 
         # Gravity
         if "g" not in material_params:
@@ -290,8 +301,7 @@ class NewtonVBDBackend(PhysicsBackend):
     def set_boundary_conditions(
         self, bc_params: list, time_params: dict
     ) -> None:
-        builder = self._builder
-        assert builder is not None
+        builder = self._require_builder("set_boundary_conditions")
 
         if not isinstance(bc_params, list):
             return
@@ -299,33 +309,18 @@ class NewtonVBDBackend(PhysicsBackend):
         for bc in bc_params:
             bc_type = bc.get("type", "")
             if bc_type == "surface_collider":
-                normal = bc["normal"]
-                point = bc["point"]
-                d = -(normal[0] * point[0] + normal[1] * point[1] +
-                      normal[2] * point[2])
-                surface = bc.get("surface", "slip")
-                mu = 0.5
-                if surface == "sticky":
-                    mu = 1.0
-                elif surface == "slip":
-                    mu = 0.0
-                if "friction" in bc:
-                    mu = float(bc["friction"])
-
+                plane, mu = surface_plane_from_bc(bc)
                 plane_cfg = newton.ModelBuilder.ShapeConfig(mu=mu)
-                builder.add_shape_plane(
-                    plane=(float(normal[0]), float(normal[1]),
-                           float(normal[2]), float(d)),
-                    cfg=plane_cfg,
-                )
+                builder.add_shape_plane(plane=plane, cfg=plane_cfg)
                 LOGGER.info(
-                    f"[NewtonVBD] Plane: normal={normal}, "
-                    f"point={point}, mu={mu}"
+                    "[NewtonVBD] Plane: normal=%s, point=%s, mu=%s",
+                    bc["normal"],
+                    bc["point"],
+                    mu,
                 )
 
     def finalize(self) -> None:
-        builder = self._builder
-        assert builder is not None
+        builder = self._require_builder("finalize")
 
         # VBD requires coloring
         builder.color()
@@ -419,8 +414,7 @@ class NewtonVBDBackend(PhysicsBackend):
         name: str,
         collision_geo: str | None = None,
     ) -> None:
-        builder = self._builder
-        assert builder is not None
+        builder = self._require_builder("_create_rigid_body")
         result = create_rigid_body(
             builder=builder,
             init_positions=self._init_positions,
@@ -473,8 +467,7 @@ class NewtonVBDBackend(PhysicsBackend):
             k_lambda       : float — bulk modulus    (default 1e5)
             k_damp         : float — damping coeff   (default 1e-3)
         """
-        builder = self._builder
-        assert builder is not None
+        builder = self._require_builder("_create_soft_body")
 
         idx_t = torch.tensor(particle_indices, dtype=torch.long)
         pos = self._init_positions[idx_t].float()

@@ -33,10 +33,13 @@ from physics_sim.coord import (
     normalize_internal_gravity,
 )
 from physics_sim.geometry.plane_fit import fit_plane_svd
+from physics_sim.logging_utils import get_logger
 
 if TYPE_CHECKING:
     from physics_sim.backend.base import PhysicsBackend
     from physics_sim.stages.scene_setup import SceneData
+
+LOGGER = get_logger(__name__)
 
 
 def _resolve_gravity(per_object_info: list[dict]) -> list[float]:
@@ -88,11 +91,15 @@ def _resolve_gravity(per_object_info: list[dict]) -> list[float]:
                 material_name=material_name,
             )
             if isinstance(raw_g, (int, float)):
-                print(
+                LOGGER.info(
                     "[Gravity][backend=backend_init]"
-                    f"[material={material_name}]"
-                    f"[config_path={cfg_path}]"
-                    f" scalar_g={raw_g!r} resolved_g={list(resolved_g)}"
+                    "[material=%s]"
+                    "[config_path=%s]"
+                    " scalar_g=%r resolved_g=%s",
+                    material_name,
+                    cfg_path,
+                    raw_g,
+                    list(resolved_g),
                 )
             return list(resolved_g)
 
@@ -152,9 +159,12 @@ def _resolve_collider_bc(
             )
             point = res.point.tolist()
             normal = res.normal.tolist()
-            print(
-                f"    [collider] {obj.name}: plane rms={res.rms:.6f}, "
-                f"point={point}, normal={normal}"
+            LOGGER.info(
+                "[collider] name=%s plane_rms=%.6f point=%s normal=%s",
+                obj.name,
+                res.rms,
+                point,
+                normal,
             )
 
         bc_list.append(dict(
@@ -179,7 +189,7 @@ def init_backend(
     backend_cfg = cfg.backend
     bt = backend_cfg.type
     source_axes = scene_data.source_axes
-    print(f"Initialising backend: {bt}")
+    LOGGER.info("Initialising backend: %s", bt)
 
     backend = create_backend(backend_cfg, device=device)
 

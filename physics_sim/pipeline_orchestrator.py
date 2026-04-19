@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 
 from physics_sim.config.loader import load_config
+from physics_sim.errors import lifecycle_error
+from physics_sim.logging_utils import get_logger
 from physics_sim.render.runtime import create_render_runtime, create_scene_asset_loader
 from physics_sim.stages.backend_init import init_backend
 from physics_sim.stages.camera_setup import setup_camera
@@ -13,6 +15,8 @@ from physics_sim.stages.runtime import init_runtime
 from physics_sim.stages.scene_setup import SceneData, setup_scene
 from physics_sim.stages.sim_loop import RenderArgs, run_headless, run_with_rendering
 from physics_sim.stages.video import compile_video
+
+LOGGER = get_logger(__name__)
 
 
 @dataclass
@@ -37,8 +41,9 @@ class PipelineOrchestrator:
 
     def prepare_scene(self) -> None:
         raw = self.request
-        assert os.path.exists(raw.config_path), f"Config not found: {raw.config_path}"
-        print("Loading config...")
+        if not os.path.exists(raw.config_path):
+            raise FileNotFoundError(f"Config not found: {raw.config_path}")
+        LOGGER.info("Loading config: %s", raw.config_path)
         self.cfg = load_config(raw.config_path)
         self.config_dir = os.path.dirname(os.path.abspath(raw.config_path))
         os.makedirs(self.cfg.output, exist_ok=True)
@@ -54,11 +59,21 @@ class PipelineOrchestrator:
         self.backend = init_backend(self.cfg, self.scene_data)
 
     def run_headless(self) -> None:
-        assert self.cfg is not None and self.backend is not None and self.scene_data is not None
+        if self.cfg is None or self.backend is None or self.scene_data is None:
+            raise lifecycle_error(
+                owner="pipeline_orchestrator",
+                operation="run_headless",
+                expected="prepare_scene() must run first",
+            )
         run_headless(self.cfg, self.backend, self.scene_data)
 
     def run_rendering(self) -> None:
-        assert self.cfg is not None and self.backend is not None and self.scene_data is not None
+        if self.cfg is None or self.backend is None or self.scene_data is None:
+            raise lifecycle_error(
+                owner="pipeline_orchestrator",
+                operation="run_rendering",
+                expected="prepare_scene() must run first",
+            )
         raw = self.request
         runtime = create_render_runtime(
             sh_degree=raw.sh_degree,

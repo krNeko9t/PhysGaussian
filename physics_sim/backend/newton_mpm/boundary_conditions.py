@@ -9,6 +9,10 @@ import numpy as np
 import newton
 import warp as wp
 
+from physics_sim.backend.newton_common.boundary import (
+    build_bounding_box_planes,
+    surface_plane_from_bc,
+)
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -122,30 +126,15 @@ def register_boundary_conditions(
             margin = float(bc.get("margin", max(0.01, voxel_size * 2.0)))
             wall_mu = float(bc.get("friction", 0.3))
             wall_cfg = newton.ModelBuilder.ShapeConfig(ke=0.0, kd=0.0, mu=wall_mu)
-            lo = bbox_lo
-            hi = bbox_hi
-            planes = [
-                (1.0, 0.0, 0.0, -(lo[0] - margin)),
-                (-1.0, 0.0, 0.0, (hi[0] + margin)),
-                (0.0, 1.0, 0.0, -(lo[1] - margin)),
-                (0.0, -1.0, 0.0, (hi[1] + margin)),
-                (0.0, 0.0, 1.0, -(lo[2] - margin)),
-                (0.0, 0.0, -1.0, (hi[2] + margin)),
-            ]
+            planes = build_bounding_box_planes(lo=bbox_lo, hi=bbox_hi, margin=margin)
             for p in planes:
                 builder.add_shape_plane(plane=p, cfg=wall_cfg)
             continue
 
         if bc_type == "surface_collider":
-            normal = bc["normal"]
-            point = bc["point"]
-            d = -(normal[0] * point[0] + normal[1] * point[1] + normal[2] * point[2])
-            mu = _resolve_surface_friction(bc)
+            plane, mu = surface_plane_from_bc(bc)
             cfg = newton.ModelBuilder.ShapeConfig(ke=0.0, kd=0.0, mu=mu)
-            builder.add_shape_plane(
-                plane=(float(normal[0]), float(normal[1]), float(normal[2]), float(d)),
-                cfg=cfg,
-            )
+            builder.add_shape_plane(plane=plane, cfg=cfg)
             continue
 
         if bc_type in ("cuboid", "enforce_particle_translation"):
@@ -165,13 +154,3 @@ def register_boundary_conditions(
 
     return runtime
 
-
-def _resolve_surface_friction(bc: dict[str, Any]) -> float:
-    if "friction" in bc:
-        return float(bc["friction"])
-    surface = bc.get("surface", "slip")
-    if surface == "sticky":
-        return 1.0
-    if surface == "slip":
-        return 0.0
-    return 0.5

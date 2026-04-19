@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from physics_sim.errors import unknown_registry_error
+
 if TYPE_CHECKING:
     from physics_sim.backend.base import PhysicsBackend
     from physics_sim.config.models import BackendConfig
@@ -63,4 +65,8 @@ def create_backend(cfg: BackendConfig, device: str = "cuda:0") -> PhysicsBackend
     if cfg.type == "none":
         from physics_sim.backend.none import NoneBackend
         return NoneBackend(device=device)
-    raise ValueError(f"Unknown backend type: {cfg.type!r}")
+    raise unknown_registry_error(
+        registry="backend",
+        key=cfg.type,
+        available=BACKEND_MATERIAL_DEFAULTS.keys(),
+    )

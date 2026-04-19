@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -15,16 +16,17 @@ def test_resolve_gravity_default_is_internal_negative_y():
     assert _resolve_gravity([]) == pytest.approx([0.0, -9.8, 0.0], abs=1e-6)
 
 
-def test_resolve_gravity_scalar_is_normalized_and_logged(capsys: pytest.CaptureFixture[str]):
+def test_resolve_gravity_scalar_is_normalized_and_logged(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO)
     g = _resolve_gravity([
         {"name": "cube", "material": {"g": 9.81}},
     ])
     assert g == pytest.approx([0.0, -9.81, 0.0], abs=1e-6)
 
-    out = capsys.readouterr().out
-    assert "[Gravity][backend=backend_init]" in out
-    assert "material=cube" in out
-    assert "config_path=per_object[0].material.g" in out
+    text = "\n".join(rec.message for rec in caplog.records)
+    assert "[Gravity][backend=backend_init]" in text
+    assert "material=cube" in text
+    assert "config_path=per_object[0].material.g" in text
 
 
 def test_resolve_gravity_vector_must_follow_internal_y_up_contract():

@@ -12,7 +12,12 @@ import torch
 import numpy as np
 import taichi as ti
 import mcubes
-from tqdm import tqdm
+
+from physics_sim.preprocessing.particle_filling_chunks import (
+    run_dense_fill_stage,
+    run_densify_stage,
+    run_internal_fill_stage,
+)
 
 # Hard safety cap for densify neighborhood radius.
 DEFAULT_DENSIFY_R_CAP = 8
@@ -405,7 +410,10 @@ def fill_particles(
     """
     pos_clone = pos.clone()
     if boundary is not None:
-        assert len(boundary) == 6
+        if len(boundary) != 6:
+            raise ValueError(
+                f"boundary must contain 6 scalars [xmin,xmax,ymin,ymax,zmin,zmax], got {boundary}"
+            )
         mask = torch.ones(pos_clone.shape[0], dtype=torch.bool).cuda()
         max_diff = 0.0
         for i in range(3):
@@ -433,44 +441,41 @@ def fill_particles(
 
     # 1. compute density field
     n_particles = pos.shape[0]
-    if progress and n_particles > particle_chunk_size:
-        for start in tqdm(
-            range(0, n_particles, particle_chunk_size),
-            desc="particle_filling/densify", unit="chunk", dynamic_ncols=True,
-        ):
-            end = min(start + particle_chunk_size, n_particles)
-            densify_grids_range(ti_pos, ti_opacity, ti_cov, grid, grid_density, grid_dx, start, end, densify_r_cap)
-            if sync_each_chunk:
-                ti.sync()
-    else:
-        densify_grids(ti_pos, ti_opacity, ti_cov, grid, grid_density, grid_dx, densify_r_cap)
-        if sync_each_chunk:
-            ti.sync()
+    run_densify_stage(
+        n_particles=n_particles,
+        particle_chunk_size=particle_chunk_size,
+        progress=progress,
+        sync_each_chunk=sync_each_chunk,
+        ti_sync=ti.sync,
+        densify_range_fn=densify_grids_range,
+        densify_all_fn=densify_grids,
+        ti_pos=ti_pos,
+        ti_opacity=ti_opacity,
+        ti_cov=ti_cov,
+        grid=grid,
+        grid_density=grid_density,
+        grid_dx=grid_dx,
+        densify_r_cap=densify_r_cap,
+    )
 
     # 2. fill dense grids
     grid_total = grid_n * grid_n * grid_n
-    if progress:
-        fill_num = 0
-        for start in tqdm(
-            range(0, grid_total, grid_chunk_size),
-            desc="particle_filling/dense", unit="chunk", dynamic_ncols=True,
-        ):
-            end = min(start + grid_chunk_size, grid_total)
-            fill_num = fill_dense_grids_range(
-                grid, grid_density, grid_dx, density_thres, particles, fill_num,
-                max_particles_per_cell, start=start, end=end,
-            )
-            if sync_each_chunk:
-                ti.sync()
-            if fill_num >= max_samples:
-                fill_num = max_samples
-                break
-    else:
-        fill_num = fill_dense_grids(
-            grid, grid_density, grid_dx, density_thres, particles, 0, max_particles_per_cell,
-        )
-        if sync_each_chunk:
-            ti.sync()
+    fill_num = run_dense_fill_stage(
+        grid_total=grid_total,
+        grid_chunk_size=grid_chunk_size,
+        progress=progress,
+        sync_each_chunk=sync_each_chunk,
+        ti_sync=ti.sync,
+        fill_range_fn=fill_dense_grids_range,
+        fill_all_fn=fill_dense_grids,
+        grid=grid,
+        grid_density=grid_density,
+        grid_dx=grid_dx,
+        density_thres=density_thres,
+        particles=particles,
+        max_particles_per_cell=max_particles_per_cell,
+        max_samples=max_samples,
+    )
     if fill_num >= max_samples:
         print(f"[particle_filling] WARNING: filled particles ({fill_num}) exceed max_particles_num ({max_samples}); clamping.")
         fill_num = max_samples
@@ -484,28 +489,25 @@ def fill_particles(
         print("smooth finished")
 
     # 4. fill internal grids
-    if progress:
-        for start in tqdm(
-            range(0, grid_total, grid_chunk_size),
-            desc="particle_filling/internal", unit="chunk", dynamic_ncols=True,
-        ):
-            end = min(start + grid_chunk_size, grid_total)
-            fill_num = internal_filling_range(
-                grid, grid_density, grid_dx, particles, fill_num, max_particles_per_cell,
-                exclude_dir=search_exclude_dir, ray_cast_dir=ray_cast_dir,
-                threshold=search_thres, start=start, end=end,
-            )
-            if sync_each_chunk:
-                ti.sync()
-    else:
-        fill_num = internal_filling(
-            grid, grid_density, grid_dx, particles, fill_num, max_particles_per_cell,
-            exclude_dir=search_exclude_dir, ray_cast_dir=ray_cast_dir, threshold=search_thres,
-        )
-        if sync_each_chunk:
-            ti.sync()
-    if fill_num >= max_samples:
-        fill_num = max_samples
+    fill_num = run_internal_fill_stage(
+        grid_total=grid_total,
+        grid_chunk_size=grid_chunk_size,
+        progress=progress,
+        sync_each_chunk=sync_each_chunk,
+        ti_sync=ti.sync,
+        fill_range_fn=internal_filling_range,
+        fill_all_fn=internal_filling,
+        grid=grid,
+        grid_density=grid_density,
+        grid_dx=grid_dx,
+        particles=particles,
+        fill_num=fill_num,
+        max_particles_per_cell=max_particles_per_cell,
+        search_exclude_dir=search_exclude_dir,
+        ray_cast_dir=ray_cast_dir,
+        search_thres=search_thres,
+        max_samples=max_samples,
+    )
     print("after internal grids: ", fill_num)
 
     # 5. combine original + filled particles

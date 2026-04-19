@@ -3,52 +3,19 @@
 from __future__ import annotations
 
 import json
-import math
-from typing import Optional
 
 import numpy as np
 import torch
 
-
-def focal2fov(focal, pixels):
-    return 2 * math.atan(pixels / (2 * focal))
-
-
-def fov2focal(fov, pixels):
-    """Inverse of focal2fov. fov in radians."""
-    return pixels / (2.0 * math.tan(fov * 0.5))
-
-
-def getWorld2View2(R, t, translate=np.array([0.0, 0.0, 0.0]), scale=1.0):
-    Rt = np.zeros((4, 4))
-    Rt[:3, :3] = R.transpose()
-    Rt[:3, 3] = t
-    Rt[3, 3] = 1.0
-    C2W = np.linalg.inv(Rt)
-    cam_center = C2W[:3, 3]
-    cam_center = (cam_center + translate) * scale
-    C2W[:3, 3] = cam_center
-    Rt = np.linalg.inv(C2W)
-    return np.float32(Rt)
-
-
-def getProjectionMatrix(znear, zfar, fovX, fovY):
-    tanHalfFovY = math.tan(fovY / 2)
-    tanHalfFovX = math.tan(fovX / 2)
-    top = tanHalfFovY * znear
-    bottom = -top
-    right = tanHalfFovX * znear
-    left = -right
-    P = torch.zeros(4, 4)
-    z_sign = 1.0
-    P[0, 0] = 2.0 * znear / (right - left)
-    P[1, 1] = 2.0 * znear / (top - bottom)
-    P[0, 2] = (right + left) / (right - left)
-    P[1, 2] = (top + bottom) / (top - bottom)
-    P[3, 2] = z_sign
-    P[2, 2] = z_sign * zfar / (zfar - znear)
-    P[2, 3] = -(zfar * znear) / (zfar - znear)
-    return P
+from physics_sim.render.camera_math import (
+    camera_extrinsics_from_raw,
+    focal2fov,
+    fov2focal,
+    getProjectionMatrix,
+    getWorld2View2,
+    get_camera_position_and_rotation,
+    get_current_radius_azimuth_and_elevation,
+)
 
 
 class SimpleCamera:
@@ -84,50 +51,6 @@ class SimpleCamera:
             [0.0, fy, height * 0.5],
             [0.0, 0.0, 1.0],
         ], dtype=torch.float32).cuda()
-
-
-def generate_camera_rotation_matrix(camera_to_object, object_vertical_downward):
-    camera_to_object = camera_to_object / np.linalg.norm(camera_to_object)
-    camera_y = (
-        object_vertical_downward
-        - np.dot(object_vertical_downward, camera_to_object) * camera_to_object
-    )
-    camera_y = camera_y / np.linalg.norm(camera_y)
-    first_column = np.cross(camera_y, camera_to_object)
-    return np.column_stack((first_column, camera_y, camera_to_object))
-
-
-def get_point_on_sphere(azimuth, elevation, radius, center, observant_coordinates):
-    canonical = (
-        np.array([
-            np.cos(azimuth / 180.0 * np.pi) * np.cos(elevation / 180.0 * np.pi),
-            np.sin(azimuth / 180.0 * np.pi) * np.cos(elevation / 180.0 * np.pi),
-            np.sin(elevation / 180.0 * np.pi),
-        ]) * radius
-    )
-    return center + observant_coordinates @ canonical
-
-
-def get_camera_position_and_rotation(azimuth, elevation, radius, view_center, observant_coordinates):
-    position = get_point_on_sphere(azimuth, elevation, radius, view_center, observant_coordinates)
-    R = generate_camera_rotation_matrix(view_center - position, -observant_coordinates[:, 2])
-    return position, R
-
-
-def get_current_radius_azimuth_and_elevation(camera_position, view_center, observant_coordinates):
-    center2camera = -view_center + camera_position
-    radius = np.linalg.norm(center2camera)
-    dot_product = np.dot(center2camera, observant_coordinates[:, 2])
-    cosine = dot_product / (np.linalg.norm(center2camera) * np.linalg.norm(observant_coordinates[:, 2]))
-    elevation = np.rad2deg(np.pi / 2.0 - np.arccos(cosine))
-    proj_onto_hori = center2camera - dot_product * observant_coordinates[:, 2]
-    dot_product2 = np.dot(proj_onto_hori, observant_coordinates[:, 0])
-    cosine2 = dot_product2 / (np.linalg.norm(proj_onto_hori) * np.linalg.norm(observant_coordinates[:, 0]))
-    if np.dot(proj_onto_hori, observant_coordinates[:, 1]) > 0:
-        azimuth = np.rad2deg(np.arccos(cosine2))
-    else:
-        azimuth = -np.rad2deg(np.arccos(cosine2))
-    return radius, azimuth, elevation
 
 
 class CameraFactory:
@@ -186,7 +109,11 @@ class CameraFactory:
             init_a = camera_params["init_azimuth"]
             init_e = camera_params["init_elevation"]
             init_r = camera_params["init_radius"]
-            assert init_a is not None and init_e is not None and init_r is not None
+            if init_a is None or init_e is None or init_r is None:
+                raise ValueError(
+                    "camera mode=json with default_camera_index<0 requires "
+                    "init_azimuth/init_elevation/init_radius"
+                )
             if camera_params.get("move_camera", False):
                 da = camera_params.get("delta_a", 0) or 0
                 de = camera_params.get("delta_e", 0) or 0
@@ -204,17 +131,7 @@ class CameraFactory:
             raw_camera["rotation"] = R.tolist()
             raw_camera["position"] = position.tolist()
 
-        tmp = np.zeros((4, 4))
-        tmp[:3, :3] = raw_camera["rotation"]
-        tmp[:3, 3] = raw_camera["position"]
-        tmp[3, 3] = 1
-        C2W = np.linalg.inv(tmp)
-        R = C2W[:3, :3].transpose()
-        T = C2W[:3, 3]
-        width = raw_camera["width"]
-        height = raw_camera["height"]
-        fovx = focal2fov(raw_camera["fx"], width)
-        fovy = focal2fov(raw_camera["fy"], height)
+        R, T, width, height, fovx, fovy = camera_extrinsics_from_raw(raw_camera)
         return SimpleCamera(R=R, T=T, FoVx=fovx, FoVy=fovy, width=width, height=height)
 
     def build_camera_orbit(
@@ -238,16 +155,16 @@ class CameraFactory:
             if fovx_deg is None and fovy_deg is None:
                 raise ValueError("Procedural camera requires either fx/fy or fovx_deg/fovy_deg")
             if fovx_deg is None:
-                fovy = float(fovy_deg) / 180.0 * math.pi
+                fovy = float(fovy_deg) / 180.0 * np.pi
                 fy = fov2focal(fovy, float(height))
                 fx = fy
             elif fovy_deg is None:
-                fovx = float(fovx_deg) / 180.0 * math.pi
+                fovx = float(fovx_deg) / 180.0 * np.pi
                 fx = fov2focal(fovx, float(width))
                 fy = fx
             else:
-                fovx = float(fovx_deg) / 180.0 * math.pi
-                fovy = float(fovy_deg) / 180.0 * math.pi
+                fovx = float(fovx_deg) / 180.0 * np.pi
+                fovy = float(fovy_deg) / 180.0 * np.pi
                 fx = fov2focal(fovx, float(width))
                 fy = fov2focal(fovy, float(height))
 
@@ -270,13 +187,15 @@ class CameraFactory:
         position, rot = get_camera_position_and_rotation(
             az, el, rad, center_view_world_space, observant_coordinates
         )
-        tmp = np.zeros((4, 4))
-        tmp[:3, :3] = rot
-        tmp[:3, 3] = position
-        tmp[3, 3] = 1
-        C2W = np.linalg.inv(tmp)
-        R = C2W[:3, :3].transpose()
-        T = C2W[:3, 3]
+        raw_camera = dict(
+            rotation=rot,
+            position=position,
+            width=int(width),
+            height=int(height),
+            fx=float(fx),
+            fy=float(fy),
+        )
+        R, T, _, _, _, _ = camera_extrinsics_from_raw(raw_camera)
         fovx = focal2fov(float(fx), float(width))
         fovy = focal2fov(float(fy), float(height))
         return SimpleCamera(R=R, T=T, FoVx=fovx, FoVy=fovy, width=int(width), height=int(height))
@@ -299,16 +218,16 @@ class CameraFactory:
             if fovx_deg is None and fovy_deg is None:
                 raise ValueError("Fixed procedural camera requires either fx/fy or fovx_deg/fovy_deg")
             if fovx_deg is None:
-                fovy = float(fovy_deg) / 180.0 * math.pi
+                fovy = float(fovy_deg) / 180.0 * np.pi
                 fy = fov2focal(fovy, float(height))
                 fx = fy
             elif fovy_deg is None:
-                fovx = float(fovx_deg) / 180.0 * math.pi
+                fovx = float(fovx_deg) / 180.0 * np.pi
                 fx = fov2focal(fovx, float(width))
                 fy = fx
             else:
-                fovx = float(fovx_deg) / 180.0 * math.pi
-                fovy = float(fovy_deg) / 180.0 * math.pi
+                fovx = float(fovx_deg) / 180.0 * np.pi
+                fovy = float(fovy_deg) / 180.0 * np.pi
                 fx = fov2focal(fovx, float(width))
                 fy = fov2focal(fovy, float(height))
 
@@ -322,13 +241,15 @@ class CameraFactory:
         if rotation.shape != (3, 3):
             raise ValueError(f"fixed_rotation must be 3x3, got shape {rotation.shape}")
 
-        tmp = np.zeros((4, 4), dtype=np.float32)
-        tmp[:3, :3] = rotation
-        tmp[:3, 3] = position
-        tmp[3, 3] = 1.0
-        C2W = np.linalg.inv(tmp)
-        R = C2W[:3, :3].transpose()
-        T = C2W[:3, 3]
+        raw_camera = dict(
+            rotation=rotation,
+            position=position,
+            width=int(width),
+            height=int(height),
+            fx=float(fx),
+            fy=float(fy),
+        )
+        R, T, _, _, _, _ = camera_extrinsics_from_raw(raw_camera)
         fovx = focal2fov(float(fx), float(width))
         fovy = focal2fov(float(fy), float(height))
         return SimpleCamera(R=R, T=T, FoVx=fovx, FoVy=fovy, width=int(width), height=int(height))

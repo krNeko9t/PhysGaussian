@@ -51,17 +51,25 @@ def test_solver_modules_are_split_and_keep_orchestrator_role():
 def test_coord_domain_split_keeps_public_facade():
     coord_src = _read("physics_sim/coord.py")
     assert "from physics_sim.coord_gravity import" in coord_src
-    assert "from physics_sim.coord_camera import" in coord_src
+    assert "from physics_sim.coord_axes import" in coord_src
+    assert "from physics_sim.coord_ops import" in coord_src
     assert (REPO_ROOT / "physics_sim/coord_gravity.py").exists()
     assert (REPO_ROOT / "physics_sim/coord_camera.py").exists()
+    assert (REPO_ROOT / "physics_sim/coord_axes.py").exists()
+    assert (REPO_ROOT / "physics_sim/coord_ops.py").exists()
 
 
 def test_surface_friction_resolution_logic_is_centralized():
-    src = _read("physics_sim/backend/newton_mpm/boundary_conditions.py")
-    assert "def _resolve_surface_friction" in src
-    assert 'if "friction" in bc' in src
-    assert 'if surface == "sticky"' in src
-    assert 'if surface == "slip"' in src
+    shared = _read("physics_sim/backend/newton_common/boundary.py")
+    mpm = _read("physics_sim/backend/newton_mpm/boundary_conditions.py")
+    rigid = _read("physics_sim/backend/newton_rigid/solver.py")
+    vbd = _read("physics_sim/backend/newton_vbd/solver.py")
+
+    assert "def resolve_surface_friction" in shared
+    assert "def surface_plane_from_bc" in shared
+    assert "surface_plane_from_bc" in mpm
+    assert "surface_plane_from_bc" in rigid
+    assert "surface_plane_from_bc" in vbd
 
 
 def test_material_friction_resolution_has_single_path():
@@ -70,6 +78,54 @@ def test_material_friction_resolution_has_single_path():
     assert 'if "friction" in material_cfg' in src
     assert 'if "friction_angle" in material_cfg' in src
     assert 'if mat_name == "sand":' in src
+
+
+def test_registry_unknown_errors_are_unified():
+    backend_src = _read("physics_sim/backend/registry.py")
+    render_src = _read("physics_sim/render/registries.py")
+
+    assert "unknown_registry_error" in backend_src
+    assert "unknown_registry_error" in render_src
+    assert "raise ValueError(f\"Unknown backend type" not in backend_src
+    assert "raise KeyError(" not in render_src
+
+
+def test_rigid_state_export_is_centralized():
+    shared = _read("physics_sim/backend/newton_common/rigid_state.py")
+    rigid = _read("physics_sim/backend/newton_rigid/state_export.py")
+    vbd = _read("physics_sim/backend/newton_vbd/state_export.py")
+
+    assert "def populate_rigid_particles" in shared
+    assert "def sanitize_body_poses" in shared
+    assert "populate_rigid_particles(" in rigid
+    assert "populate_rigid_particles(" in vbd
+
+
+def test_rigid_geometry_builders_are_shared():
+    shared = _read("physics_sim/backend/newton_common/rigid_geometry.py")
+    rigid = _read("physics_sim/backend/newton_rigid/collider_builders.py")
+    vbd = _read("physics_sim/backend/newton_vbd/rigid_mesh.py")
+
+    assert "def create_rigid_body_geometry" in shared
+    assert "create_rigid_body_geometry(" in rigid
+    assert "create_rigid_body_geometry(" in vbd
+    assert "def _create_mesh_body(" not in rigid
+    assert "def _create_rigid_mesh(" not in vbd
+
+
+def test_camera_math_is_split_from_factory():
+    camera_src = _read("physics_sim/render/camera.py")
+    assert "from physics_sim.render.camera_math import" in camera_src
+    assert (REPO_ROOT / "physics_sim/render/camera_math.py").exists()
+
+
+def test_particle_filling_chunk_flow_is_split():
+    src = _read("physics_sim/preprocessing/particle_filling.py")
+    assert "from physics_sim.preprocessing.particle_filling_chunks import" in src
+    assert "run_densify_stage(" in src
+    assert "run_dense_fill_stage(" in src
+    assert "run_internal_fill_stage(" in src
+    assert (REPO_ROOT / "physics_sim/preprocessing/particle_filling_chunks.py").exists()
 
 
 def test_video_stage_no_longer_uses_os_system():

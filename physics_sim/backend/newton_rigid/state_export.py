@@ -9,9 +9,8 @@ import torch
 
 from physics_sim.backend.base import SimulationState
 from physics_sim.backend.newton_common import (
-    compose_body_quat_wxyz,
-    pack_cov3x3_to_6,
-    quat_xyzw_to_rotmat,
+    populate_rigid_particles,
+    sanitize_body_poses,
 )
 from physics_sim.logging_utils import get_logger
 
@@ -29,21 +28,12 @@ def export_rigid_state(
     last_valid_body_q: np.ndarray | None,
 ) -> tuple[SimulationState, np.ndarray]:
     """Export rigid backend state and return updated fallback poses."""
-    body_q = state_0.body_q.numpy()
-    corrected = body_q.copy()
-    for i in range(corrected.shape[0]):
-        if np.any(~np.isfinite(corrected[i])):
-            if last_valid_body_q is not None:
-                LOGGER.warning(
-                    "[NewtonRigid] body=%s pose has NaN/Inf, fallback to last valid pose",
-                    i,
-                )
-                corrected[i] = last_valid_body_q[i]
-            else:
-                LOGGER.warning(
-                    "[NewtonRigid] body=%s pose has NaN/Inf at first export",
-                    i,
-                )
+    corrected = sanitize_body_poses(
+        body_q=state_0.body_q.numpy(),
+        last_valid_body_q=last_valid_body_q,
+        logger=LOGGER,
+        log_prefix="NewtonRigid",
+    )
 
     positions = torch.zeros((n_particles, 3), device=device, dtype=torch.float32)
     covariances = torch.zeros((n_particles, 6), device=device, dtype=torch.float32)
@@ -58,27 +48,16 @@ def export_rigid_state(
             dtype=torch.float32,
         )
 
-    for body in bodies:
-        t = corrected[body.body_idx]
-        body_pos = torch.tensor(t[:3], device=device, dtype=torch.float32)
-        body_quat = torch.tensor(t[3:7], device=device, dtype=torch.float32)
-        R = quat_xyzw_to_rotmat(body_quat)
-
-        idx = body.particle_indices
-        local_pos = body.init_local_pos
-        init_cov = body.init_cov_3x3
-        new_pos = (R @ local_pos.T).T + body_pos
-        R_batch = R.unsqueeze(0)
-        new_cov_3x3 = R_batch @ init_cov @ R_batch.transpose(-1, -2)
-        R_expand = R.unsqueeze(0).expand(len(idx), -1, -1)
-
-        positions[idx] = new_pos
-        covariances[idx] = pack_cov3x3_to_6(new_cov_3x3)
-        rotations[idx] = R_expand
-
-        if out_quats is not None and body.init_quats is not None:
-            out_quats[idx] = compose_body_quat_wxyz(body_quat, body.init_quats)
-            out_scales[idx] = body.init_scales
+    populate_rigid_particles(
+        body_q=corrected,
+        bodies=bodies,
+        positions=positions,
+        covariances=covariances,
+        rotations=rotations,
+        device=device,
+        out_quats=out_quats,
+        out_scales=out_scales,
+    )
 
     return (
         SimulationState(

@@ -22,6 +22,7 @@ from physics_sim.backend.newton_mpm.boundary_conditions import (
 )
 from physics_sim.backend.newton_mpm.materials import apply_material_to_model
 from physics_sim.backend.newton_mpm.state_export import export_mpm_state
+from physics_sim.errors import lifecycle_error
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -61,7 +62,7 @@ class NewtonMPMBackend(PhysicsBackend):
         # Overrides come from config JSON ("newton_mpm" → "solver" section)
         # and are applied in set_material().
         self._solver_opts = SolverImplicitMPM.Config()
-        self._material_params: dict = {}
+        self._material_params: dict | None = None
         self._cov_np: np.ndarray | None = None
         self._volumes: np.ndarray | None = None
         self._bc_params: list = []
@@ -167,7 +168,7 @@ class NewtonMPMBackend(PhysicsBackend):
             hardening, g, rpic_damping, grid_v_damping_scale, etc.
         """
         # Store material params; applied to the finalized model in finalize().
-        self._material_params = material_params
+        self._material_params = dict(material_params)
 
         # ── Solver options from material params ──────────────────────
         # Transfer scheme: map rpic_damping → "pic" / "apic"
@@ -210,8 +211,10 @@ class NewtonMPMBackend(PhysicsBackend):
 
         builder = self._builder
         if builder is None:
-            raise RuntimeError(
-                "initialize() must be called before set_boundary_conditions()."
+            raise lifecycle_error(
+                owner="newton_mpm",
+                operation="set_boundary_conditions",
+                expected="initialize() must run first",
             )
         self._bc_runtime = register_boundary_conditions(
             builder=builder,
@@ -226,9 +229,17 @@ class NewtonMPMBackend(PhysicsBackend):
         set_material() and set_boundary_conditions()."""
         builder = self._builder
         if builder is None:
-            raise RuntimeError("initialize() must be called before finalize().")
+            raise lifecycle_error(
+                owner="newton_mpm",
+                operation="finalize",
+                expected="initialize() must run first",
+            )
         if self._material_params is None:
-            raise RuntimeError("set_material() must be called before finalize().")
+            raise lifecycle_error(
+                owner="newton_mpm",
+                operation="finalize",
+                expected="set_material() must run first",
+            )
 
         # Finalize model after all shapes are registered.
         self._model = builder.finalize(device=self._device)
@@ -237,7 +248,12 @@ class NewtonMPMBackend(PhysicsBackend):
 
         # ── Covariance tracking buffers ───────────────────────────────
         n = self._n_particles
-        assert self._cov_np is not None
+        if self._cov_np is None:
+            raise lifecycle_error(
+                owner="newton_mpm",
+                operation="finalize",
+                expected="initialize() must provide covariances",
+            )
         self._init_cov = wp.from_numpy(self._cov_np, dtype=float, device=self._device)
         self._out_cov = wp.zeros(n * 6, dtype=float, device=self._device)
         self._out_R = wp.zeros(n, dtype=wp.mat33, device=self._device)
@@ -256,7 +272,12 @@ class NewtonMPMBackend(PhysicsBackend):
             )
 
         # Apply material params now that model exists.
-        assert self._volumes is not None
+        if self._volumes is None or self._material_params is None:
+            raise lifecycle_error(
+                owner="newton_mpm",
+                operation="finalize",
+                expected="initialize()+set_material() must provide volumes/material",
+            )
         apply_material_to_model(
             model=self._model,
             volumes=self._volumes,

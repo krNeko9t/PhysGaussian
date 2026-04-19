@@ -28,6 +28,10 @@ import newton
 from newton.solvers import SolverXPBD
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
+from physics_sim.backend.newton_common.boundary import (
+    build_bounding_box_planes,
+    surface_plane_from_bc,
+)
 from physics_sim.backend.newton_rigid.collider_builders import (
     COLLISION_GEO_TYPES,
     create_rigid_body,
@@ -39,6 +43,7 @@ from physics_sim.coord import (
     gravity_contract_error,
     normalize_internal_gravity,
 )
+from physics_sim.errors import lifecycle_error
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -101,6 +106,16 @@ class NewtonRigidBackend(PhysicsBackend):
         self._plane_equations: list[tuple[list[float], float]] = []
 
     # ── PhysicsBackend interface ─────────────────────────────────────
+
+    def _require_builder(self, operation: str) -> newton.ModelBuilder:
+        builder = self._builder
+        if builder is None:
+            raise lifecycle_error(
+                owner="newton_rigid",
+                operation=operation,
+                expected="initialize() must run before this operation",
+            )
+        return builder
 
     def initialize(
         self,
@@ -170,8 +185,7 @@ class NewtonRigidBackend(PhysicsBackend):
 
         Also configures gravity and solver parameters.
         """
-        builder = self._builder
-        assert builder is not None, "initialize() must be called first"
+        self._require_builder("set_material")
 
         # ── Gravity ─────────────────────────────────────────────────
         if "g" not in material_params:
@@ -260,8 +274,7 @@ class NewtonRigidBackend(PhysicsBackend):
         self, bc_params: list, time_params: dict
     ) -> None:
         """Add collision planes for ground / walls."""
-        builder = self._builder
-        assert builder is not None
+        builder = self._require_builder("set_boundary_conditions")
 
         if not isinstance(bc_params, list):
             return
@@ -270,36 +283,16 @@ class NewtonRigidBackend(PhysicsBackend):
             bc_type = bc.get("type", "")
 
             if bc_type == "surface_collider":
-                normal = bc["normal"]
-                point = bc["point"]
-                # Plane equation: n·x + d = 0 → d = -n·point
-                d = -(
-                    normal[0] * point[0]
-                    + normal[1] * point[1]
-                    + normal[2] * point[2]
-                )
-                # Map surface type to friction
-                surface = bc.get("surface", "slip")
-                mu = 0.5
-                if surface == "sticky":
-                    mu = 1.0
-                elif surface == "slip":
-                    mu = 0.0
-                if "friction" in bc:
-                    mu = float(bc["friction"])
-
+                plane, mu = surface_plane_from_bc(bc)
                 plane_cfg = newton.ModelBuilder.ShapeConfig(mu=mu)
-                n_list = [float(normal[0]), float(normal[1]), float(normal[2])]
-                d_f = float(d)
-                builder.add_shape_plane(
-                    plane=(n_list[0], n_list[1], n_list[2], d_f),
-                    cfg=plane_cfg,
-                )
+                builder.add_shape_plane(plane=plane, cfg=plane_cfg)
+                n_list = [plane[0], plane[1], plane[2]]
+                d_f = plane[3]
                 self._plane_equations.append((n_list, d_f))
                 LOGGER.info(
                     f"[NewtonRigid] Plane #{len(self._plane_equations)-1}: "
                     f"normal=[{n_list[0]:.6f}, {n_list[1]:.6f}, {n_list[2]:.6f}], "
-                    f"d={d_f:.6f}, point={point}, mu={mu}"
+                    f"d={d_f:.6f}, point={bc['point']}, mu={mu}"
                 )
 
             elif bc_type == "bounding_box":
@@ -307,14 +300,7 @@ class NewtonRigidBackend(PhysicsBackend):
                 wall_cfg = newton.ModelBuilder.ShapeConfig(mu=0.3)
                 lo = self._bbox_lo
                 hi = self._bbox_hi
-                planes = [
-                    (1.0, 0.0, 0.0, -(lo[0] - margin)),
-                    (-1.0, 0.0, 0.0, (hi[0] + margin)),
-                    (0.0, 1.0, 0.0, -(lo[1] - margin)),
-                    (0.0, -1.0, 0.0, (hi[1] + margin)),
-                    (0.0, 0.0, 1.0, -(lo[2] - margin)),
-                    (0.0, 0.0, -1.0, (hi[2] + margin)),
-                ]
+                planes = build_bounding_box_planes(lo=lo, hi=hi, margin=margin)
                 for p in planes:
                     builder.add_shape_plane(plane=p, cfg=wall_cfg)
                 LOGGER.info(
@@ -325,8 +311,7 @@ class NewtonRigidBackend(PhysicsBackend):
 
     def finalize(self) -> None:
         """Finalize the Newton model and create solver + states."""
-        builder = self._builder
-        assert builder is not None
+        builder = self._require_builder("finalize")
 
         # ── Finalize model ──────────────────────────────────────────
         self._model = builder.finalize(device=self._device)
@@ -462,8 +447,7 @@ class NewtonRigidBackend(PhysicsBackend):
         init_vel_tuple = None
         if initial_velocity is not None:
             init_vel_tuple = tuple(float(v) for v in initial_velocity)
-        builder = self._builder
-        assert builder is not None
+        builder = self._require_builder("_create_body")
         if len(particle_indices) == 0:
             LOGGER.warning("[NewtonRigid] skip empty body '%s'", name)
             return

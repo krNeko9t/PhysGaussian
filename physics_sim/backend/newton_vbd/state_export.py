@@ -9,9 +9,8 @@ import torch
 
 from physics_sim.backend.base import SimulationState
 from physics_sim.backend.newton_common import (
-    compose_body_quat_wxyz,
     pack_cov3x3_to_6,
-    quat_xyzw_to_rotmat,
+    populate_rigid_particles,
     unpack_cov6_to_3x3,
 )
 from physics_sim.logging_utils import get_logger
@@ -102,28 +101,16 @@ def _populate_rigid_state(
     if not rigid_bodies:
         return
 
-    body_q = state_0.body_q.numpy()
-    for body in rigid_bodies:
-        t = body_q[body.body_idx]
-        body_pos = torch.tensor(t[:3], device=device, dtype=torch.float32)
-        body_quat = torch.tensor(t[3:7], device=device, dtype=torch.float32)
-        R = quat_xyzw_to_rotmat(body_quat)
-
-        idx = body.particle_indices
-        local_pos = body.init_local_pos
-        new_pos = (R @ local_pos.T).T + body_pos
-        positions[idx] = new_pos
-
-        init_cov = body.init_cov_3x3
-        new_cov_3x3 = R @ init_cov @ R.T
-        covariances[idx] = pack_cov3x3_to_6(new_cov_3x3)
-
-        R_batch = R.unsqueeze(0).expand(len(idx), -1, -1)
-        rotations[idx] = R_batch
-
-        if has_2dgs and body.init_quats is not None:
-            out_quats[idx] = compose_body_quat_wxyz(body_quat, body.init_quats)
-            out_scales[idx] = body.init_scales
+    populate_rigid_particles(
+        body_q=state_0.body_q.numpy(),
+        bodies=rigid_bodies,
+        positions=positions,
+        covariances=covariances,
+        rotations=rotations,
+        device=device,
+        out_quats=out_quats if has_2dgs else None,
+        out_scales=out_scales if has_2dgs else None,
+    )
 
 
 def _populate_soft_state(
