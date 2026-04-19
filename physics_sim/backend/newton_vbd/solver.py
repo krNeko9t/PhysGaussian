@@ -47,7 +47,7 @@ from physics_sim.coord import (
     gravity_contract_error,
     normalize_internal_gravity,
 )
-from physics_sim.errors import lifecycle_error
+from physics_sim.errors import configuration_error, lifecycle_error
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -77,6 +77,146 @@ class _SoftInfo:
     tet_cells: np.ndarray            # (T, 4)  for computing deformation gradient
     rest_verts: np.ndarray           # (V, 3)  rest-pose tet vertices
     init_cov_6: torch.Tensor         # (N, 6)
+
+
+@dataclass
+class _SoftGridSpec:
+    """Regular tet-grid parameters for one soft object."""
+
+    bbox_min: np.ndarray
+    dim_x: int
+    dim_y: int
+    dim_z: int
+    cell_x: float
+    cell_y: float
+    cell_z: float
+    density: float
+    k_mu: float
+    k_lambda: float
+    k_damp: float
+
+
+def _compute_soft_grid_spec(pos_np: np.ndarray, material: dict) -> _SoftGridSpec:
+    """Parse and validate grid/material params for add_soft_grid."""
+    if pos_np.ndim != 2 or pos_np.shape[1] != 3 or pos_np.shape[0] == 0:
+        raise ValueError("particle subset must be a non-empty (N, 3) array")
+
+    bbox_min = pos_np.min(axis=0).astype(np.float64, copy=False)
+    bbox_max = pos_np.max(axis=0).astype(np.float64, copy=False)
+
+    padding = float(material.get("grid_padding", 0.05))
+    if padding < 0.0:
+        raise ValueError("grid_padding must be >= 0")
+    bbox_min = bbox_min - padding
+    bbox_max = bbox_max + padding
+    extent = bbox_max - bbox_min
+
+    cell_size = material.get("cell_size", None)
+    if cell_size is not None:
+        cell_size = float(cell_size)
+        if cell_size <= 0.0:
+            raise ValueError("cell_size must be > 0")
+    else:
+        grid_res = int(material.get("grid_resolution", 8))
+        if grid_res <= 0:
+            raise ValueError("grid_resolution must be >= 1")
+        max_extent = float(extent.max())
+        if max_extent <= 0.0:
+            raise ValueError("soft-body bbox extent must be positive")
+        cell_size = max_extent / float(grid_res)
+
+    # Ensure each axis has positive thickness to avoid degenerate tets.
+    extent_safe = np.maximum(extent, cell_size)
+    dim_x = max(1, int(np.ceil(extent_safe[0] / cell_size)))
+    dim_y = max(1, int(np.ceil(extent_safe[1] / cell_size)))
+    dim_z = max(1, int(np.ceil(extent_safe[2] / cell_size)))
+
+    cell_x = float(extent_safe[0] / dim_x)
+    cell_y = float(extent_safe[1] / dim_y)
+    cell_z = float(extent_safe[2] / dim_z)
+
+    density = float(material.get("density", 1e3))
+    if density <= 0.0:
+        raise ValueError("density must be > 0")
+    k_mu = float(material.get("k_mu", 1e5))
+    k_lambda = float(material.get("k_lambda", 1e5))
+    k_damp = float(material.get("k_damp", 1e-3))
+    if k_mu < 0.0 or k_lambda < 0.0 or k_damp < 0.0:
+        raise ValueError("k_mu, k_lambda, k_damp must be >= 0")
+
+    return _SoftGridSpec(
+        bbox_min=bbox_min,
+        dim_x=dim_x,
+        dim_y=dim_y,
+        dim_z=dim_z,
+        cell_x=cell_x,
+        cell_y=cell_y,
+        cell_z=cell_z,
+        density=density,
+        k_mu=k_mu,
+        k_lambda=k_lambda,
+        k_damp=k_damp,
+    )
+
+
+def _build_soft_grid_vertices(spec: _SoftGridSpec) -> np.ndarray:
+    """Rebuild add_soft_grid vertex order (z-major, then y, then x)."""
+    vert_count = (spec.dim_x + 1) * (spec.dim_y + 1) * (spec.dim_z + 1)
+    grid_verts = np.zeros((vert_count, 3), dtype=np.float64)
+
+    vi = 0
+    for z in range(spec.dim_z + 1):
+        for y in range(spec.dim_y + 1):
+            for x in range(spec.dim_x + 1):
+                grid_verts[vi] = [
+                    x * spec.cell_x + spec.bbox_min[0],
+                    y * spec.cell_y + spec.bbox_min[1],
+                    z * spec.cell_z + spec.bbox_min[2],
+                ]
+                vi += 1
+    return grid_verts
+
+
+def _build_soft_tet_cells(dim_x: int, dim_y: int, dim_z: int) -> np.ndarray:
+    """Rebuild Newton's alternating 5-tet decomposition per voxel."""
+
+    def grid_index(x: int, y: int, z: int) -> int:
+        return (dim_x + 1) * (dim_y + 1) * z + (dim_x + 1) * y + x
+
+    tet_list: list[list[int]] = []
+    for z in range(dim_z):
+        for y in range(dim_y):
+            for x in range(dim_x):
+                v0 = grid_index(x, y, z)
+                v1 = grid_index(x + 1, y, z)
+                v2 = grid_index(x + 1, y, z + 1)
+                v3 = grid_index(x, y, z + 1)
+                v4 = grid_index(x, y + 1, z)
+                v5 = grid_index(x + 1, y + 1, z)
+                v6 = grid_index(x + 1, y + 1, z + 1)
+                v7 = grid_index(x, y + 1, z + 1)
+
+                if (x & 1) ^ (y & 1) ^ (z & 1):
+                    tet_list.extend(
+                        [
+                            [v0, v1, v4, v3],
+                            [v2, v3, v6, v1],
+                            [v5, v4, v1, v6],
+                            [v7, v6, v3, v4],
+                            [v4, v1, v6, v3],
+                        ]
+                    )
+                else:
+                    tet_list.extend(
+                        [
+                            [v1, v2, v5, v0],
+                            [v3, v0, v7, v2],
+                            [v4, v7, v0, v5],
+                            [v6, v5, v2, v7],
+                            [v5, v2, v7, v0],
+                        ]
+                    )
+    return np.array(tet_list, dtype=np.int32)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -262,8 +402,33 @@ class NewtonVBDBackend(PhysicsBackend):
 
         # Create bodies from per-object definitions
         per_object = material_params.get("per_object")
+        if per_object is not None and not isinstance(per_object, list):
+            detail = f"per_object_type={type(per_object).__name__}"
+            LOGGER.error(
+                "[NewtonVBD] backend=newton_vbd operation=set_material detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_vbd",
+                operation="set_material",
+                expected="material.per_object must be a list",
+                detail=detail,
+            )
         if per_object is not None:
             for obj in per_object:
+                if not isinstance(obj, dict):
+                    detail = f"per_object_item_type={type(obj).__name__}"
+                    LOGGER.error(
+                        "[NewtonVBD] backend=newton_vbd operation=set_material "
+                        "detail=%s",
+                        detail,
+                    )
+                    raise configuration_error(
+                        owner="newton_vbd",
+                        operation="set_material",
+                        expected="each material.per_object item must be dict",
+                        detail=detail,
+                    )
                 mat = obj.get("material", {})
                 physics_type = mat.get("physics", "rigid")
 
@@ -285,10 +450,20 @@ class NewtonVBDBackend(PhysicsBackend):
                         name=obj.get("name", "?"),
                     )
                 else:
-                    raise ValueError(
-                        f"Unknown physics type '{physics_type}' for "
-                        f"object '{obj.get('name', '?')}'. "
-                        "Use 'rigid' or 'soft'."
+                    detail = (
+                        f"object={obj.get('name', '?')} "
+                        f"physics={physics_type!r}"
+                    )
+                    LOGGER.error(
+                        "[NewtonVBD] backend=newton_vbd operation=set_material "
+                        "detail=%s",
+                        detail,
+                    )
+                    raise configuration_error(
+                        owner="newton_vbd",
+                        operation="set_material",
+                        expected="per_object[].material.physics in {'rigid','soft'}",
+                        detail=detail,
                     )
         else:
             # Single body → default to rigid
@@ -304,9 +479,33 @@ class NewtonVBDBackend(PhysicsBackend):
         builder = self._require_builder("set_boundary_conditions")
 
         if not isinstance(bc_params, list):
-            return
+            detail = f"bc_params_type={type(bc_params).__name__}"
+            LOGGER.error(
+                "[NewtonVBD] backend=newton_vbd operation=set_boundary_conditions "
+                "detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_vbd",
+                operation="set_boundary_conditions",
+                expected="bc_params must be list",
+                detail=detail,
+            )
 
         for bc in bc_params:
+            if not isinstance(bc, dict):
+                detail = f"bc_item_type={type(bc).__name__}"
+                LOGGER.error(
+                    "[NewtonVBD] backend=newton_vbd operation=set_boundary_conditions "
+                    "detail=%s",
+                    detail,
+                )
+                raise configuration_error(
+                    owner="newton_vbd",
+                    operation="set_boundary_conditions",
+                    expected="each bc item must be dict",
+                    detail=detail,
+                )
             bc_type = bc.get("type", "")
             if bc_type == "surface_collider":
                 plane, mu = surface_plane_from_bc(bc)
@@ -321,6 +520,18 @@ class NewtonVBDBackend(PhysicsBackend):
 
     def finalize(self) -> None:
         builder = self._require_builder("finalize")
+        if self._gravity is None:
+            detail = "gravity missing; set_material() was not called or invalid"
+            LOGGER.error(
+                "[NewtonVBD] backend=newton_vbd operation=finalize detail=%s",
+                detail,
+            )
+            raise lifecycle_error(
+                owner="newton_vbd",
+                operation="finalize",
+                expected="set_material() must set gravity before finalize()",
+                detail=detail,
+            )
 
         # VBD requires coloring
         builder.color()
@@ -468,118 +679,74 @@ class NewtonVBDBackend(PhysicsBackend):
             k_damp         : float — damping coeff   (default 1e-3)
         """
         builder = self._require_builder("_create_soft_body")
+        if self._init_positions is None or self._init_covariances is None:
+            raise lifecycle_error(
+                owner="newton_vbd",
+                operation="_create_soft_body",
+                expected="initialize() must store positions/covariances",
+            )
+        if len(particle_indices) == 0:
+            detail = f"object={name} particle_count=0"
+            LOGGER.error(
+                "[NewtonVBD] backend=newton_vbd operation=_create_soft_body "
+                "detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_vbd",
+                operation="_create_soft_body",
+                expected="soft object must contain at least one particle",
+                detail=detail,
+            )
 
         idx_t = torch.tensor(particle_indices, dtype=torch.long)
         pos = self._init_positions[idx_t].float()
         pos_np = pos.detach().cpu().numpy()
-
-        # ── Bounding box with padding ──────────────────────────────────
-        bbox_min = pos_np.min(axis=0)
-        bbox_max = pos_np.max(axis=0)
-        padding = float(material.get("grid_padding", 0.05))
-        bbox_min = bbox_min - padding
-        bbox_max = bbox_max + padding
-        extent = bbox_max - bbox_min
-
-        # ── Grid parameters ────────────────────────────────────────────
-        # cell_size: explicit value, or auto-compute from grid_resolution.
-        cell_size = material.get("cell_size", None)
-        if cell_size is not None:
-            cell_size = float(cell_size)
-        else:
-            grid_res = int(material.get("grid_resolution", 8))
-            cell_size = float(extent.max() / max(grid_res, 1))
-
-        dim_x = max(1, int(np.ceil(extent[0] / cell_size)))
-        dim_y = max(1, int(np.ceil(extent[1] / cell_size)))
-        dim_z = max(1, int(np.ceil(extent[2] / cell_size)))
-
-        # Recalculate per-axis cell sizes to exactly cover the bbox.
-        cell_x = extent[0] / dim_x
-        cell_y = extent[1] / dim_y
-        cell_z = extent[2] / dim_z
-
-        # ── Material parameters ────────────────────────────────────────
-        density = float(material.get("density", 1e3))
-        k_mu = float(material.get("k_mu", 1e5))
-        k_lambda = float(material.get("k_lambda", 1e5))
-        k_damp = float(material.get("k_damp", 1e-3))
+        try:
+            spec = _compute_soft_grid_spec(pos_np=pos_np, material=material)
+        except (TypeError, ValueError) as exc:
+            detail = f"object={name} reason={exc}"
+            LOGGER.error(
+                "[NewtonVBD] backend=newton_vbd operation=_create_soft_body "
+                "detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_vbd",
+                operation="_create_soft_body",
+                expected="valid soft grid/material parameters",
+                detail=detail,
+            ) from exc
 
         # ── Add regular tet grid via Newton's API ──────────────────────
         vert_offset = self._particle_offset
 
         builder.add_soft_grid(
             pos=wp.vec3(
-                float(bbox_min[0]), float(bbox_min[1]), float(bbox_min[2])
+                float(spec.bbox_min[0]),
+                float(spec.bbox_min[1]),
+                float(spec.bbox_min[2]),
             ),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=dim_x,
-            dim_y=dim_y,
-            dim_z=dim_z,
-            cell_x=cell_x,
-            cell_y=cell_y,
-            cell_z=cell_z,
-            density=density,
-            k_mu=k_mu,
-            k_lambda=k_lambda,
-            k_damp=k_damp,
+            dim_x=spec.dim_x,
+            dim_y=spec.dim_y,
+            dim_z=spec.dim_z,
+            cell_x=spec.cell_x,
+            cell_y=spec.cell_y,
+            cell_z=spec.cell_z,
+            density=spec.density,
+            k_mu=spec.k_mu,
+            k_lambda=spec.k_lambda,
+            k_damp=spec.k_damp,
         )
 
-        vert_count = (dim_x + 1) * (dim_y + 1) * (dim_z + 1)
+        vert_count = (spec.dim_x + 1) * (spec.dim_y + 1) * (spec.dim_z + 1)
         self._particle_offset += vert_count
 
-        # ── Reconstruct grid vertices in numpy ─────────────────────────
-        # Exactly mirrors Newton's add_soft_grid vertex generation order
-        # (z-major, then y, then x) so indices match particle_q layout.
-        grid_verts = np.zeros((vert_count, 3), dtype=np.float64)
-        vi = 0
-        for z in range(dim_z + 1):
-            for y in range(dim_y + 1):
-                for x in range(dim_x + 1):
-                    grid_verts[vi] = [
-                        x * cell_x + bbox_min[0],
-                        y * cell_y + bbox_min[1],
-                        z * cell_z + bbox_min[2],
-                    ]
-                    vi += 1
-
-        # ── Reconstruct tet connectivity ───────────────────────────────
-        # Exactly mirrors Newton's 5-tet alternating decomposition.
-        def grid_index(x, y, z):
-            return (dim_x + 1) * (dim_y + 1) * z + (dim_x + 1) * y + x
-
-        tet_list = []
-        for z in range(dim_z):
-            for y in range(dim_y):
-                for x in range(dim_x):
-                    v0 = grid_index(x, y, z)
-                    v1 = grid_index(x + 1, y, z)
-                    v2 = grid_index(x + 1, y, z + 1)
-                    v3 = grid_index(x, y, z + 1)
-                    v4 = grid_index(x, y + 1, z)
-                    v5 = grid_index(x + 1, y + 1, z)
-                    v6 = grid_index(x + 1, y + 1, z + 1)
-                    v7 = grid_index(x, y + 1, z + 1)
-
-                    if (x & 1) ^ (y & 1) ^ (z & 1):
-                        tet_list.extend([
-                            [v0, v1, v4, v3],
-                            [v2, v3, v6, v1],
-                            [v5, v4, v1, v6],
-                            [v7, v6, v3, v4],
-                            [v4, v1, v6, v3],
-                        ])
-                    else:
-                        tet_list.extend([
-                            [v1, v2, v5, v0],
-                            [v3, v0, v7, v2],
-                            [v4, v7, v0, v5],
-                            [v6, v5, v2, v7],
-                            [v5, v2, v7, v0],
-                        ])
-
-        tet_cells = np.array(tet_list, dtype=np.int32)
+        # Rebuild geometry exactly as Newton's add_soft_grid does.
+        grid_verts = _build_soft_grid_vertices(spec)
+        tet_cells = _build_soft_tet_cells(spec.dim_x, spec.dim_y, spec.dim_z)
 
         # ── Embed GS particles in tet grid ─────────────────────────────
         LOGGER.info(
@@ -616,9 +783,9 @@ class NewtonVBDBackend(PhysicsBackend):
         ))
         LOGGER.info(
             f"[NewtonVBD] Soft '{name}': {len(particle_indices)} GS particles, "
-            f"grid {dim_x}x{dim_y}x{dim_z} = {vert_count} verts, "
+            f"grid {spec.dim_x}x{spec.dim_y}x{spec.dim_z} = {vert_count} verts, "
             f"{tet_cells.shape[0]} tets, "
-            f"cell=[{cell_x:.4f},{cell_y:.4f},{cell_z:.4f}], "
-            f"density={density}, k_mu={k_mu:.0e}, k_lambda={k_lambda:.0e}, "
-            f"k_damp={k_damp:.0e}"
+            f"cell=[{spec.cell_x:.4f},{spec.cell_y:.4f},{spec.cell_z:.4f}], "
+            f"density={spec.density}, k_mu={spec.k_mu:.0e}, "
+            f"k_lambda={spec.k_lambda:.0e}, k_damp={spec.k_damp:.0e}"
         )

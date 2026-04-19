@@ -34,6 +34,23 @@ def lifecycle_error(
     return PhysicsSimLifecycleError(msg)
 
 
+def configuration_error(
+    *,
+    owner: str,
+    operation: str,
+    expected: str,
+    detail: str | None = None,
+) -> PhysicsSimConfigurationError:
+    """Build a contextual configuration error with stable message shape."""
+    msg = (
+        f"[E_CONFIG] owner={owner} operation={operation} "
+        f"expected={expected}"
+    )
+    if detail:
+        msg = f"{msg} detail={detail}"
+    return PhysicsSimConfigurationError(msg)
+
+
 def unknown_registry_error(
     *,
     registry: str,

@@ -22,10 +22,20 @@ from physics_sim.backend.newton_mpm.boundary_conditions import (
 )
 from physics_sim.backend.newton_mpm.materials import apply_material_to_model
 from physics_sim.backend.newton_mpm.state_export import export_mpm_state
-from physics_sim.errors import lifecycle_error
+from physics_sim.errors import configuration_error, lifecycle_error
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
+
+_SOLVER_OPT_TYPES = {
+    "max_iterations": int,
+    "tolerance": float,
+    "solver": str,
+    "grid_type": str,
+    "transfer_scheme": str,
+    "air_drag": float,
+    "grid_padding": int,
+}
 
 
 class NewtonMPMBackend(PhysicsBackend):
@@ -152,6 +162,21 @@ class NewtonMPMBackend(PhysicsBackend):
         # 2DGS: store initial quats + scales for SVD-based output
         iq = kwargs.get("init_quats")
         isc = kwargs.get("init_scales")
+        if (iq is None) ^ (isc is None):
+            detail = (
+                f"init_quats_provided={iq is not None} "
+                f"init_scales_provided={isc is not None}"
+            )
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=initialize detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_mpm",
+                operation="initialize",
+                expected="init_quats and init_scales must be provided together",
+                detail=detail,
+            )
         if iq is not None and isc is not None:
             self._init_quats_np = iq.detach().cpu().numpy().astype(np.float32)
             self._init_scales_np = isc.detach().cpu().numpy().astype(np.float32)
@@ -167,12 +192,38 @@ class NewtonMPMBackend(PhysicsBackend):
             material, E, nu, density, friction_angle, yield_stress,
             hardening, g, rpic_damping, grid_v_damping_scale, etc.
         """
+        if not isinstance(material_params, dict):
+            detail = f"material_params_type={type(material_params).__name__}"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=set_material detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_mpm",
+                operation="set_material",
+                expected="material_params must be dict",
+                detail=detail,
+            )
+
         # Store material params; applied to the finalized model in finalize().
         self._material_params = dict(material_params)
 
         # ── Solver options from material params ──────────────────────
         # Transfer scheme: map rpic_damping → "pic" / "apic"
-        rpic = material_params.get("rpic_damping", 0.0)
+        try:
+            rpic = float(material_params.get("rpic_damping", 0.0))
+        except (TypeError, ValueError) as exc:
+            detail = f"invalid rpic_damping={material_params.get('rpic_damping')!r}"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=set_material detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_mpm",
+                operation="set_material",
+                expected="rpic_damping must be numeric",
+                detail=detail,
+            ) from exc
         if rpic < 0:
             self._solver_opts.transfer_scheme = "pic"
         else:
@@ -180,41 +231,128 @@ class NewtonMPMBackend(PhysicsBackend):
 
         # Apply solver option overrides from config ("newton_mpm" → "solver").
         # Any key that exists as an attribute on SolverImplicitMPM.Config
-        # can be overridden here.  Unrecognised keys are warned about.
+        # can be overridden here.
         newton_opts = material_params.get("newton_solver_opts", {})
-        _SOLVER_OPT_TYPES = {
-            "max_iterations": int,
-            "tolerance": float,
-            "solver": str,
-            "grid_type": str,
-            "transfer_scheme": str,
-            "air_drag": float,
-            "grid_padding": int,
+        if not isinstance(newton_opts, dict):
+            detail = f"newton_solver_opts_type={type(newton_opts).__name__}"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=set_material detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_mpm",
+                operation="set_material",
+                expected="newton_solver_opts must be dict",
+                detail=detail,
+            )
+
+        available_opts = {
+            name
+            for name in dir(self._solver_opts)
+            if not name.startswith("_") and not callable(getattr(self._solver_opts, name))
         }
         for key, val in newton_opts.items():
-            if hasattr(self._solver_opts, key):
-                cast = _SOLVER_OPT_TYPES.get(key, type(val))
-                setattr(self._solver_opts, key, cast(val))
-                LOGGER.info("[NewtonMPM] solver.%s=%s", key, cast(val))
-            else:
-                LOGGER.warning(
-                    "[NewtonMPM] unknown solver option '%s', ignored", key
+            if key not in available_opts:
+                detail = (
+                    f"unknown newton_solver_opts key={key!r} "
+                    f"available={sorted(available_opts)}"
                 )
+                LOGGER.error(
+                    "[NewtonMPM] backend=newton_mpm operation=set_material detail=%s",
+                    detail,
+                )
+                raise configuration_error(
+                    owner="newton_mpm",
+                    operation="set_material",
+                    expected="newton_solver_opts keys must match SolverImplicitMPM.Config",
+                    detail=detail,
+                )
+            cast = _SOLVER_OPT_TYPES.get(key)
+            if cast is None:
+                current = getattr(self._solver_opts, key)
+                cast = type(current) if current is not None else type(val)
+            try:
+                cast_val = cast(val)
+            except (TypeError, ValueError) as exc:
+                detail = (
+                    f"solver option {key!r} expects {cast.__name__}, "
+                    f"got value={val!r}"
+                )
+                LOGGER.error(
+                    "[NewtonMPM] backend=newton_mpm operation=set_material detail=%s",
+                    detail,
+                )
+                raise configuration_error(
+                    owner="newton_mpm",
+                    operation="set_material",
+                    expected=f"newton_solver_opts.{key} must be {cast.__name__}",
+                    detail=detail,
+                ) from exc
+            setattr(self._solver_opts, key, cast_val)
+            LOGGER.info("[NewtonMPM] solver.%s=%s", key, cast_val)
 
         # NOTE: Material fields on the Newton model are not available until
         # builder.finalize() is called. We apply physical parameters in finalize().
 
     def set_boundary_conditions(self, bc_params: list, time_params: dict) -> None:
         """Register BCs and build per-step BC runtime."""
+        if not isinstance(bc_params, list):
+            detail = f"bc_params_type={type(bc_params).__name__}"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=set_boundary_conditions "
+                "detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_mpm",
+                operation="set_boundary_conditions",
+                expected="bc_params must be list",
+                detail=detail,
+            )
+        if not isinstance(time_params, dict):
+            detail = f"time_params_type={type(time_params).__name__}"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=set_boundary_conditions "
+                "detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_mpm",
+                operation="set_boundary_conditions",
+                expected="time_params must be dict",
+                detail=detail,
+            )
+        for bc in bc_params:
+            if not isinstance(bc, dict):
+                detail = f"bc_item_type={type(bc).__name__}"
+                LOGGER.error(
+                    "[NewtonMPM] backend=newton_mpm operation=set_boundary_conditions "
+                    "detail=%s",
+                    detail,
+                )
+                raise configuration_error(
+                    owner="newton_mpm",
+                    operation="set_boundary_conditions",
+                    expected="each bc item must be dict",
+                    detail=detail,
+                )
+
         self._bc_params = bc_params
         self._time_params = time_params
 
         builder = self._builder
         if builder is None:
+            detail = "builder missing; initialize() not completed"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=set_boundary_conditions "
+                "detail=%s",
+                detail,
+            )
             raise lifecycle_error(
                 owner="newton_mpm",
                 operation="set_boundary_conditions",
                 expected="initialize() must run first",
+                detail=detail,
             )
         self._bc_runtime = register_boundary_conditions(
             builder=builder,
@@ -229,16 +367,28 @@ class NewtonMPMBackend(PhysicsBackend):
         set_material() and set_boundary_conditions()."""
         builder = self._builder
         if builder is None:
+            detail = "builder missing; initialize() not completed"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=finalize detail=%s",
+                detail,
+            )
             raise lifecycle_error(
                 owner="newton_mpm",
                 operation="finalize",
                 expected="initialize() must run first",
+                detail=detail,
             )
         if self._material_params is None:
+            detail = "material params missing; set_material() not called"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=finalize detail=%s",
+                detail,
+            )
             raise lifecycle_error(
                 owner="newton_mpm",
                 operation="finalize",
                 expected="set_material() must run first",
+                detail=detail,
             )
 
         # Finalize model after all shapes are registered.
@@ -249,10 +399,16 @@ class NewtonMPMBackend(PhysicsBackend):
         # ── Covariance tracking buffers ───────────────────────────────
         n = self._n_particles
         if self._cov_np is None:
+            detail = "covariance buffer missing from initialize()"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=finalize detail=%s",
+                detail,
+            )
             raise lifecycle_error(
                 owner="newton_mpm",
                 operation="finalize",
                 expected="initialize() must provide covariances",
+                detail=detail,
             )
         self._init_cov = wp.from_numpy(self._cov_np, dtype=float, device=self._device)
         self._out_cov = wp.zeros(n * 6, dtype=float, device=self._device)
@@ -273,10 +429,16 @@ class NewtonMPMBackend(PhysicsBackend):
 
         # Apply material params now that model exists.
         if self._volumes is None or self._material_params is None:
+            detail = "volumes/material incomplete before apply_material_to_model"
+            LOGGER.error(
+                "[NewtonMPM] backend=newton_mpm operation=finalize detail=%s",
+                detail,
+            )
             raise lifecycle_error(
                 owner="newton_mpm",
                 operation="finalize",
                 expected="initialize()+set_material() must provide volumes/material",
+                detail=detail,
             )
         apply_material_to_model(
             model=self._model,

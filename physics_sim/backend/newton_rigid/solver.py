@@ -33,7 +33,6 @@ from physics_sim.backend.newton_common.boundary import (
     surface_plane_from_bc,
 )
 from physics_sim.backend.newton_rigid.collider_builders import (
-    COLLISION_GEO_TYPES,
     create_rigid_body,
     normalize_collision_geo,
 )
@@ -43,7 +42,7 @@ from physics_sim.coord import (
     gravity_contract_error,
     normalize_internal_gravity,
 )
-from physics_sim.errors import lifecycle_error
+from physics_sim.errors import configuration_error, lifecycle_error
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -101,9 +100,12 @@ class NewtonRigidBackend(PhysicsBackend):
         # Deferred configuration
         self._gravity: tuple[float, float, float] | None = None
         self._solver_iterations: int = 10
+        self._solver_relaxation: float = 0.8
 
         # Recorded plane equations for diagnostics: list of (normal_3, d)
         self._plane_equations: list[tuple[list[float], float]] = []
+        self._bbox_lo: np.ndarray | None = None
+        self._bbox_hi: np.ndarray | None = None
 
     # ── PhysicsBackend interface ─────────────────────────────────────
 
@@ -237,9 +239,34 @@ class NewtonRigidBackend(PhysicsBackend):
 
         # ── Create bodies ───────────────────────────────────────────
         per_object = material_params.get("per_object")
+        if per_object is not None and not isinstance(per_object, list):
+            detail = f"per_object_type={type(per_object).__name__}"
+            LOGGER.error(
+                "[NewtonRigid] backend=newton_rigid operation=set_material detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_rigid",
+                operation="set_material",
+                expected="material.per_object must be a list",
+                detail=detail,
+            )
 
         if per_object is not None:
             for obj in per_object:
+                if not isinstance(obj, dict):
+                    detail = f"per_object_item_type={type(obj).__name__}"
+                    LOGGER.error(
+                        "[NewtonRigid] backend=newton_rigid operation=set_material "
+                        "detail=%s",
+                        detail,
+                    )
+                    raise configuration_error(
+                        owner="newton_rigid",
+                        operation="set_material",
+                        expected="each material.per_object item must be dict",
+                        detail=detail,
+                    )
                 mat = obj.get("material", {})
                 cfg = copy(base_cfg)
                 cfg.density = float(mat.get("density", cfg.density))
@@ -277,9 +304,33 @@ class NewtonRigidBackend(PhysicsBackend):
         builder = self._require_builder("set_boundary_conditions")
 
         if not isinstance(bc_params, list):
-            return
+            detail = f"bc_params_type={type(bc_params).__name__}"
+            LOGGER.error(
+                "[NewtonRigid] backend=newton_rigid operation=set_boundary_conditions "
+                "detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_rigid",
+                operation="set_boundary_conditions",
+                expected="bc_params must be list",
+                detail=detail,
+            )
 
         for bc in bc_params:
+            if not isinstance(bc, dict):
+                detail = f"bc_item_type={type(bc).__name__}"
+                LOGGER.error(
+                    "[NewtonRigid] backend=newton_rigid operation=set_boundary_conditions "
+                    "detail=%s",
+                    detail,
+                )
+                raise configuration_error(
+                    owner="newton_rigid",
+                    operation="set_boundary_conditions",
+                    expected="each bc item must be dict",
+                    detail=detail,
+                )
             bc_type = bc.get("type", "")
 
             if bc_type == "surface_collider":
@@ -296,6 +347,19 @@ class NewtonRigidBackend(PhysicsBackend):
                 )
 
             elif bc_type == "bounding_box":
+                if self._bbox_lo is None or self._bbox_hi is None:
+                    detail = "bounding box unavailable; initialize() did not set bbox"
+                    LOGGER.error(
+                        "[NewtonRigid] backend=newton_rigid operation=set_boundary_conditions "
+                        "detail=%s",
+                        detail,
+                    )
+                    raise lifecycle_error(
+                        owner="newton_rigid",
+                        operation="set_boundary_conditions",
+                        expected="initialize() must set bbox before bounding_box BC",
+                        detail=detail,
+                    )
                 margin = 0.01
                 wall_cfg = newton.ModelBuilder.ShapeConfig(mu=0.3)
                 lo = self._bbox_lo
@@ -312,6 +376,18 @@ class NewtonRigidBackend(PhysicsBackend):
     def finalize(self) -> None:
         """Finalize the Newton model and create solver + states."""
         builder = self._require_builder("finalize")
+        if self._gravity is None:
+            detail = "gravity missing; call set_material() before finalize()"
+            LOGGER.error(
+                "[NewtonRigid] backend=newton_rigid operation=finalize detail=%s",
+                detail,
+            )
+            raise lifecycle_error(
+                owner="newton_rigid",
+                operation="finalize",
+                expected="set_material() must set gravity before finalize()",
+                detail=detail,
+            )
 
         # ── Finalize model ──────────────────────────────────────────
         self._model = builder.finalize(device=self._device)
@@ -446,11 +522,52 @@ class NewtonRigidBackend(PhysicsBackend):
         """
         init_vel_tuple = None
         if initial_velocity is not None:
+            if not isinstance(initial_velocity, (list, tuple)):
+                detail = (
+                    f"body={name} initial_velocity_type="
+                    f"{type(initial_velocity).__name__}"
+                )
+                LOGGER.error(
+                    "[NewtonRigid] backend=newton_rigid operation=_create_body "
+                    "detail=%s",
+                    detail,
+                )
+                raise configuration_error(
+                    owner="newton_rigid",
+                    operation="_create_body",
+                    expected="initial_velocity must be [vx, vy, vz]",
+                    detail=detail,
+                )
+            if len(initial_velocity) != 3:
+                detail = (
+                    f"body={name} initial_velocity={initial_velocity!r} "
+                    "must have 3 values"
+                )
+                LOGGER.error(
+                    "[NewtonRigid] backend=newton_rigid operation=_create_body "
+                    "detail=%s",
+                    detail,
+                )
+                raise configuration_error(
+                    owner="newton_rigid",
+                    operation="_create_body",
+                    expected="initial_velocity must be [vx, vy, vz]",
+                    detail=detail,
+                )
             init_vel_tuple = tuple(float(v) for v in initial_velocity)
         builder = self._require_builder("_create_body")
         if len(particle_indices) == 0:
-            LOGGER.warning("[NewtonRigid] skip empty body '%s'", name)
-            return
+            detail = f"body={name} particle_count=0"
+            LOGGER.error(
+                "[NewtonRigid] backend=newton_rigid operation=_create_body detail=%s",
+                detail,
+            )
+            raise configuration_error(
+                owner="newton_rigid",
+                operation="_create_body",
+                expected="body must contain at least one particle",
+                detail=detail,
+            )
 
         geo = normalize_collision_geo(collision_geo or self._collision_geo)
         built = create_rigid_body(
