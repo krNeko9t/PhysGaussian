@@ -9,6 +9,8 @@ from physics_sim.config.models import (
     PreprocessConfig,
     SimConfig,
     TimeConfig,
+    VBDMaterial,
+    VBDRigidBody,
 )
 
 backend = NoneBackendConfig()
@@ -51,6 +53,7 @@ config = SimConfig(
                 min_match_ratio=0.95,
                 max_ambiguous_ratio=1e-3,
             ),
+            material=VBDMaterial(body=VBDRigidBody()),
         ),
         ObjectConfig(
             name="alocasia_foreground_static",
@@ -82,3 +85,4 @@ config = SimConfig(
     ],
     boundary_conditions=[],
 )
+
