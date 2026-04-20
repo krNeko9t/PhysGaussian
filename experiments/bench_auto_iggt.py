@@ -3,13 +3,23 @@
 from physics_sim.config.models import (
     CameraConfig,
     ColliderConfig,
+    ColliderFitSpec,
     NewtonVBDConfig,
     ObjectConfig,
     PlySource,
     PreprocessConfig,
     SimConfig,
     TimeConfig,
+    VBDMaterial,
+    VBDRigidBody,
 )
+
+
+def _rigid(density: float, mu: float) -> VBDMaterial:
+    return VBDMaterial(
+        body=VBDRigidBody(density=density, mu=mu, collision_geometry="convex_hull"),
+    )
+
 
 config = SimConfig(
     output="output/test",
@@ -49,42 +59,21 @@ config = SimConfig(
             source=PlySource(
                 ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_000.ply",
             ),
-            material=dict(
-                density=981.8,
-                mu=0.474,
-                E=44058682800.0,
-                nu=0.313,
-                collision_geometry="convex_hull",
-                g_magnitude=9.8,
-            ),
+            material=_rigid(density=981.8, mu=0.474),
         ),
         ObjectConfig(
             name="3dovs_bench_inst001",
             source=PlySource(
                 ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_001.ply",
             ),
-            material=dict(
-                density=328.3,
-                mu=0.485,
-                E=828444.0,
-                nu=0.423,
-                collision_geometry="convex_hull",
-                g_magnitude=9.8,
-            ),
+            material=_rigid(density=328.3, mu=0.485),
         ),
         ObjectConfig(
             name="3dovs_bench_inst002",
             source=PlySource(
                 ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_002.ply",
             ),
-            material=dict(
-                density=934.8,
-                mu=0.414,
-                E=104946240000.00002,
-                nu=0.351,
-                collision_geometry="convex_hull",
-                g_magnitude=9.8,
-            ),
+            material=_rigid(density=934.8, mu=0.414),
         ),
         ObjectConfig(
             name="3dovs_bench_inst003",
@@ -96,16 +85,9 @@ config = SimConfig(
                 space="world",
                 surface="slip",
                 friction=0.703,
-                fit=dict(method="svd", sample_max=200000, seed=0),
+                fit=ColliderFitSpec(method="svd", sample_max=200000, seed=0),
             ),
-            material=dict(
-                density=800.0,
-                mu=0.5,
-                E=1e5,
-                nu=0.4,
-                collision_geometry="convex_hull",
-                g_magnitude=9.8,
-            ),
+            material=_rigid(density=800.0, mu=0.5),
         ),
         ObjectConfig(
             name="3dovs_bench_inst004",
@@ -113,14 +95,7 @@ config = SimConfig(
             source=PlySource(
                 ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_004.ply",
             ),
-            material=dict(
-                density=633.4,
-                mu=0.412,
-                E=5021179200.000001,
-                nu=0.347,
-                collision_geometry="convex_hull",
-                g_magnitude=9.8,
-            ),
+            material=_rigid(density=633.4, mu=0.412),
         ),
         ObjectConfig(
             name="3dovs_bench_inst005",
@@ -133,16 +108,9 @@ config = SimConfig(
                 surface="slip",
                 friction=0.5,
                 prefer_up=(0.0186, 0.7519, 0.659),
-                fit=dict(method="svd", sample_max=200000, seed=0),
+                fit=ColliderFitSpec(method="svd", sample_max=200000, seed=0),
             ),
-            material=dict(
-                density=800.0,
-                mu=0.5,
-                E=1e5,
-                nu=0.4,
-                collision_geometry="convex_hull",
-                g_magnitude=9.8,
-            ),
+            material=_rigid(density=800.0, mu=0.5),
         ),
         ObjectConfig(
             name="3dovs_bench_inst006",
@@ -150,29 +118,16 @@ config = SimConfig(
             source=PlySource(
                 ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_006.ply",
             ),
-            material=dict(
-                density=375.6,
-                mu=0.513,
-                E=38934514.0,
-                nu=0.444,
-                collision_geometry="convex_hull",
-                g_magnitude=9.8,
-            ),
+            material=_rigid(density=375.6, mu=0.513),
         ),
         ObjectConfig(
             name="3dovs_bench_inst007",
             source=PlySource(
                 ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_007.ply",
             ),
-            material=dict(
-                density=619.7,
-                mu=0.5,
-                E=260148.0,
-                nu=0.44,
-                collision_geometry="convex_hull",
-                g_magnitude=9.8,
-            ),
+            material=_rigid(density=619.7, mu=0.5),
         ),
     ],
     boundary_conditions=[],
 )
+

@@ -36,29 +36,30 @@ def resolve_collider_boundary_conditions(collider_objects, source_axes: SourceAx
     """Convert collider_only objects into normalized internal BCs."""
     bc_list: list[dict[str, Any]] = []
     for obj in collider_objects:
-        col = obj.collider or {}
-        col_type = col.get("type", "plane")
-        if col_type != "plane":
+        col = obj.collider
+        if col is None:
+            raise ValueError(
+                f"collider_only '{obj.name}' has no collider config"
+            )
+        if col.type != "plane":
             raise ValueError(
                 f"collider_only '{obj.name}' only supports type='plane' "
-                f"(got {col_type!r})"
+                f"(got {col.type!r})"
             )
 
-        surface = col.get("surface", "sticky")
-        friction = float(col.get("friction", 0.0))
-        start_time = col.get("start_time", 0)
-        end_time = col.get("end_time", 1e3)
+        surface = col.surface
+        friction = float(col.friction)
+        start_time = col.start_time
+        end_time = col.end_time
 
-        if col.get("point") is not None and col.get("normal") is not None:
-            point = col["point"]
-            normal = col["normal"]
+        if col.point is not None and col.normal is not None:
             bc_list.append(
                 _to_internal_surface_collider(
                     {
                         "type": "surface_collider",
                         "space": "world",
-                        "point": point,
-                        "normal": normal,
+                        "point": list(col.point),
+                        "normal": list(col.normal),
                         "surface": surface,
                         "friction": friction,
                         "start_time": start_time,
@@ -75,15 +76,19 @@ def resolve_collider_boundary_conditions(collider_objects, source_axes: SourceAx
                 f"collider_only '{obj.name}' has too few points for "
                 "plane fitting and no explicit point+normal."
             )
-        fit = col.get("fit") or {}
-        sample_max = fit.get("sample_max", 200000)
-        prefer_up_src = col.get("prefer_up", source_axes.up_vector.tolist())
+        fit = col.fit
+        sample_max = fit.sample_max if fit is not None else 200_000
+        seed = fit.seed if fit is not None else 0
+        prefer_up_src = (
+            list(col.prefer_up) if col.prefer_up is not None
+            else source_axes.up_vector.tolist()
+        )
         prefer_up_t = torch.tensor(prefer_up_src, dtype=torch.float32).reshape(1, 3)
         prefer_up_aligned = align_directions(prefer_up_t, source_axes)[0].numpy()
         res = fit_plane_svd(
             pts,
             sample_max=sample_max,
-            seed=int(fit.get("seed", 0)),
+            seed=int(seed),
             prefer_up=np.asarray(prefer_up_aligned, dtype=np.float32),
         )
         LOGGER.info(

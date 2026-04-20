@@ -1,15 +1,16 @@
 """Rigid body: wolf + bread dropping onto a ground plane."""
 
 from physics_sim.config.models import (
+    CameraConfig,
     NewtonRigidConfig,
     ObjectConfig,
     ObjectTransform,
     PlySource,
     PreprocessConfig,
+    RigidMaterial,
     SimConfig,
     SurfaceCollider,
     TimeConfig,
-    CameraConfig,
 )
 
 config = SimConfig(
@@ -27,7 +28,7 @@ config = SimConfig(
             source=PlySource(
                 ply_path="model/wolf_whitebg-trained/point_cloud/iteration_30000/point_cloud.ply",
             ),
-            material=dict(density=500, mu=0.6, E=1e5, nu=0.3, g_magnitude=9.8),
+            material=RigidMaterial(density=500, mu=0.6),
         ),
         ObjectConfig(
             name="bread",
@@ -35,7 +36,7 @@ config = SimConfig(
                 ply_path="model/bread-trained/point_cloud/iteration_30000/point_cloud.ply",
             ),
             transform=ObjectTransform(position=(0.0, 0.0, 1.5)),
-            material=dict(density=500, mu=0.3, E=1e5, nu=0.3, g_magnitude=9.8),
+            material=RigidMaterial(density=500, mu=0.3),
         ),
     ],
     boundary_conditions=[
@@ -45,3 +46,4 @@ config = SimConfig(
         ),
     ],
 )
+

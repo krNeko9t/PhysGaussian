@@ -1,9 +1,9 @@
 """Stage 1: Scene assembly and tensor concatenation.
 
 After this stage, **all tensors are in the internal Y-up coordinate
-system**.  The ``SceneData.source_axes`` / ``alignment_inv`` fields
-record the original convention so that SH evaluation can transform
-view directions back to PLY-native space.
+system**.  The ``SceneData.coord`` field records the original convention
+so that SH evaluation can transform view directions back to PLY-native
+space.
 """
 
 from __future__ import annotations
@@ -13,11 +13,67 @@ from typing import Optional
 
 import torch
 
-from physics_sim.config.models import SimConfig
+from physics_sim.config.models import MaterialSpec, SimConfig
 from physics_sim.coord import SourceAxes
 from physics_sim.render.interfaces import SceneAssetLoader
 from physics_sim.sh_contract import sh_coeff_count
 from physics_sim.scene import SceneObject, assemble_scene
+
+
+@dataclass
+class ObjectRuntimeInfo:
+    """Per-object runtime descriptor.
+
+    Single source of truth for downstream "by-object" lookups.
+    ``particle_indices`` is always a contiguous range built from the
+    concatenation order of ``sim_objects`` in :class:`DynamicSceneInit`.
+    """
+    name: str
+    particle_indices: list[int]
+    material: MaterialSpec
+    initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+@dataclass
+class DynamicSceneInit:
+    """Initial tensors for all dynamic (simulated) particles, concatenated."""
+    pos: torch.Tensor
+    cov: torch.Tensor
+    vol: torch.Tensor
+    shs: torch.Tensor
+    opacity: torch.Tensor
+    quats: torch.Tensor
+    scales: torch.Tensor
+
+    @property
+    def n_particles(self) -> int:
+        return self.pos.shape[0]
+
+
+@dataclass
+class StaticRenderChunk:
+    """Static render-only + collider-render particles, concatenated once.
+
+    Built at setup time and referenced read-only by the frame loop so the
+    per-frame ``torch.cat`` fusion can reuse these tensors without copies.
+    """
+    pos: torch.Tensor
+    cov: torch.Tensor
+    opacity: torch.Tensor
+    shs: torch.Tensor
+    quats: torch.Tensor
+    scales: torch.Tensor
+
+    @property
+    def n_particles(self) -> int:
+        return self.pos.shape[0]
+
+
+@dataclass
+class CoordContext:
+    """Coordinate-system metadata for rendering SH and aligning directions."""
+    source_axes: SourceAxes = field(default_factory=SourceAxes.identity)
+    alignment_inv: Optional[torch.Tensor] = None  # 3x3, internal -> source
 
 
 @dataclass
@@ -30,26 +86,11 @@ class SceneData:
 
     gs_type: str
     gs_num: int
-    per_object_info: list[dict]
 
-    sim_init_pos: torch.Tensor
-    sim_init_cov: torch.Tensor
-    sim_init_vol: torch.Tensor
-    sim_shs: torch.Tensor
-    sim_opacity: torch.Tensor
-    sim_quats: torch.Tensor
-    sim_scales: torch.Tensor
-
-    static_pos: Optional[torch.Tensor] = None
-    static_cov: Optional[torch.Tensor] = None
-    static_opacity: Optional[torch.Tensor] = None
-    static_shs: Optional[torch.Tensor] = None
-    static_quats: Optional[torch.Tensor] = None
-    static_scales: Optional[torch.Tensor] = None
-
-    # Coordinate system metadata
-    source_axes: SourceAxes = field(default_factory=SourceAxes.identity)
-    alignment_inv: Optional[torch.Tensor] = None  # 3x3, internal -> source (for SH)
+    objects_runtime: list[ObjectRuntimeInfo]
+    dynamic_init: DynamicSceneInit
+    static_render: Optional[StaticRenderChunk]
+    coord: CoordContext
 
 
 def _estimate_volumes(pos: torch.Tensor, n_grid: int) -> torch.Tensor:
@@ -62,18 +103,72 @@ def _estimate_volumes(pos: torch.Tensor, n_grid: int) -> torch.Tensor:
     return torch.full((pos.shape[0],), float(dx ** 3), device=pos.device)
 
 
-def _build_per_object_info(sim_objects: list[SceneObject]) -> list[dict]:
+def _build_objects_runtime(sim_objects: list[SceneObject]) -> list[ObjectRuntimeInfo]:
     info = []
     offset = 0
     for obj in sim_objects:
+        if obj.material is None:
+            raise ValueError(
+                f"dynamic object {obj.name!r} has no material — "
+                "dynamic objects require a MaterialSpec"
+            )
         n = obj.n_particles
-        info.append(dict(
+        info.append(ObjectRuntimeInfo(
             name=obj.name,
             particle_indices=list(range(offset, offset + n)),
             material=obj.material,
+            initial_velocity=obj.initial_velocity,
         ))
         offset += n
     return info
+
+
+def _empty_dynamic_init(
+    device: str,
+    sh_degree: int,
+    sh_channels: int | None,
+) -> DynamicSceneInit:
+    sh_c = sh_channels if sh_channels is not None else sh_coeff_count(sh_degree)
+    return DynamicSceneInit(
+        pos=torch.zeros(0, 3, device=device),
+        cov=torch.zeros(0, 6, device=device),
+        vol=torch.zeros(0, device=device),
+        shs=torch.zeros(0, sh_c, 3, device=device),
+        opacity=torch.zeros(0, 1, device=device),
+        quats=torch.zeros(0, 4, device=device),
+        scales=torch.zeros(0, 3, device=device),
+    )
+
+
+def _build_dynamic_init(
+    sim_objects: list[SceneObject],
+    device: str,
+    n_grid: int,
+) -> DynamicSceneInit:
+    pos = torch.cat([o.positions for o in sim_objects], dim=0).to(device)
+    cov = torch.cat([o.covariances for o in sim_objects], dim=0).to(device)
+    return DynamicSceneInit(
+        pos=pos,
+        cov=cov,
+        vol=_estimate_volumes(pos, n_grid),
+        shs=torch.cat([o.shs for o in sim_objects], dim=0),
+        opacity=torch.cat([o.opacities for o in sim_objects], dim=0),
+        quats=torch.cat([o.quats for o in sim_objects], dim=0),
+        scales=torch.cat([o.scales for o in sim_objects], dim=0),
+    )
+
+
+def _build_static_render(static_chunks: list[SceneObject]) -> Optional[StaticRenderChunk]:
+    if not static_chunks:
+        return None
+    return StaticRenderChunk(
+        pos=torch.cat([o.positions for o in static_chunks], dim=0),
+        cov=torch.cat([o.covariances for o in static_chunks], dim=0),
+        opacity=torch.cat([o.opacities for o in static_chunks], dim=0),
+        shs=torch.cat([o.shs for o in static_chunks], dim=0),
+        quats=torch.cat([o.quats for o in static_chunks], dim=0),
+        scales=torch.cat([o.scales for o in static_chunks], dim=0),
+    )
 
 
 def setup_scene(
@@ -108,43 +203,20 @@ def setup_scene(
     n_grid = getattr(cfg.backend, "n_grid", 200)
 
     if sim_objects:
-        sim_init_pos = torch.cat([o.positions for o in sim_objects], dim=0).to(device)
-        sim_init_cov = torch.cat([o.covariances for o in sim_objects], dim=0).to(device)
-        sim_init_vol = _estimate_volumes(sim_init_pos, n_grid)
-        sim_shs = torch.cat([o.shs for o in sim_objects], dim=0)
-        sim_opacity = torch.cat([o.opacities for o in sim_objects], dim=0)
-        sim_quats = torch.cat([o.quats for o in sim_objects], dim=0)
-        sim_scales = torch.cat([o.scales for o in sim_objects], dim=0)
-        gs_num = sim_init_pos.shape[0]
-        per_object_info = _build_per_object_info(sim_objects)
+        dynamic_init = _build_dynamic_init(sim_objects, device, n_grid)
+        objects_runtime = _build_objects_runtime(sim_objects)
     else:
-        sh_c = sh_channels if sh_channels is not None else sh_coeff_count(sh_degree)
-        sim_init_pos = torch.zeros(0, 3, device=device)
-        sim_init_cov = torch.zeros(0, 6, device=device)
-        sim_init_vol = torch.zeros(0, device=device)
-        sim_shs = torch.zeros(0, sh_c, 3, device=device)
-        sim_opacity = torch.zeros(0, 1, device=device)
-        sim_quats = torch.zeros(0, 4, device=device)
-        sim_scales = torch.zeros(0, 3, device=device)
-        gs_num = 0
-        per_object_info = []
+        dynamic_init = _empty_dynamic_init(device, sh_degree, sh_channels)
+        objects_runtime = []
 
     # Static chunks: render_only objects + collider_only objects that render
     static_chunks = list(static_objects)
     for obj in collider_objects:
-        render_flag = (obj.collider or {}).get("render", True)
+        render_flag = obj.collider.render if obj.collider is not None else True
         if render_flag and obj.n_particles > 0:
             static_chunks.append(obj)
 
-    static_pos = static_cov = static_opacity = static_shs = None
-    static_quats_t = static_scales_t = None
-    if static_chunks:
-        static_pos = torch.cat([o.positions for o in static_chunks], dim=0)
-        static_cov = torch.cat([o.covariances for o in static_chunks], dim=0)
-        static_opacity = torch.cat([o.opacities for o in static_chunks], dim=0)
-        static_shs = torch.cat([o.shs for o in static_chunks], dim=0)
-        static_quats_t = torch.cat([o.quats for o in static_chunks], dim=0)
-        static_scales_t = torch.cat([o.scales for o in static_chunks], dim=0)
+    static_render = _build_static_render(static_chunks)
 
     alignment_inv = (
         source_axes.A_inv.to(device) if not source_axes.is_identity else None
@@ -155,21 +227,9 @@ def setup_scene(
         static_chunks=static_chunks,
         collider_objects=collider_objects,
         gs_type=gs_type,
-        gs_num=gs_num,
-        per_object_info=per_object_info,
-        sim_init_pos=sim_init_pos,
-        sim_init_cov=sim_init_cov,
-        sim_init_vol=sim_init_vol,
-        sim_shs=sim_shs,
-        sim_opacity=sim_opacity,
-        sim_quats=sim_quats,
-        sim_scales=sim_scales,
-        static_pos=static_pos,
-        static_cov=static_cov,
-        static_opacity=static_opacity,
-        static_shs=static_shs,
-        static_quats=static_quats_t,
-        static_scales=static_scales_t,
-        source_axes=source_axes,
-        alignment_inv=alignment_inv,
+        gs_num=dynamic_init.n_particles,
+        objects_runtime=objects_runtime,
+        dynamic_init=dynamic_init,
+        static_render=static_render,
+        coord=CoordContext(source_axes=source_axes, alignment_inv=alignment_inv),
     )

@@ -11,6 +11,9 @@ from physics_sim.config.models import (
     SimConfig,
     SurfaceCollider,
     TimeConfig,
+    VBDMaterial,
+    VBDRigidBody,
+    VBDSoftBody,
 )
 
 config = SimConfig(
@@ -34,9 +37,8 @@ config = SimConfig(
             source=PlySource(
                 ply_path="model/wolf_whitebg-trained/point_cloud/iteration_30000/point_cloud.ply",
             ),
-            material=dict(
-                physics="rigid", collision_geometry="convex_hull",
-                density=500, mu=0.5, g_magnitude=9.8,
+            material=VBDMaterial(
+                body=VBDRigidBody(density=500, mu=0.5, collision_geometry="convex_hull"),
             ),
         ),
         ObjectConfig(
@@ -45,10 +47,8 @@ config = SimConfig(
                 ply_path="model/bread-trained/point_cloud/iteration_30000/point_cloud.ply",
             ),
             transform=ObjectTransform(position=(0.0, 0.0, 1.0)),
-            material=dict(
-                physics="soft", density=300,
-                k_mu=1e5, k_lambda=1e5, k_damp=1e-3,
-                g_magnitude=9.8,
+            material=VBDMaterial(
+                body=VBDSoftBody(density=300, k_mu=1e5, k_lambda=1e5, k_damp=1e-3),
             ),
             particle_filling=FillingConfig(max_particles_per_cell=16),
         ),
@@ -60,3 +60,4 @@ config = SimConfig(
         ),
     ],
 )
+

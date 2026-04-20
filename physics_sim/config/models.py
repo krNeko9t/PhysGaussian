@@ -62,6 +62,13 @@ class ObjectTransform(BaseModel):
 
 # ── Collider ─────────────────────────────────────────────────────────
 
+class ColliderFitSpec(BaseModel):
+    """Plane-fit parameters for colliders without explicit point/normal."""
+    method: Literal["svd"] = "svd"
+    sample_max: int = 200_000
+    seed: int = 0
+
+
 class ColliderConfig(BaseModel):
     type: str = "plane"
     space: str = "world"
@@ -69,9 +76,11 @@ class ColliderConfig(BaseModel):
     friction: float = 0.0
     point: tuple[float, float, float] | None = None
     normal: tuple[float, float, float] | None = None
-    prefer_up: tuple[float, float, float] = (0.0, 0.0, 1.0)
+    prefer_up: tuple[float, float, float] | None = None
     render: bool = True
-    fit: dict | None = None
+    fit: ColliderFitSpec | None = None
+    start_time: float = 0.0
+    end_time: float = 1e3
 
 
 # ── Particle filling ────────────────────────────────────────────────
@@ -91,6 +100,118 @@ class FillingConfig(BaseModel):
     visualize: bool = False
 
 
+# ── Material specs (per-backend discriminated union) ─────────────────
+
+class RigidMaterial(BaseModel):
+    """Per-object material for newton_rigid backend."""
+    type: Literal["rigid"] = "rigid"
+    density: float = 1000.0
+    mu: float = 0.5
+    ke: float | None = None
+    kd: float | None = None
+    collision_geometry: str | None = None
+    g_magnitude: float = 9.8
+
+
+_MPM_JELLY = dict(friction=0.0, yield_pressure=1e6, yield_stress=5.0e4, tensile_yield_ratio=0.1, hardening=3.0)
+_MPM_SAND = dict(friction=0.68, yield_pressure=1.0e12, yield_stress=0.0, tensile_yield_ratio=0.0, hardening=0.0)
+_MPM_SNOW = dict(friction=0.1, yield_pressure=2.0e4, yield_stress=1.0e3, tensile_yield_ratio=0.05, hardening=10.0)
+_MPM_MUD = dict(friction=0.0, yield_pressure=1.0e10, yield_stress=3.0e2, tensile_yield_ratio=1.0, hardening=2.0)
+_MPM_METAL = dict(friction=0.3, yield_pressure=1.0e12, yield_stress=1.0e8, tensile_yield_ratio=0.0, hardening=0.0)
+_MPM_FOAM = dict(friction=0.5, yield_pressure=1.0e6, yield_stress=1.0e4, tensile_yield_ratio=0.1, hardening=5.0)
+_MPM_PLASTICINE = dict(friction=0.5, yield_pressure=1.0e6, yield_stress=5.0e3, tensile_yield_ratio=0.1, hardening=3.0)
+
+
+class MPMMaterial(BaseModel):
+    """Per-object material for newton_mpm backend.
+
+    Defaults correspond to the jelly preset.  Other presets are available
+    through classmethod factories (``MPMMaterial.sand(...)`` etc.) which
+    set the preset-specific fields and accept overrides as kwargs.
+    """
+    type: Literal["mpm"] = "mpm"
+    density: float = 200.0
+    E: float = 1e5
+    nu: float = 0.3
+    # friction is resolved from friction_angle if set, else friction, else 0.
+    friction: float | None = None
+    friction_angle: float | None = None
+    yield_pressure: float = _MPM_JELLY["yield_pressure"]
+    yield_stress: float = _MPM_JELLY["yield_stress"]
+    tensile_yield_ratio: float = _MPM_JELLY["tensile_yield_ratio"]
+    hardening: float = _MPM_JELLY["hardening"]
+    rpic_damping: float = 0.0
+    g_magnitude: float = 9.8
+
+    @classmethod
+    def jelly(cls, **overrides) -> "MPMMaterial":
+        return cls(**{**_MPM_JELLY, **overrides})
+
+    @classmethod
+    def sand(cls, **overrides) -> "MPMMaterial":
+        return cls(**{**_MPM_SAND, **overrides})
+
+    @classmethod
+    def snow(cls, **overrides) -> "MPMMaterial":
+        return cls(**{**_MPM_SNOW, **overrides})
+
+    @classmethod
+    def mud(cls, **overrides) -> "MPMMaterial":
+        return cls(**{**_MPM_MUD, **overrides})
+
+    @classmethod
+    def metal(cls, **overrides) -> "MPMMaterial":
+        return cls(**{**_MPM_METAL, **overrides})
+
+    @classmethod
+    def foam(cls, **overrides) -> "MPMMaterial":
+        return cls(**{**_MPM_FOAM, **overrides})
+
+    @classmethod
+    def plasticine(cls, **overrides) -> "MPMMaterial":
+        return cls(**{**_MPM_PLASTICINE, **overrides})
+
+
+class VBDRigidBody(BaseModel):
+    physics: Literal["rigid"] = "rigid"
+    density: float = 1000.0
+    mu: float = 0.5
+    collision_geometry: str = "convex_hull"
+
+
+class VBDSoftBody(BaseModel):
+    physics: Literal["soft"] = "soft"
+    density: float = 1e3
+    k_mu: float = 1e5
+    k_lambda: float = 1e5
+    k_damp: float = 1e-3
+    grid_padding: float = 0.05
+    cell_size: float | None = None
+    grid_resolution: int = 8
+
+
+VBDBody = Annotated[
+    Union[VBDRigidBody, VBDSoftBody],
+    Field(discriminator="physics"),
+]
+
+
+class VBDMaterial(BaseModel):
+    """Per-object material for newton_vbd backend.
+
+    ``body`` holds the physics-specific fields (rigid vs soft).
+    """
+    type: Literal["vbd"] = "vbd"
+    body: VBDBody
+    g_magnitude: float = 9.8
+
+
+MaterialSpec = Annotated[
+    Union[RigidMaterial, MPMMaterial, VBDMaterial],
+    Field(discriminator="type"),
+]
+
+
 # ── Object ───────────────────────────────────────────────────────────
 
 class ObjectConfig(BaseModel):
@@ -99,10 +220,11 @@ class ObjectConfig(BaseModel):
     role: Literal["dynamic", "collider_only", "render_only"] = "dynamic"
     transform: ObjectTransform = Field(default_factory=ObjectTransform)
     initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    material: dict = Field(default_factory=dict)
+    material: MaterialSpec | None = None
     particle_filling: FillingConfig | None = None
     collider: ColliderConfig | None = None
     opacity_threshold: float | None = None
+
 
 
 # ── Backend configs (one typed class per backend) ────────────────────

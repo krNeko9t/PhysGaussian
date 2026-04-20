@@ -4,6 +4,7 @@ from physics_sim.config.models import (
     BoundingBox,
     CameraConfig,
     FillingConfig,
+    MPMMaterial,
     NewtonMPMConfig,
     ObjectConfig,
     PlySource,
@@ -26,8 +27,8 @@ config = SimConfig(
             source=PlySource(
                 ply_path="model/wolf_whitebg-trained/point_cloud/iteration_30000/point_cloud.ply",
             ),
-            material=dict(
-                material="sand", density=2000, E=5e7, nu=0.3, friction_angle=30,
+            material=MPMMaterial.sand(
+                density=2000, E=5e7, nu=0.3, friction_angle=30,
             ),
             particle_filling=FillingConfig(
                 density_threshold=100.0,
@@ -53,3 +54,4 @@ config = SimConfig(
         ),
     ],
 )
+

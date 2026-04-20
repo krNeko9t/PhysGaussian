@@ -141,28 +141,28 @@ def _compose_render_inputs(
 ]:
     positions = dynamic_state.positions
     covariances = dynamic_state.covariances
-    opacities = scene_data.sim_opacity
-    shs = scene_data.sim_shs
+    opacities = scene_data.dynamic_init.opacity
+    shs = scene_data.dynamic_init.shs
     quats = dynamic_state.quats
     scales = dynamic_state.scales
     view_rotations = dynamic_state.rotations
 
-    has_static = len(scene_data.static_chunks) > 0
-    if has_static:
-        positions = torch.cat([positions, scene_data.static_pos], dim=0)
-        covariances = torch.cat([covariances, scene_data.static_cov], dim=0)
-        opacities = torch.cat([scene_data.sim_opacity, scene_data.static_opacity], dim=0)
-        shs = torch.cat([scene_data.sim_shs, scene_data.static_shs], dim=0)
-        static_count = scene_data.static_pos.shape[0]
+    static = scene_data.static_render
+    if static is not None:
+        positions = torch.cat([positions, static.pos], dim=0)
+        covariances = torch.cat([covariances, static.cov], dim=0)
+        opacities = torch.cat([opacities, static.opacity], dim=0)
+        shs = torch.cat([shs, static.shs], dim=0)
+        static_count = static.pos.shape[0]
         static_identity = torch.eye(
             3,
             device=view_rotations.device,
             dtype=view_rotations.dtype,
         ).unsqueeze(0).expand(static_count, -1, -1)
         view_rotations = torch.cat([view_rotations, static_identity], dim=0)
-        if quats is not None and scene_data.static_quats is not None:
-            quats = torch.cat([quats, scene_data.static_quats], dim=0)
-            scales = torch.cat([scales, scene_data.static_scales], dim=0)
+        if quats is not None:
+            quats = torch.cat([quats, static.quats], dim=0)
+            scales = torch.cat([scales, static.scales], dim=0)
     return positions, covariances, view_rotations, opacities, shs, quats, scales
 
 
@@ -275,8 +275,8 @@ def run_with_rendering(
         else torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
     )
 
-    alignment_inv = scene_data.alignment_inv
-    source_axes = scene_data.source_axes
+    alignment_inv = scene_data.coord.alignment_inv
+    source_axes = scene_data.coord.source_axes
 
     for frame in tqdm(range(frame_num), desc="Simulating"):
         camera = resolve_camera_for_mode(

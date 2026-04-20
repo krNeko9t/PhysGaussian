@@ -33,8 +33,7 @@ from physics_sim.backend.newton_rigid.collider_builders import (
     normalize_collision_geo,
 )
 from physics_sim.backend.newton_rigid.materials import (
-    build_base_shape_config,
-    build_shape_config_for_body,
+    build_body_shape_config,
     iter_body_specs,
     resolve_gravity,
     resolve_solver_options,
@@ -189,21 +188,20 @@ class NewtonRigidBackend(PhysicsBackend):
 
         self._gravity = resolve_gravity(material_params)
         self._solver_iterations, self._solver_relaxation = resolve_solver_options(material_params)
-        base_cfg = build_base_shape_config(
-            material_params=material_params,
-            use_sdf=self._use_sdf,
-            sdf_resolution=self._sdf_resolution,
-            sdf_narrow_band=self._sdf_narrow_band,
-        )
         specs = iter_body_specs(material_params, n_particles=self._n_particles)
         for spec in specs:
-            cfg = build_shape_config_for_body(base_cfg=base_cfg, body_material=spec.material)
+            cfg = build_body_shape_config(
+                material=spec.material,
+                use_sdf=self._use_sdf,
+                sdf_resolution=self._sdf_resolution,
+                sdf_narrow_band=self._sdf_narrow_band,
+            )
             self._create_body(
                 particle_indices=spec.particle_indices,
                 shape_cfg=cfg,
                 name=spec.name,
-                collision_geo=spec.material.get("collision_geometry"),
-                initial_velocity=spec.material.get("initial_velocity"),
+                collision_geo=spec.material.collision_geometry,
+                initial_velocity=spec.initial_velocity,
             )
 
     def set_boundary_conditions(

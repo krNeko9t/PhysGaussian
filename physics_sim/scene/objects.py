@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
+
+from physics_sim.config.models import (
+    ColliderConfig,
+    FillingConfig,
+    MaterialSpec,
+)
 
 
 @dataclass
@@ -27,14 +33,15 @@ class SceneObject:
     quats: torch.Tensor           # (N, 4) wxyz
     scales: torch.Tensor          # (N, 2|3)
 
-    material: dict = field(default_factory=dict)
+    material: Optional[MaterialSpec] = None
     initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
-    particle_filling: Optional[dict] = None
-    collider: Optional[dict] = None
+    particle_filling: Optional[FillingConfig] = None
+    collider: Optional[ColliderConfig] = None
 
     gs_type: str = "3dgs"
 
     @property
     def n_particles(self) -> int:
         return self.positions.shape[0]
+

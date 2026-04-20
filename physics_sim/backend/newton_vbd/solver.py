@@ -26,7 +26,6 @@ Lifecycle (called by the pipeline):
 
 from __future__ import annotations
 
-from copy import copy
 from dataclasses import dataclass
 from typing import Optional
 
@@ -252,14 +251,6 @@ class NewtonVBDBackend(PhysicsBackend):
         solver_opts = material_params.get("newton_solver_opts", {})
         self._solver_iterations = solver_opts.get("iterations", 10)
 
-        # Default shape config for rigid bodies
-        default_mu = float(material_params.get("mu", 0.5))
-        default_density = float(material_params.get("density", 500.0))
-        base_cfg = newton.ModelBuilder.ShapeConfig(
-            density=default_density,
-            mu=default_mu,
-        )
-
         # Create bodies from per-object definitions
         per_object = material_params.get("per_object")
         if per_object is not None and not isinstance(per_object, list):
@@ -274,59 +265,53 @@ class NewtonVBDBackend(PhysicsBackend):
                 expected="material.per_object must be a list",
                 detail=detail,
             )
+
+        from physics_sim.config.models import VBDMaterial, VBDRigidBody, VBDSoftBody
+
         if per_object is not None:
-            for obj in per_object:
-                if not isinstance(obj, dict):
-                    detail = f"per_object_item_type={type(obj).__name__}"
-                    LOGGER.error(
-                        "[NewtonVBD] backend=newton_vbd operation=set_material "
-                        "detail=%s",
-                        detail,
+            for info in per_object:
+                material = info.material
+                if not isinstance(material, VBDMaterial):
+                    detail = (
+                        f"object={info.name} material_type={type(material).__name__}"
                     )
                     raise configuration_error(
                         owner="newton_vbd",
                         operation="set_material",
-                        expected="each material.per_object item must be dict",
+                        expected="newton_vbd requires VBDMaterial per object",
                         detail=detail,
                     )
-                mat = obj.get("material", {})
-                physics_type = mat.get("physics", "rigid")
-
-                if physics_type == "rigid":
-                    cfg = copy(base_cfg)
-                    cfg.density = float(mat.get("density", cfg.density))
-                    if "mu" in mat:
-                        cfg.mu = float(mat["mu"])
-                    self._create_rigid_body(
-                        particle_indices=obj["particle_indices"],
-                        shape_cfg=cfg,
-                        name=obj.get("name", "?"),
-                        collision_geo=mat.get("collision_geometry", None),
+                body = material.body
+                if isinstance(body, VBDRigidBody):
+                    cfg = newton.ModelBuilder.ShapeConfig(
+                        density=float(body.density),
+                        mu=float(body.mu),
                     )
-                elif physics_type == "soft":
+                    self._create_rigid_body(
+                        particle_indices=list(info.particle_indices),
+                        shape_cfg=cfg,
+                        name=info.name,
+                        collision_geo=body.collision_geometry,
+                    )
+                elif isinstance(body, VBDSoftBody):
                     self._create_soft_body(
-                        particle_indices=obj["particle_indices"],
-                        material=mat,
-                        name=obj.get("name", "?"),
+                        particle_indices=list(info.particle_indices),
+                        material=body,
+                        name=info.name,
                     )
                 else:
                     detail = (
-                        f"object={obj.get('name', '?')} "
-                        f"physics={physics_type!r}"
-                    )
-                    LOGGER.error(
-                        "[NewtonVBD] backend=newton_vbd operation=set_material "
-                        "detail=%s",
-                        detail,
+                        f"object={info.name} body_type={type(body).__name__}"
                     )
                     raise configuration_error(
                         owner="newton_vbd",
                         operation="set_material",
-                        expected="per_object[].material.physics in {'rigid','soft'}",
+                        expected="VBDMaterial.body must be VBDRigidBody | VBDSoftBody",
                         detail=detail,
                     )
         else:
-            # Single body → default to rigid
+            # No per-object definitions → single default rigid body.
+            base_cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.5)
             self._create_rigid_body(
                 particle_indices=list(range(self._n_particles)),
                 shape_cfg=base_cfg,
@@ -517,7 +502,7 @@ class NewtonVBDBackend(PhysicsBackend):
     def _create_soft_body(
         self,
         particle_indices: list[int],
-        material: dict,
+        material,  # VBDSoftBody
         name: str,
     ) -> None:
         """Create a soft body using Newton's ``add_soft_grid``.
@@ -527,16 +512,6 @@ class NewtonVBDBackend(PhysicsBackend):
         covering the GS particle bounding box.  This matches Newton's
         own examples and produces well-conditioned elements that VBD is
         optimized for.
-
-        Configurable per-object material keys:
-            cell_size      : float — tet cell size (auto if omitted)
-            grid_resolution: int   — cells per longest axis (default 8,
-                                     only used when cell_size is omitted)
-            grid_padding   : float — padding around bbox (default 0.05)
-            density        : float — mass density   (default 1000)
-            k_mu           : float — shear modulus   (default 1e5)
-            k_lambda       : float — bulk modulus    (default 1e5)
-            k_damp         : float — damping coeff   (default 1e-3)
         """
         builder = self._require_builder("_create_soft_body")
         if self._init_positions is None or self._init_covariances is None:

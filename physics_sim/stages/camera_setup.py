@@ -58,9 +58,9 @@ def setup_camera(
     state = CameraState()
 
     if scene_data.sim_objects:
-        ref_pos = scene_data.sim_init_pos
-    elif scene_data.static_chunks:
-        ref_pos = scene_data.static_pos
+        ref_pos = scene_data.dynamic_init.pos
+    elif scene_data.static_render is not None:
+        ref_pos = scene_data.static_render.pos
     else:
         ref_pos = torch.zeros(1, 3, device="cuda")
 

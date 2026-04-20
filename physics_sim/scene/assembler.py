@@ -196,13 +196,7 @@ def assemble_scene(
         cov = align_covariances(cov, source_axes)
         quats = align_quats(quats, source_axes)
 
-        # ── Collider / filling dicts for downstream ───────────────────
-        collider_dict = obj_cfg.collider.model_dump() if obj_cfg.collider else None
-        filling_dict = (
-            obj_cfg.particle_filling.model_dump()
-            if obj_cfg.particle_filling
-            else None
-        )
+        # ── Collider / filling objects propagate typed ──────────────
 
         print(f"    -> {name}: {pos.shape[0]} GS particles (gs_type={gs_type})")
 
@@ -215,10 +209,10 @@ def assemble_scene(
             shs=shs,
             quats=quats,
             scales=scales,
-            material=dict(obj_cfg.material),
+            material=obj_cfg.material,
             initial_velocity=obj_cfg.initial_velocity,
-            particle_filling=filling_dict,
-            collider=collider_dict,
+            particle_filling=obj_cfg.particle_filling,
+            collider=obj_cfg.collider,
             gs_type=gs_type,
         ))
 

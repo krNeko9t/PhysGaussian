@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from physics_sim.backend.newton_vbd.barycentric import compute_barycentric
+from physics_sim.config.models import VBDSoftBody
 
 
 @dataclass
@@ -46,7 +47,7 @@ class SoftGridEmbedding:
         )
 
 
-def compute_soft_grid_spec(pos_np: np.ndarray, material: dict) -> SoftGridSpec:
+def compute_soft_grid_spec(pos_np: np.ndarray, material: VBDSoftBody) -> SoftGridSpec:
     """Parse and validate grid/material params for add_soft_grid."""
     if pos_np.ndim != 2 or pos_np.shape[1] != 3 or pos_np.shape[0] == 0:
         raise ValueError("particle subset must be a non-empty (N, 3) array")
@@ -54,20 +55,19 @@ def compute_soft_grid_spec(pos_np: np.ndarray, material: dict) -> SoftGridSpec:
     bbox_min = pos_np.min(axis=0).astype(np.float64, copy=False)
     bbox_max = pos_np.max(axis=0).astype(np.float64, copy=False)
 
-    padding = float(material.get("grid_padding", 0.05))
+    padding = float(material.grid_padding)
     if padding < 0.0:
         raise ValueError("grid_padding must be >= 0")
     bbox_min = bbox_min - padding
     bbox_max = bbox_max + padding
     extent = bbox_max - bbox_min
 
-    cell_size = material.get("cell_size", None)
-    if cell_size is not None:
-        cell_size = float(cell_size)
+    if material.cell_size is not None:
+        cell_size = float(material.cell_size)
         if cell_size <= 0.0:
             raise ValueError("cell_size must be > 0")
     else:
-        grid_res = int(material.get("grid_resolution", 8))
+        grid_res = int(material.grid_resolution)
         if grid_res <= 0:
             raise ValueError("grid_resolution must be >= 1")
         max_extent = float(extent.max())
@@ -84,12 +84,12 @@ def compute_soft_grid_spec(pos_np: np.ndarray, material: dict) -> SoftGridSpec:
     cell_y = float(extent_safe[1] / dim_y)
     cell_z = float(extent_safe[2] / dim_z)
 
-    density = float(material.get("density", 1e3))
+    density = float(material.density)
     if density <= 0.0:
         raise ValueError("density must be > 0")
-    k_mu = float(material.get("k_mu", 1e5))
-    k_lambda = float(material.get("k_lambda", 1e5))
-    k_damp = float(material.get("k_damp", 1e-3))
+    k_mu = float(material.k_mu)
+    k_lambda = float(material.k_lambda)
+    k_damp = float(material.k_damp)
     if k_mu < 0.0 or k_lambda < 0.0 or k_damp < 0.0:
         raise ValueError("k_mu, k_lambda, k_damp must be >= 0")
 
@@ -165,7 +165,7 @@ def _build_soft_tet_cells(dim_x: int, dim_y: int, dim_z: int) -> np.ndarray:
     return np.array(tet_list, dtype=np.int32)
 
 
-def build_soft_grid_embedding(pos_np: np.ndarray, material: dict) -> SoftGridEmbedding:
+def build_soft_grid_embedding(pos_np: np.ndarray, material: VBDSoftBody) -> SoftGridEmbedding:
     spec = compute_soft_grid_spec(pos_np=pos_np, material=material)
     grid_verts = _build_soft_grid_vertices(spec)
     tet_cells = _build_soft_tet_cells(spec.dim_x, spec.dim_y, spec.dim_z)

@@ -79,9 +79,9 @@ def test_material_friction_resolution_has_single_path():
     src = _read("physics_sim/backend/newton_mpm/materials.py")
     assert "def resolve_friction(" in src
     assert "def apply_solver_options(" in src
-    assert 'if "friction" in material_cfg' in src
-    assert 'if "friction_angle" in material_cfg' in src
-    assert 'if mat_name == "sand":' in src
+    # Typed dispatch: read material.friction / material.friction_angle directly.
+    assert "material.friction is not None" in src
+    assert "material.friction_angle is not None" in src
 
 
 def test_registry_unknown_errors_are_unified():
