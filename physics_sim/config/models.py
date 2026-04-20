@@ -26,8 +26,29 @@ class IdMapSource(BaseModel):
     object_id: int
 
 
+class PointSelectorSource(BaseModel):
+    """Select GS subset from a base PLY via external selector data.
+
+    selector_kind contract:
+    - ``point_cloud_xyz``: selector_path points to a PLY containing vertex x/y/z.
+    - ``index_list``: selector_path points to a numpy array of integer indices.
+    """
+
+    type: Literal["point_selector"] = "point_selector"
+    base_ply_path: str
+    selector_path: str
+    selector_kind: Literal["point_cloud_xyz", "index_list"]
+    invert: bool = False
+    subtract_selector_path: str | None = None
+    subtract_selector_kind: Literal["point_cloud_xyz", "index_list"] | None = None
+    match_tolerance: float = Field(default=1e-6, gt=0.0)
+    min_match_ratio: float = Field(default=0.99, ge=0.0, le=1.0)
+    max_ambiguous_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    strict: bool = True
+
+
 ObjectSource = Annotated[
-    Union[PlySource, IdMapSource],
+    Union[PlySource, IdMapSource, PointSelectorSource],
     Field(discriminator="type"),
 ]
 
