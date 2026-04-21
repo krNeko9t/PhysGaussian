@@ -25,6 +25,7 @@ __all__ = [
     "CoordContext",
     "DynamicSceneInit",
     "ObjectRuntimeInfo",
+    "RenderSetup",
     "SceneData",
     "StaticRenderChunk",
     "setup_scene",
@@ -67,6 +68,20 @@ class StaticRenderChunk:
 
 
 @dataclass
+class RenderSetup:
+    """Frame-invariant render inputs pre-concatenated at setup time.
+
+    ``opacity_all`` and ``shs_all`` are dynamic + static tensors merged
+    once; the frame loop references them directly instead of calling
+    ``torch.cat`` every frame.  ``static_identity`` is the eye-matrix
+    block used for static particles' view-space rotations.
+    """
+    opacity_all: torch.Tensor           # (N_dyn + N_static, 1)
+    shs_all: torch.Tensor                # (N_dyn + N_static, C, 3)
+    static_identity: Optional[torch.Tensor] = None  # (N_static, 3, 3)
+
+
+@dataclass
 class CoordContext:
     """Coordinate-system metadata for rendering SH and aligning directions."""
     source_axes: SourceAxes = field(default_factory=SourceAxes.identity)
@@ -87,6 +102,7 @@ class SceneData:
     objects_runtime: list[ObjectRuntimeInfo]
     dynamic_init: DynamicSceneInit
     static_render: Optional[StaticRenderChunk]
+    render_setup: RenderSetup
     coord: CoordContext
 
 
@@ -168,6 +184,40 @@ def _build_static_render(static_chunks: list[SceneObject]) -> Optional[StaticRen
     )
 
 
+def _build_render_setup(
+    dynamic_init: DynamicSceneInit,
+    static_render: Optional[StaticRenderChunk],
+) -> RenderSetup:
+    """Pre-concatenate the frame-invariant render inputs.
+
+    ``opacity`` and ``shs`` never change during simulation — the per-frame
+    loop only needs to concatenate the dynamic particles' positions /
+    covariances / rotations with the static ones.  Concatenating these
+    twice-per-frame was wasteful; merging once here removes that work.
+    """
+    if static_render is None or static_render.n_particles == 0:
+        return RenderSetup(
+            opacity_all=dynamic_init.opacity,
+            shs_all=dynamic_init.shs,
+            static_identity=None,
+        )
+    opacity_all = torch.cat([dynamic_init.opacity, static_render.opacity], dim=0)
+    shs_all = torch.cat([dynamic_init.shs, static_render.shs], dim=0)
+    static_count = static_render.n_particles
+    ref = dynamic_init.pos if dynamic_init.n_particles > 0 else static_render.pos
+    static_identity = (
+        torch.eye(3, device=ref.device, dtype=ref.dtype)
+        .unsqueeze(0)
+        .expand(static_count, -1, -1)
+        .contiguous()
+    )
+    return RenderSetup(
+        opacity_all=opacity_all,
+        shs_all=shs_all,
+        static_identity=static_identity,
+    )
+
+
 def setup_scene(
     cfg: SimConfig,
     loader: SceneAssetLoader,
@@ -214,6 +264,7 @@ def setup_scene(
             static_chunks.append(obj)
 
     static_render = _build_static_render(static_chunks)
+    render_setup = _build_render_setup(dynamic_init, static_render)
 
     alignment_inv = (
         source_axes.A_inv.to(device) if not source_axes.is_identity else None
@@ -228,5 +279,6 @@ def setup_scene(
         objects_runtime=objects_runtime,
         dynamic_init=dynamic_init,
         static_render=static_render,
+        render_setup=render_setup,
         coord=CoordContext(source_axes=source_axes, alignment_inv=alignment_inv),
     )

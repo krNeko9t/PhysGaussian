@@ -146,7 +146,7 @@ def test_sh_math_is_split_by_responsibility():
 
 def test_sim_loop_uses_explicit_view_rotation_contract():
     sim_loop_src = _read("physics_sim/stages/sim_loop.py")
-    assert "view_rotations=view_rotations" in sim_loop_src
+    assert "view_rotations=inputs.view_rotations" in sim_loop_src
     assert "dir_pp[:n]" not in _read("physics_sim/render/sh_colorizer.py")
 
 

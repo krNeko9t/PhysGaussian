@@ -127,43 +127,61 @@ def _validate_particle_positions(positions: torch.Tensor, *, frame: int) -> None
     )
 
 
+@dataclass
+class RenderFrameInputs:
+    """Per-frame inputs fed to the rasterizer.
+
+    Each field holds the dynamic particles' data concatenated with the
+    static chunk's.  ``opacities`` and ``shs`` are pre-merged in
+    ``scene_data.render_setup`` (they are frame-invariant), so the only
+    per-frame concatenations are on pos / cov / rotations / (quats / scales).
+    """
+
+    means: torch.Tensor
+    covariances: torch.Tensor
+    view_rotations: torch.Tensor
+    opacities: torch.Tensor
+    shs: torch.Tensor
+    quats: torch.Tensor | None
+    scales: torch.Tensor | None
+
+
 def _compose_render_inputs(
     scene_data: SceneData,
     dynamic_state: _DynamicStateSlice,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor | None,
-    torch.Tensor | None,
-]:
-    positions = dynamic_state.positions
-    covariances = dynamic_state.covariances
-    opacities = scene_data.dynamic_init.opacity
-    shs = scene_data.dynamic_init.shs
+) -> RenderFrameInputs:
+    render_setup = scene_data.render_setup
+    static = scene_data.static_render
+    if static is None:
+        return RenderFrameInputs(
+            means=dynamic_state.positions,
+            covariances=dynamic_state.covariances,
+            view_rotations=dynamic_state.rotations,
+            opacities=render_setup.opacity_all,
+            shs=render_setup.shs_all,
+            quats=dynamic_state.quats,
+            scales=dynamic_state.scales,
+        )
+
+    means = torch.cat([dynamic_state.positions, static.pos], dim=0)
+    covariances = torch.cat([dynamic_state.covariances, static.cov], dim=0)
+    view_rotations = torch.cat(
+        [dynamic_state.rotations, render_setup.static_identity], dim=0,
+    )
     quats = dynamic_state.quats
     scales = dynamic_state.scales
-    view_rotations = dynamic_state.rotations
-
-    static = scene_data.static_render
-    if static is not None:
-        positions = torch.cat([positions, static.pos], dim=0)
-        covariances = torch.cat([covariances, static.cov], dim=0)
-        opacities = torch.cat([opacities, static.opacity], dim=0)
-        shs = torch.cat([shs, static.shs], dim=0)
-        static_count = static.pos.shape[0]
-        static_identity = torch.eye(
-            3,
-            device=view_rotations.device,
-            dtype=view_rotations.dtype,
-        ).unsqueeze(0).expand(static_count, -1, -1)
-        view_rotations = torch.cat([view_rotations, static_identity], dim=0)
-        if quats is not None:
-            quats = torch.cat([quats, static.quats], dim=0)
-            scales = torch.cat([scales, static.scales], dim=0)
-    return positions, covariances, view_rotations, opacities, shs, quats, scales
+    if quats is not None:
+        quats = torch.cat([quats, static.quats], dim=0)
+        scales = torch.cat([scales, static.scales], dim=0)
+    return RenderFrameInputs(
+        means=means,
+        covariances=covariances,
+        view_rotations=view_rotations,
+        opacities=render_setup.opacity_all,
+        shs=render_setup.shs_all,
+        quats=quats,
+        scales=scales,
+    )
 
 
 def _write_frame_png(*, rendering: torch.Tensor, output_dir: str, frame: int) -> None:
@@ -305,42 +323,34 @@ def run_with_rendering(
         _log_backend_diagnostics(backend, frame=frame)
         _validate_particle_positions(dynamic_state.positions, frame=frame)
 
-        (
-            pos,
-            cov3D,
-            view_rotations,
-            cur_opacity,
-            cur_shs,
-            render_quats,
-            render_scales,
-        ) = _compose_render_inputs(scene_data, dynamic_state)
+        inputs = _compose_render_inputs(scene_data, dynamic_state)
 
         # SH -> RGB (alignment_inv transforms view dirs to PLY-native space)
         colors_precomp = render_runtime.convert_sh(
-            cur_shs,
+            inputs.shs,
             camera,
-            pos,
-            view_rotations=view_rotations,
+            inputs.means,
+            view_rotations=inputs.view_rotations,
             alignment_inv=alignment_inv,
         )
-        if scene_data.gs_type == "2dgs" and render_quats is not None:
+        if scene_data.gs_type == "2dgs" and inputs.quats is not None:
             rendering, _ = render_runtime.render(
                 camera=camera,
-                means=pos,
+                means=inputs.means,
                 colors=colors_precomp,
-                opacities=cur_opacity,
+                opacities=inputs.opacities,
                 bg_color=bg_color,
-                quats=render_quats,
-                scales=render_scales,
+                quats=inputs.quats,
+                scales=inputs.scales,
             )
         else:
             rendering, _ = render_runtime.render(
                 camera=camera,
-                means=pos,
+                means=inputs.means,
                 colors=colors_precomp,
-                opacities=cur_opacity,
+                opacities=inputs.opacities,
                 bg_color=bg_color,
-                cov6=cov3D,
+                cov6=inputs.covariances,
             )
 
         _write_frame_png(
