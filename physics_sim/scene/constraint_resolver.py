@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Sequence, Union
 
 import numpy as np
-import torch
+from scipy.spatial import cKDTree
 
 from physics_sim.config.scene import (
     BoxSelector,
@@ -100,6 +100,17 @@ def _build_part_lookup(
 
 # ── Selector resolution ────────────────────────────────────────────
 
+def _proximity_nearest_distances(ref: np.ndarray, src: np.ndarray) -> np.ndarray:
+    """Per-row min distance from src points to the ref point set (same as brute NN)."""
+    tree = cKDTree(ref)
+    try:
+        min_d, _ = tree.query(src, k=1, workers=-1)
+    except TypeError:
+        # scipy < 1.6 has no ``workers``; omit parallel query.
+        min_d, _ = tree.query(src, k=1)
+    return np.asarray(min_d, dtype=np.float64)
+
+
 def _resolve_selector(
     selector,
     parts: dict[str, _PartLookup],
@@ -110,12 +121,9 @@ def _resolve_selector(
         ref = parts[selector.to_surface_of].positions
         if src.size == 0 or ref.size == 0:
             return np.zeros(0, dtype=np.int64)
-        # Min distance from each src point to any ref point (brute O(N*M)).
-        # For large scenes we'd want a KD-tree; fine for current scale.
-        d2 = np.sum(
-            (src[:, None, :] - ref[None, :, :]) ** 2, axis=2,
-        )  # (N_src, N_ref)
-        min_d = np.sqrt(d2.min(axis=1))
+        # Nearest-neighbor distance to any ref point per src point; KD-tree is
+        # O(N_src log N_ref) vs O(N_src * N_ref) brute force (infeasible at ~1e6 GS).
+        min_d = _proximity_nearest_distances(ref, src)
         return np.nonzero(min_d <= selector.max_distance)[0].astype(np.int64)
 
     if isinstance(selector, BoxSelector):

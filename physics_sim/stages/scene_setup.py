@@ -17,12 +17,9 @@ from physics_sim.backend.spec import ObjectRuntimeInfo
 from physics_sim.config.models import SimConfig
 from physics_sim.coord import SourceAxes
 from physics_sim.render.interfaces import SceneAssetLoader
-from physics_sim.scene.constraint_resolver import (
-    ResolvedConstraint,
-    resolve_constraints,
-)
 from physics_sim.sh_contract import sh_coeff_count
 from physics_sim.scene import SceneObject, assemble_scene
+from physics_sim.scene.constraint_resolver import ResolvedConstraint, resolve_constraints
 
 
 __all__ = [
@@ -104,11 +101,11 @@ class SceneData:
     gs_num: int
 
     objects_runtime: list[ObjectRuntimeInfo]
-    resolved_constraints: list[ResolvedConstraint]
     dynamic_init: DynamicSceneInit
     static_render: Optional[StaticRenderChunk]
     render_setup: RenderSetup
     coord: CoordContext
+    resolved_constraints: list[ResolvedConstraint]
 
 
 def _estimate_volumes(pos: torch.Tensor, n_grid: int) -> torch.Tensor:
@@ -235,7 +232,7 @@ def setup_scene(
 
     All returned tensors are in the internal Y-up coordinate system.
     """
-    print("Assembling scene...")
+    print("Assembling scene...", flush=True)
 
     source_axes = SourceAxes.from_config(
         cfg.preprocess.source_up, cfg.preprocess.source_front,
@@ -261,14 +258,6 @@ def setup_scene(
         dynamic_init = _empty_dynamic_init(device, sh_degree, sh_channels)
         objects_runtime = []
 
-    # Resolve scene-graph constraints into concrete particle-index sets.
-    scene = cfg.as_scene()
-    resolved_constraints = resolve_constraints(
-        scene=scene,
-        scene_objects=objects,
-        objects_runtime=objects_runtime,
-    )
-
     # Static chunks: render_only objects + collider_only objects that render
     static_chunks = list(static_objects)
     for obj in collider_objects:
@@ -283,6 +272,13 @@ def setup_scene(
         source_axes.A_inv.to(device) if not source_axes.is_identity else None
     )
 
+    print("Resolving scene constraints ...", flush=True)
+    resolved_constraints = resolve_constraints(
+        cfg.as_scene(),
+        objects,
+        objects_runtime,
+    )
+
     return SceneData(
         sim_objects=sim_objects,
         static_chunks=static_chunks,
@@ -290,9 +286,9 @@ def setup_scene(
         gs_type=gs_type,
         gs_num=dynamic_init.n_particles,
         objects_runtime=objects_runtime,
-        resolved_constraints=resolved_constraints,
         dynamic_init=dynamic_init,
         static_render=static_render,
         render_setup=render_setup,
         coord=CoordContext(source_axes=source_axes, alignment_inv=alignment_inv),
+        resolved_constraints=resolved_constraints,
     )

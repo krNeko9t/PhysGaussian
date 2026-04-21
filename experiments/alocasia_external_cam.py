@@ -43,7 +43,7 @@ backend = NewtonVBDConfig(
 )
 
 config = SimConfig(
-    output="output/alocasia_external_cam",
+    output="output/alocasia_pintoworld_test",
     backend=backend,
     time=TimeConfig(
         substep_dt=1e-3,

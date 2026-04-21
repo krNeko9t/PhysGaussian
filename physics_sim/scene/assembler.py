@@ -90,7 +90,7 @@ def assemble_scene(
     def _load_ply(path: str) -> GaussianAsset:
         resolved = _resolve_path(path, config_dir)
         if resolved not in ply_cache:
-            print(f"  [assembler] Loading PLY: {resolved}")
+            print(f"  [assembler] Loading PLY: {resolved}", flush=True)
             ply_cache[resolved] = loader.load_ply(resolved)
         return ply_cache[resolved]
 
@@ -105,7 +105,7 @@ def assemble_scene(
     def _load_id_map(path: str, *, object_name: str, source_type: str) -> np.ndarray:
         resolved = _resolve_for_object(path, object_name=object_name, source_type=source_type)
         if resolved not in id_map_cache:
-            print(f"  [assembler] Loading ID map: {resolved}")
+            print(f"  [assembler] Loading ID map: {resolved}", flush=True)
             id_map_cache[resolved] = np.load(resolved)
         return id_map_cache[resolved]
 
@@ -121,7 +121,7 @@ def assemble_scene(
             role = "dynamic"
         source = obj_cfg.source
 
-        print(f"  [assembler] Processing '{name}' (role={role}, source={source.type})")
+        print(f"  [assembler] Processing '{name}' (role={role}, source={source.type})", flush=True)
 
         # ── Load GS data ──────────────────────────────────────────────
         if isinstance(source, PlySource):
@@ -213,7 +213,7 @@ def assemble_scene(
 
         # ── Collider / filling objects propagate typed ──────────────
 
-        print(f"    -> {name}: {pos.shape[0]} GS particles (gs_type={gs_type})")
+        print(f"    -> {name}: {pos.shape[0]} GS particles (gs_type={gs_type})", flush=True)
 
         result.append(SceneObject(
             name=name,
