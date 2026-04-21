@@ -100,7 +100,7 @@ def apply_material_to_model(
 ) -> None:
     """Apply gravity and per-particle MPM material fields.
 
-    Particles not covered by ``per_object`` are filled with
+    Particles not covered by ``per_part`` are filled with
     :class:`MPMMaterial` defaults so that filled particles (from
     particle_filling) still have valid material parameters.
     """
@@ -116,9 +116,9 @@ def apply_material_to_model(
         device=device,
     )
 
-    for info in spec.per_object:
+    for info in spec.per_part:
         if not isinstance(info.material, MPMMaterial):
-            detail = f"object={info.name} material_type={type(info.material).__name__}"
+            detail = f"part={info.name} material_type={type(info.material).__name__}"
             raise configuration_error(
                 owner="newton_mpm",
                 operation="set_material",

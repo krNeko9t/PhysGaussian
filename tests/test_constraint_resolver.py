@@ -1,6 +1,6 @@
 """Tests for ``physics_sim.scene.constraint_resolver``.
 
-These tests mock out ``SceneObject`` and ``ObjectRuntimeInfo`` with
+These tests mock out ``SceneObject`` and ``PartRuntimeInfo`` with
 tiny duck-typed classes so that no torch / warp / GPU dependencies are
 needed.  They verify:
 
@@ -98,8 +98,8 @@ def pot_and_branches():
         _FakeSceneObject("branches", branch_pos),
     ]
     # pot = collide-only (no sim particles); branches gets the 8 global slots 0..7
-    objects_runtime = [_FakeRuntimeInfo("branches", list(range(0, 8)))]
-    return scene_objects, objects_runtime
+    parts_runtime = [_FakeRuntimeInfo("branches", list(range(0, 8)))]
+    return scene_objects, parts_runtime
 
 
 # ── Selector resolution ────────────────────────────────────────────

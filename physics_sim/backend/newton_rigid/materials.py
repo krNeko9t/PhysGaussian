@@ -7,7 +7,7 @@ from typing import Any
 
 import newton
 
-from physics_sim.backend.spec import ObjectRuntimeInfo
+from physics_sim.backend.spec import PartRuntimeInfo
 from physics_sim.config.models import RigidMaterial
 from physics_sim.errors import configuration_error
 
@@ -46,11 +46,11 @@ def build_body_shape_config(
 
 def iter_body_specs(
     *,
-    per_object: list[ObjectRuntimeInfo],
+    per_part: list[PartRuntimeInfo],
     n_particles: int,
 ) -> list[BodySpec]:
-    if not per_object:
-        # Empty per_object → single body covering all particles with default material.
+    if not per_part:
+        # Empty per_part → single body covering all particles with default material.
         return [
             BodySpec(
                 particle_indices=list(range(n_particles)),
@@ -60,14 +60,14 @@ def iter_body_specs(
         ]
 
     specs: list[BodySpec] = []
-    for info in per_object:
+    for info in per_part:
         material = info.material
         if not isinstance(material, RigidMaterial):
-            detail = f"object={info.name} material_type={type(material).__name__}"
+            detail = f"part={info.name} material_type={type(material).__name__}"
             raise configuration_error(
                 owner="newton_rigid",
                 operation="set_material",
-                expected="newton_rigid requires RigidMaterial per object",
+                expected="newton_rigid requires RigidMaterial per part",
                 detail=detail,
             )
         iv_raw = info.initial_velocity

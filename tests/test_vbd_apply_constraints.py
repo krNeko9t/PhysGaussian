@@ -28,7 +28,7 @@ wp = pytest.importorskip("warp")
 newton = pytest.importorskip("newton")
 
 from physics_sim.backend.newton_vbd.solver import NewtonVBDBackend  # noqa: E402
-from physics_sim.backend.spec import MaterialSetupSpec, ObjectRuntimeInfo  # noqa: E402
+from physics_sim.backend.spec import MaterialSetupSpec, PartRuntimeInfo  # noqa: E402
 from physics_sim.config.models import (  # noqa: E402
     NewtonVBDConfig, VBDMaterial, VBDSoftBody, VBDRigidBody,
 )
@@ -54,7 +54,7 @@ def _make_backend_with_soft_block(n_side: int = 3) -> tuple[NewtonVBDBackend, np
     be.initialize(positions, volumes, covariances)
     be.set_material(MaterialSetupSpec(
         gravity=(0.0, -9.8, 0.0),
-        per_object=[ObjectRuntimeInfo(
+        per_part=[PartRuntimeInfo(
             name="soft",
             particle_indices=list(range(positions.shape[0])),
             material=VBDMaterial(body=VBDSoftBody()),
@@ -102,7 +102,7 @@ def test_collide_only_rejects_non_kinematic_body():
     be.initialize(positions, volumes, covariances)
     be.set_material(MaterialSetupSpec(
         gravity=(0.0, -9.8, 0.0),
-        per_object=[ObjectRuntimeInfo(
+        per_part=[PartRuntimeInfo(
             name="pot",
             particle_indices=list(range(8)),
             # NOT kinematic

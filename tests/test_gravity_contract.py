@@ -4,17 +4,20 @@ from pathlib import Path
 
 import pytest
 
+# Uses real torch internally via normalize_internal_gravity.
+pytest.importorskip("torch")
+
 from physics_sim.config.models import MPMMaterial, RigidMaterial
 from physics_sim.coord import normalize_internal_gravity
 from physics_sim.stages.backend_init import _resolve_gravity
-from physics_sim.stages.scene_setup import ObjectRuntimeInfo
+from physics_sim.stages.scene_setup import PartRuntimeInfo
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _info(name: str, material) -> ObjectRuntimeInfo:
-    return ObjectRuntimeInfo(
+def _info(name: str, material) -> PartRuntimeInfo:
+    return PartRuntimeInfo(
         name=name,
         particle_indices=[0],
         material=material,

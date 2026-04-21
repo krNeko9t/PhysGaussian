@@ -197,7 +197,7 @@ class NewtonRigidBackend(PhysicsBackend):
         """Create rigid bodies from per-object info and record gravity."""
         setup = self._require_setup("set_material")
         setup.gravity = tuple(float(x) for x in spec.gravity)
-        specs = iter_body_specs(per_object=spec.per_object, n_particles=setup.n_particles)
+        specs = iter_body_specs(per_part=spec.per_part, n_particles=setup.n_particles)
         for body in specs:
             shape_cfg = build_body_shape_config(
                 material=body.material,
@@ -329,6 +329,25 @@ class NewtonRigidBackend(PhysicsBackend):
         )
         # Release setup-only data (builder, init_positions, init_covariances).
         self._setup = None
+
+    def apply_constraints(self, constraints) -> None:
+        """Accept ``ResolvedCollideOnly`` as a no-op.
+
+        Rigid backend consumes collider info via ``set_boundary_conditions``
+        (the assembler converts role='collider_only' parts into BC planes),
+        so ``CollideOnly`` constraints are redundant at this layer and we
+        simply ignore them.  Any other constraint kind is unsupported.
+        """
+        from physics_sim.scene.constraint_resolver import ResolvedCollideOnly
+
+        unsupported = [type(c).__name__ for c in constraints
+                       if not isinstance(c, ResolvedCollideOnly)]
+        if unsupported:
+            raise NotImplementedError(
+                f"NewtonRigidBackend received constraints {sorted(set(unsupported))} "
+                "— rigid backend only supports CollideOnly (and handles it via "
+                "boundary conditions)"
+            )
 
     def step(self, dt: float, frame: int) -> None:
         """Advance the rigid body simulation by one substep."""

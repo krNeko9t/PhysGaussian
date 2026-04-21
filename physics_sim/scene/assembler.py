@@ -1,8 +1,7 @@
 """Scene assembler: reads config + PLY files and produces list[SceneObject].
 
-Consumes the Pydantic-based :class:`~physics_sim.config.models.SimConfig`
-via ``cfg.as_scene()``, which returns a ``SceneConfig`` with ``parts``
-and ``constraints``.
+Consumes ``cfg.scene`` (a ``SceneConfig`` with ``parts`` and
+``constraints``) from :class:`~physics_sim.config.models.SimConfig`.
 
 Coordinate alignment
 --------------------
@@ -72,7 +71,7 @@ def assemble_scene(
     source_axes = SourceAxes.from_config(pp.source_up, pp.source_front)
     global_opacity_threshold = pp.opacity_threshold
 
-    scene = cfg.as_scene()
+    scene = cfg.scene
     if not scene.parts:
         raise ValueError("Config must declare at least one part.")
 
