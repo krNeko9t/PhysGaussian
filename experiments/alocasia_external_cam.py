@@ -4,7 +4,6 @@ from physics_sim.config.models import (
     CameraConfig,
     NoneBackendConfig,
     NewtonVBDConfig,
-    ObjectConfig,
     PointSelectorSource,
     PreprocessConfig,
     SimConfig,
@@ -12,15 +11,16 @@ from physics_sim.config.models import (
     VBDMaterial,
     VBDRigidBody,
 )
+from physics_sim.config.scene import PartConfig, SceneConfig
 
 backend = NoneBackendConfig()
-backend=NewtonVBDConfig(
-        soft_contact_ke=100.0,
-        debug_soft_no_deformation=True,
-        sv_clamp_min=0.1,
-        sv_clamp_max=5.0,
-        solver_iterations=30,
-    )
+backend = NewtonVBDConfig(
+    soft_contact_ke=100.0,
+    debug_soft_no_deformation=True,
+    sv_clamp_min=0.1,
+    sv_clamp_max=5.0,
+    solver_iterations=30,
+)
 
 config = SimConfig(
     output="output/alocasia_external_cam",
@@ -42,47 +42,46 @@ config = SimConfig(
         camera_world_frame="source",
         camera_index=0,
     ),
-    objects=[
-        ObjectConfig(
-            name="alocasia_moving",
-            source=PointSelectorSource(
-                base_ply_path="datas/physics_dreamer/alocasia/point_cloud.ply",
-                selector_path="datas/physics_dreamer/alocasia/moving_part_points.ply",
-                selector_kind="point_cloud_xyz",
-                match_tolerance=1e-5,
-                min_match_ratio=0.95,
-                max_ambiguous_ratio=1e-3,
-            ),
-            material=VBDMaterial(body=VBDRigidBody()),
-        ),
-        ObjectConfig(
-            name="alocasia_foreground_static",
-            role="render_only",
-            source=PointSelectorSource(
-                base_ply_path="datas/physics_dreamer/alocasia/point_cloud.ply",
-                selector_path="datas/physics_dreamer/alocasia/clean_object_points.ply",
-                selector_kind="point_cloud_xyz",
-                subtract_selector_path="datas/physics_dreamer/alocasia/moving_part_points.ply",
-                subtract_selector_kind="point_cloud_xyz",
-                match_tolerance=1e-5,
-                min_match_ratio=0.95,
-                max_ambiguous_ratio=1e-3,
-            ),
-        ),
-        ObjectConfig(
-            name="alocasia_background",
-            role="render_only",
-            source=PointSelectorSource(
-                base_ply_path="datas/physics_dreamer/alocasia/point_cloud.ply",
-                selector_path="datas/physics_dreamer/alocasia/clean_object_points.ply",
-                selector_kind="point_cloud_xyz",
-                invert=True,
-                match_tolerance=1e-5,
-                min_match_ratio=0.95,
-                max_ambiguous_ratio=1e-3,
-            ),
-        ),
-    ],
     boundary_conditions=[],
+    scene=SceneConfig(
+        parts=[
+            PartConfig(
+                name="alocasia_moving",
+                source=PointSelectorSource(
+                    base_ply_path="datas/physics_dreamer/alocasia/point_cloud.ply",
+                    selector_path="datas/physics_dreamer/alocasia/moving_part_points.ply",
+                    selector_kind="point_cloud_xyz",
+                    match_tolerance=1e-5,
+                    min_match_ratio=0.95,
+                    max_ambiguous_ratio=1e-3,
+                ),
+                material=VBDMaterial(body=VBDRigidBody()),
+            ),
+            PartConfig(
+                name="alocasia_foreground_static",
+                source=PointSelectorSource(
+                    base_ply_path="datas/physics_dreamer/alocasia/point_cloud.ply",
+                    selector_path="datas/physics_dreamer/alocasia/clean_object_points.ply",
+                    selector_kind="point_cloud_xyz",
+                    subtract_selector_path="datas/physics_dreamer/alocasia/moving_part_points.ply",
+                    subtract_selector_kind="point_cloud_xyz",
+                    match_tolerance=1e-5,
+                    min_match_ratio=0.95,
+                    max_ambiguous_ratio=1e-3,
+                ),
+            ),
+            PartConfig(
+                name="alocasia_background",
+                source=PointSelectorSource(
+                    base_ply_path="datas/physics_dreamer/alocasia/point_cloud.ply",
+                    selector_path="datas/physics_dreamer/alocasia/clean_object_points.ply",
+                    selector_kind="point_cloud_xyz",
+                    invert=True,
+                    match_tolerance=1e-5,
+                    min_match_ratio=0.95,
+                    max_ambiguous_ratio=1e-3,
+                ),
+            ),
+        ]
+    ),
 )
-

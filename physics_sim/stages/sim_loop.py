@@ -64,6 +64,7 @@ def _advance_simulation_substeps(
     frame: int,
 ) -> None:
     for _ in range(step_per_frame):
+        backend.pre_step(substep_dt, frame)
         backend.step(substep_dt, frame)
 
 

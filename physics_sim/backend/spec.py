@@ -27,6 +27,11 @@ class ObjectRuntimeInfo:
     initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
+# New preferred name for the same type; kept as an alias until the
+# ``SimConfig.objects`` legacy path is removed (Phase I).
+PartRuntimeInfo = ObjectRuntimeInfo
+
+
 @dataclass
 class MaterialSetupSpec:
     """Typed payload passed to ``PhysicsBackend.set_material``.

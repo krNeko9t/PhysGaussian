@@ -17,6 +17,10 @@ from physics_sim.backend.spec import ObjectRuntimeInfo
 from physics_sim.config.models import SimConfig
 from physics_sim.coord import SourceAxes
 from physics_sim.render.interfaces import SceneAssetLoader
+from physics_sim.scene.constraint_resolver import (
+    ResolvedConstraint,
+    resolve_constraints,
+)
 from physics_sim.sh_contract import sh_coeff_count
 from physics_sim.scene import SceneObject, assemble_scene
 
@@ -100,6 +104,7 @@ class SceneData:
     gs_num: int
 
     objects_runtime: list[ObjectRuntimeInfo]
+    resolved_constraints: list[ResolvedConstraint]
     dynamic_init: DynamicSceneInit
     static_render: Optional[StaticRenderChunk]
     render_setup: RenderSetup
@@ -256,6 +261,14 @@ def setup_scene(
         dynamic_init = _empty_dynamic_init(device, sh_degree, sh_channels)
         objects_runtime = []
 
+    # Resolve scene-graph constraints into concrete particle-index sets.
+    scene = cfg.as_scene()
+    resolved_constraints = resolve_constraints(
+        scene=scene,
+        scene_objects=objects,
+        objects_runtime=objects_runtime,
+    )
+
     # Static chunks: render_only objects + collider_only objects that render
     static_chunks = list(static_objects)
     for obj in collider_objects:
@@ -277,6 +290,7 @@ def setup_scene(
         gs_type=gs_type,
         gs_num=dynamic_init.n_particles,
         objects_runtime=objects_runtime,
+        resolved_constraints=resolved_constraints,
         dynamic_init=dynamic_init,
         static_render=static_render,
         render_setup=render_setup,

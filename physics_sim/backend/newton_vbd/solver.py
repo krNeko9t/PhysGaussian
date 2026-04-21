@@ -36,6 +36,10 @@ from newton.solvers import SolverVBD
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
 from physics_sim.backend.newton_common.boundary import surface_plane_from_bc
+from physics_sim.backend.newton_common.pin_kernel import (
+    PinToBodyHook,
+    launch_pin_hook,
+)
 from physics_sim.backend.newton_vbd.rigid_mesh import create_rigid_body
 from physics_sim.backend.newton_vbd.soft_grid import build_soft_grid_embedding
 from physics_sim.backend.newton_vbd.state_export import export_state
@@ -51,6 +55,12 @@ from physics_sim.config.models import (
 )
 from physics_sim.errors import configuration_error, lifecycle_error
 from physics_sim.logging_utils import get_logger
+from physics_sim.scene.constraint_resolver import (
+    ResolvedCollideOnly,
+    ResolvedConstraint,
+    ResolvedPinToBody,
+    ResolvedPinToWorld,
+)
 
 LOGGER = get_logger(__name__)
 
@@ -66,6 +76,8 @@ class _RigidInfo:
     init_cov_3x3: torch.Tensor      # (N, 3, 3)
     init_quats: Optional[torch.Tensor] = None   # (N, 4) wxyz — for 2DGS
     init_scales: Optional[torch.Tensor] = None   # (N, 2|3) — for 2DGS
+    name: str = ""
+    kinematic: bool = False
 
 
 @dataclass
@@ -79,6 +91,7 @@ class _SoftInfo:
     tet_cells: np.ndarray            # (T, 4)  for computing deformation gradient
     rest_verts: np.ndarray           # (V, 3)  rest-pose tet vertices
     init_cov_6: torch.Tensor         # (N, 6)
+    name: str = ""
 
 
 # ── Setup / Runtime state containers ─────────────────────────────────
@@ -117,6 +130,7 @@ class _Runtime:
     init_quats: Optional[torch.Tensor]
     init_scales: Optional[torch.Tensor]
     frame_counter: int = 0
+    pin_to_body_hooks: list[PinToBodyHook] = field(default_factory=list)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -265,6 +279,7 @@ class NewtonVBDBackend(PhysicsBackend):
                     shape_cfg=cfg,
                     name=info.name,
                     collision_geo=body.collision_geometry,
+                    kinematic=bool(body.kinematic),
                 )
             elif isinstance(body, VBDSoftBody):
                 self._create_soft_body(
@@ -390,6 +405,186 @@ class NewtonVBDBackend(PhysicsBackend):
         rt.solver.step(rt.state_0, rt.state_1, rt.control, rt.contacts, dt)
         rt.state_0, rt.state_1 = rt.state_1, rt.state_0
 
+    # ── Constraint application ───────────────────────────────────────
+
+    def apply_constraints(self, constraints: list[ResolvedConstraint]) -> None:
+        """Translate scene-graph constraints to VBD model operations.
+
+        - ``PinToWorld``: find the tet vertices that deform a soft GS
+          particle (its 4 tet corners, weighted by bary coords).  Set
+          those vertices' mass to 0 so VBD freezes them in place.
+        - ``PinToBody``: same as PinToWorld (tet vertices mass=0) + record
+          a ``PinToBodyHook`` that writes particle_q / qd each substep.
+        - ``CollideOnly``: validate the target body is kinematic
+          (VBD's contact pipeline handles the rest automatically).
+        """
+        rt = self._require_runtime("apply_constraints")
+
+        for c in constraints:
+            if isinstance(c, ResolvedCollideOnly):
+                info = self._rigid_info_by_name(rt, c.part_name)
+                if info is None:
+                    raise configuration_error(
+                        owner="newton_vbd",
+                        operation="apply_constraints",
+                        expected=(
+                            f"CollideOnly part '{c.part_name}' must be a rigid "
+                            "VBDMaterial part"
+                        ),
+                    )
+                if not info.kinematic:
+                    raise configuration_error(
+                        owner="newton_vbd",
+                        operation="apply_constraints",
+                        expected=(
+                            f"CollideOnly part '{c.part_name}' must have "
+                            "VBDRigidBody.kinematic=True to stay fixed"
+                        ),
+                    )
+                continue
+
+            if isinstance(c, (ResolvedPinToWorld, ResolvedPinToBody)):
+                tet_verts = self._gs_indices_to_tet_verts(rt, c.particle_indices)
+                self._freeze_tet_vertices(rt, tet_verts)
+
+                if isinstance(c, ResolvedPinToBody):
+                    body_info = self._rigid_info_by_name(rt, c.body_part_name)
+                    if body_info is None:
+                        raise configuration_error(
+                            owner="newton_vbd",
+                            operation="apply_constraints",
+                            expected=(
+                                f"PinToBody body '{c.body_part_name}' must be a "
+                                "rigid VBDMaterial part"
+                            ),
+                        )
+                    # tet_verts are the physical particles whose world pose
+                    # must follow this body.  Their initial world positions
+                    # come from the current particle_q (= tet rest pose).
+                    particle_q_np = rt.state_0.particle_q.numpy()
+                    init_world = particle_q_np[tet_verts].astype(np.float64, copy=False)
+                    hook = PinToBodyHook(
+                        particle_indices=wp.array(
+                            tet_verts.astype(np.int32), dtype=int, device=self._device,
+                        ),
+                        body_idx=body_info.body_idx,
+                        initial_world_positions=init_world,
+                    )
+                    rt.pin_to_body_hooks.append(hook)
+                continue
+
+            raise NotImplementedError(
+                f"NewtonVBDBackend: unsupported constraint {type(c).__name__}"
+            )
+
+    def pre_step(self, dt: float, frame: int) -> None:
+        rt = self._runtime
+        if rt is None or not rt.pin_to_body_hooks:
+            return
+        for hook in rt.pin_to_body_hooks:
+            launch_pin_hook(
+                hook,
+                body_q=rt.state_0.body_q,
+                body_qd=rt.state_0.body_qd,
+                body_com=rt.model.body_com,
+                particle_q=rt.state_0.particle_q,
+                particle_qd=rt.state_0.particle_qd,
+                device=self._device,
+            )
+
+    # ── Constraint helpers ───────────────────────────────────────────
+
+    def _rigid_info_by_name(self, rt: _Runtime, name: str) -> Optional[_RigidInfo]:
+        for info in rt.rigid_bodies:
+            if info.name == name:
+                return info
+        return None
+
+    def _gs_indices_to_tet_verts(
+        self,
+        rt: _Runtime,
+        gs_indices: np.ndarray,
+    ) -> np.ndarray:
+        """Map GS particle indices to the physical tet vertices that drive them.
+
+        Each soft-body GS particle lives inside one tet and is reconstructed
+        by barycentric interpolation over the 4 tet vertices.  Pinning the
+        GS particle in place means freezing those 4 vertices.
+
+        GS particles that belong to a rigid body have no corresponding
+        tet vertex — pinning them to world is meaningless (the whole body
+        would need to be kinematic instead); we raise a clear error.
+        """
+        gs_set = set(int(i) for i in gs_indices)
+        tet_vert_ids: set[int] = set()
+        consumed: set[int] = set()
+
+        for soft in rt.soft_bodies:
+            soft_gs = set(int(i) for i in soft.particle_indices)
+            hit = sorted(gs_set & soft_gs)
+            if not hit:
+                continue
+            # index into the soft body's per-particle arrays
+            local_pos = [soft.particle_indices.index(gi) for gi in hit]
+            for lp in local_pos:
+                tet_id = int(soft.tet_ids[lp])
+                for v in soft.tet_cells[tet_id]:
+                    tet_vert_ids.add(int(v) + soft.vert_offset)
+            consumed.update(hit)
+
+        missed = gs_set - consumed
+        if missed:
+            # Identify which rigid bodies the missed GS live in (if any)
+            for info in rt.rigid_bodies:
+                rigid_gs = set(int(i) for i in info.particle_indices)
+                stuck = missed & rigid_gs
+                if stuck:
+                    raise configuration_error(
+                        owner="newton_vbd",
+                        operation="apply_constraints",
+                        expected=(
+                            "cannot pin individual particles of a rigid body "
+                            f"'{info.name}'; pin the whole body via "
+                            "CollideOnly+kinematic, or select only soft-body GS"
+                        ),
+                    )
+                missed -= rigid_gs
+            if missed:
+                raise configuration_error(
+                    owner="newton_vbd",
+                    operation="apply_constraints",
+                    expected=(
+                        f"{len(missed)} selected GS indices belong to no "
+                        "known soft/rigid body"
+                    ),
+                )
+
+        if not tet_vert_ids:
+            raise configuration_error(
+                owner="newton_vbd",
+                operation="apply_constraints",
+                expected="constraint resolved to zero physical tet vertices",
+            )
+        return np.array(sorted(tet_vert_ids), dtype=np.int64)
+
+    def _freeze_tet_vertices(self, rt: _Runtime, vert_indices: np.ndarray) -> None:
+        """Set ``particle_mass`` / ``particle_inv_mass`` to 0 for given verts."""
+        if vert_indices.size == 0:
+            return
+        mass_np = rt.model.particle_mass.numpy()
+        inv_np = rt.model.particle_inv_mass.numpy()
+        mass_np[vert_indices] = 0.0
+        inv_np[vert_indices] = 0.0
+        rt.model.particle_mass = wp.array(
+            mass_np, dtype=float, device=self._device,
+        )
+        rt.model.particle_inv_mass = wp.array(
+            inv_np, dtype=float, device=self._device,
+        )
+        LOGGER.info(
+            "[NewtonVBD] Froze %d tet vertices (mass=0)", int(vert_indices.size),
+        )
+
     def get_state(self) -> SimulationState:
         rt = self._require_runtime("get_state")
         state, rt.frame_counter = export_state(
@@ -417,6 +612,7 @@ class NewtonVBDBackend(PhysicsBackend):
         shape_cfg: newton.ModelBuilder.ShapeConfig,
         name: str,
         collision_geo: str | None = None,
+        kinematic: bool = False,
     ) -> None:
         result = create_rigid_body(
             builder=setup.builder,
@@ -433,6 +629,16 @@ class NewtonVBDBackend(PhysicsBackend):
             alpha=self._alpha,
             max_triangles=self._max_triangles,
         )
+        if kinematic:
+            # Zero-mass body: treated as kinematic by Newton solvers.
+            # body_mass / body_inv_mass are per-body arrays on the builder.
+            setup.builder.body_mass[result.body_idx] = 0.0
+            setup.builder.body_inv_mass[result.body_idx] = 0.0
+            setup.builder.body_inertia[result.body_idx] = np.zeros((3, 3), dtype=np.float32)
+            setup.builder.body_inv_inertia[result.body_idx] = np.zeros((3, 3), dtype=np.float32)
+            LOGGER.info(
+                "[NewtonVBD] Rigid '%s' set kinematic (body_inv_mass=0)", name,
+            )
         setup.rigid_bodies.append(
             _RigidInfo(
                 body_idx=result.body_idx,
@@ -441,6 +647,8 @@ class NewtonVBDBackend(PhysicsBackend):
                 init_cov_3x3=result.init_cov_3x3,
                 init_quats=result.init_quats,
                 init_scales=result.init_scales,
+                name=name,
+                kinematic=kinematic,
             )
         )
 
@@ -545,6 +753,7 @@ class NewtonVBDBackend(PhysicsBackend):
             tet_cells=embedding.tet_cells,
             rest_verts=embedding.grid_vertices.copy(),
             init_cov_6=cov6,
+            name=name,
         ))
         LOGGER.info(
             f"[NewtonVBD] Soft '{name}': {len(particle_indices)} GS particles, "

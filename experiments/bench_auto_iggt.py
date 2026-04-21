@@ -5,7 +5,6 @@ from physics_sim.config.models import (
     ColliderConfig,
     ColliderFitSpec,
     NewtonVBDConfig,
-    ObjectConfig,
     PlySource,
     PreprocessConfig,
     SimConfig,
@@ -13,6 +12,7 @@ from physics_sim.config.models import (
     VBDMaterial,
     VBDRigidBody,
 )
+from physics_sim.config.scene import PartConfig, SceneConfig, CollideOnly
 
 
 def _rigid(density: float, mu: float) -> VBDMaterial:
@@ -53,81 +53,84 @@ config = SimConfig(
         delta_e=0.0,
         delta_r=0.0,
     ),
-    objects=[
-        ObjectConfig(
-            name="3dovs_bench_inst000",
-            source=PlySource(
-                ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_000.ply",
-            ),
-            material=_rigid(density=981.8, mu=0.474),
-        ),
-        ObjectConfig(
-            name="3dovs_bench_inst001",
-            source=PlySource(
-                ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_001.ply",
-            ),
-            material=_rigid(density=328.3, mu=0.485),
-        ),
-        ObjectConfig(
-            name="3dovs_bench_inst002",
-            source=PlySource(
-                ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_002.ply",
-            ),
-            material=_rigid(density=934.8, mu=0.414),
-        ),
-        ObjectConfig(
-            name="3dovs_bench_inst003",
-            source=PlySource(
-                ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_003.ply",
-            ),
-            collider=ColliderConfig(
-                type="plane",
-                space="world",
-                surface="slip",
-                friction=0.703,
-                fit=ColliderFitSpec(method="svd", sample_max=200000, seed=0),
-            ),
-            material=_rigid(density=800.0, mu=0.5),
-        ),
-        ObjectConfig(
-            name="3dovs_bench_inst004",
-            role="collider_only",
-            source=PlySource(
-                ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_004.ply",
-            ),
-            material=_rigid(density=633.4, mu=0.412),
-        ),
-        ObjectConfig(
-            name="3dovs_bench_inst005",
-            source=PlySource(
-                ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_005.ply",
-            ),
-            collider=ColliderConfig(
-                type="plane",
-                space="world",
-                surface="slip",
-                friction=0.5,
-                prefer_up=(0.0186, 0.7519, 0.659),
-                fit=ColliderFitSpec(method="svd", sample_max=200000, seed=0),
-            ),
-            material=_rigid(density=800.0, mu=0.5),
-        ),
-        ObjectConfig(
-            name="3dovs_bench_inst006",
-            role="collider_only",
-            source=PlySource(
-                ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_006.ply",
-            ),
-            material=_rigid(density=375.6, mu=0.513),
-        ),
-        ObjectConfig(
-            name="3dovs_bench_inst007",
-            source=PlySource(
-                ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_007.ply",
-            ),
-            material=_rigid(density=619.7, mu=0.5),
-        ),
-    ],
     boundary_conditions=[],
+    scene=SceneConfig(
+        parts=[
+            PartConfig(
+                name="3dovs_bench_inst000",
+                source=PlySource(
+                    ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_000.ply",
+                ),
+                material=_rigid(density=981.8, mu=0.474),
+            ),
+            PartConfig(
+                name="3dovs_bench_inst001",
+                source=PlySource(
+                    ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_001.ply",
+                ),
+                material=_rigid(density=328.3, mu=0.485),
+            ),
+            PartConfig(
+                name="3dovs_bench_inst002",
+                source=PlySource(
+                    ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_002.ply",
+                ),
+                material=_rigid(density=934.8, mu=0.414),
+            ),
+            PartConfig(
+                name="3dovs_bench_inst003",
+                source=PlySource(
+                    ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_003.ply",
+                ),
+                collider=ColliderConfig(
+                    type="plane",
+                    space="world",
+                    surface="slip",
+                    friction=0.703,
+                    fit=ColliderFitSpec(method="svd", sample_max=200000, seed=0),
+                ),
+                material=_rigid(density=800.0, mu=0.5),
+            ),
+            PartConfig(
+                name="3dovs_bench_inst004",
+                source=PlySource(
+                    ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_004.ply",
+                ),
+                material=_rigid(density=633.4, mu=0.412),
+            ),
+            PartConfig(
+                name="3dovs_bench_inst005",
+                source=PlySource(
+                    ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_005.ply",
+                ),
+                collider=ColliderConfig(
+                    type="plane",
+                    space="world",
+                    surface="slip",
+                    friction=0.5,
+                    prefer_up=(0.0186, 0.7519, 0.659),
+                    fit=ColliderFitSpec(method="svd", sample_max=200000, seed=0),
+                ),
+                material=_rigid(density=800.0, mu=0.5),
+            ),
+            PartConfig(
+                name="3dovs_bench_inst006",
+                source=PlySource(
+                    ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_006.ply",
+                ),
+                material=_rigid(density=375.6, mu=0.513),
+            ),
+            PartConfig(
+                name="3dovs_bench_inst007",
+                source=PlySource(
+                    ply_path="/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/projects/AnySplat/trace_output/bench_iggt_no_crop/postprocess/seg3d_split/hdbscan_mcs700_ms50/cluster_007.ply",
+                ),
+                material=_rigid(density=619.7, mu=0.5),
+            ),
+        ],
+        constraints=[
+            CollideOnly(part="3dovs_bench_inst004"),
+            CollideOnly(part="3dovs_bench_inst006"),
+        ],
+    ),
 )
-

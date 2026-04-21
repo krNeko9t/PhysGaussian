@@ -7,12 +7,15 @@ and return SimulationState from get_state().
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from physics_sim.backend.spec import MaterialSetupSpec
 from physics_sim.config.models import BoundaryCondition, TimeConfig
+
+if TYPE_CHECKING:
+    from physics_sim.scene.constraint_resolver import ResolvedConstraint
 
 
 @dataclass
@@ -83,6 +86,39 @@ class PhysicsBackend(ABC):
 
         Called after set_material() and set_boundary_conditions().
         Subclasses may override; default is a no-op.
+        """
+        pass
+
+    def apply_constraints(
+        self,
+        constraints: "list[ResolvedConstraint]",
+    ) -> None:
+        """Translate scene-graph constraints into backend-specific setup.
+
+        Called once after :meth:`finalize` and before the first :meth:`step`.
+        Default implementation accepts ``ResolvedCollideOnly`` silently
+        (its semantics overlap with the legacy ``collider_objects`` list
+        that every backend already consumes via set_boundary_conditions).
+        Any other constraint kind raises NotImplementedError.
+        """
+        from physics_sim.scene.constraint_resolver import ResolvedCollideOnly
+
+        unsupported = [
+            type(c).__name__ for c in constraints
+            if not isinstance(c, ResolvedCollideOnly)
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                f"{type(self).__name__} received constraints {sorted(set(unsupported))} "
+                "but does not implement apply_constraints()"
+            )
+
+    def pre_step(self, dt: float, frame: int) -> None:
+        """Hook called before every :meth:`step` substep.
+
+        Backends use this to run per-step kernels driven by scene-graph
+        constraints (e.g. PinToBody writes particle_q from body_q).
+        Default is a no-op.
         """
         pass
 

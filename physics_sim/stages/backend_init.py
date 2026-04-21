@@ -92,5 +92,6 @@ def init_backend(
     )
     backend.set_boundary_conditions(normalized_bcs, cfg.time)
     backend.finalize()
+    backend.apply_constraints(scene_data.resolved_constraints)
 
     return backend

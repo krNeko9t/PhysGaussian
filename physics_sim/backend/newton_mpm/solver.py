@@ -22,6 +22,10 @@ import newton
 from newton.solvers import SolverImplicitMPM
 
 from physics_sim.backend.base import PhysicsBackend, SimulationState
+from physics_sim.backend.newton_common.pin_kernel import (
+    PinToBodyHook,
+    launch_pin_hook,
+)
 from physics_sim.backend.newton_mpm.boundary_conditions import (
     BoundaryConditionRuntime,
     register_boundary_conditions,
@@ -37,6 +41,12 @@ from physics_sim.config.models import (
 )
 from physics_sim.errors import configuration_error, lifecycle_error
 from physics_sim.logging_utils import get_logger
+from physics_sim.scene.constraint_resolver import (
+    ResolvedCollideOnly,
+    ResolvedConstraint,
+    ResolvedPinToBody,
+    ResolvedPinToWorld,
+)
 
 LOGGER = get_logger(__name__)
 
@@ -80,6 +90,7 @@ class _Runtime:
     time: float = 0.0
     substep_dt: float = 0.0
     frames_dirty: bool = False
+    pin_to_body_hooks: list[PinToBodyHook] = field(default_factory=list)
 
 
 class NewtonMPMBackend(PhysicsBackend):
@@ -328,6 +339,84 @@ class NewtonMPMBackend(PhysicsBackend):
             num_scales=rt.num_scales,
         )
         return state
+
+    # ── Constraint application ───────────────────────────────────────
+
+    def apply_constraints(self, constraints: list[ResolvedConstraint]) -> None:
+        """Translate scene-graph constraints to MPM model operations.
+
+        MPM particles are 1:1 with GS particles, so ``PinToWorld`` and
+        ``PinToBody`` directly operate on ``model.particle_mass`` at the
+        GS indices produced by the resolver.
+
+        ``CollideOnly`` currently raises NotImplementedError: the MPM
+        backend has no mesh-collider path yet (see Phase F2 task).
+        """
+        rt = self._require_runtime("apply_constraints")
+
+        for c in constraints:
+            if isinstance(c, ResolvedCollideOnly):
+                raise NotImplementedError(
+                    "NewtonMPMBackend does not yet support CollideOnly "
+                    f"(part='{c.part_name}'). Track Phase F2."
+                )
+
+            if isinstance(c, (ResolvedPinToWorld, ResolvedPinToBody)):
+                self._freeze_particles(rt, c.particle_indices)
+
+                if isinstance(c, ResolvedPinToBody):
+                    # MPM has no rigid bodies in the current builder path,
+                    # so there is no body_q to follow.  When Phase F2
+                    # adds rigid bodies, this branch becomes analogous
+                    # to the VBD version.
+                    raise NotImplementedError(
+                        "NewtonMPMBackend does not yet expose rigid bodies, "
+                        f"so PinToBody (body='{c.body_part_name}') is "
+                        "unsupported. Track Phase F2."
+                    )
+                continue
+
+            raise NotImplementedError(
+                f"NewtonMPMBackend: unsupported constraint {type(c).__name__}"
+            )
+
+    def pre_step(self, dt: float, frame: int) -> None:
+        rt = self._runtime
+        if rt is None or not rt.pin_to_body_hooks:
+            return
+        for hook in rt.pin_to_body_hooks:
+            launch_pin_hook(
+                hook,
+                body_q=rt.state_0.body_q,
+                body_qd=rt.state_0.body_qd,
+                body_com=rt.model.body_com,
+                particle_q=rt.state_0.particle_q,
+                particle_qd=rt.state_0.particle_qd,
+                device=self._device,
+            )
+
+    def _freeze_particles(self, rt: _Runtime, indices: np.ndarray) -> None:
+        """Set ``particle_mass`` / ``particle_inv_mass`` to 0 for given indices.
+
+        MPM's kernels treat particles with mass=0 as kinematic (infinite
+        inverse mass → velocity zeroed during integration, strains frozen
+        during rasterization).  This is the sole mechanism for pinning.
+        """
+        if indices.size == 0:
+            return
+        mass_np = rt.model.particle_mass.numpy()
+        inv_np = rt.model.particle_inv_mass.numpy()
+        mass_np[indices] = 0.0
+        inv_np[indices] = 0.0
+        rt.model.particle_mass = wp.array(
+            mass_np, dtype=float, device=self._device,
+        )
+        rt.model.particle_inv_mass = wp.array(
+            inv_np, dtype=float, device=self._device,
+        )
+        LOGGER.info(
+            "[NewtonMPM] Froze %d particles (mass=0)", int(indices.size),
+        )
 
     # ------------------------------------------------------------------
     # Extra accessors

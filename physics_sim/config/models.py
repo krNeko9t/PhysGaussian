@@ -7,9 +7,12 @@ directly -- no YAML parsing, no ``_ref`` resolution, no deep-merge.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import TYPE_CHECKING, Annotated, Literal, Union
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from physics_sim.config.scene import SceneConfig
 
 
 # ── Data sources ─────────────────────────────────────────────────────
@@ -177,6 +180,7 @@ class VBDRigidBody(BaseModel):
     density: float = 1000.0
     mu: float = 0.5
     collision_geometry: str = "convex_hull"
+    kinematic: bool = False
 
 
 class VBDSoftBody(BaseModel):
@@ -213,19 +217,9 @@ MaterialSpec = Annotated[
 
 
 # ── Object ───────────────────────────────────────────────────────────
-
-class ObjectConfig(BaseModel):
-    name: str
-    source: ObjectSource
-    role: Literal["dynamic", "collider_only", "render_only"] = "dynamic"
-    transform: ObjectTransform = Field(default_factory=ObjectTransform)
-    initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    material: MaterialSpec | None = None
-    particle_filling: FillingConfig | None = None
-    collider: ColliderConfig | None = None
-    opacity_threshold: float | None = None
-
-
+# (``ObjectConfig`` and ``SimConfig.objects`` were removed in Phase I —
+# the scene-graph form ``SimConfig.scene: SceneConfig`` is now the only
+# way to declare parts.  See ``physics_sim.config.scene.PartConfig``.)
 
 # ── Backend configs (one typed class per backend) ────────────────────
 
@@ -367,7 +361,11 @@ class SimConfig(BaseModel):
     Constructed directly in a Python experiment file, e.g.::
 
         from physics_sim.config.models import *
-        config = SimConfig(backend=NewtonRigidConfig(), objects=[...])
+        from physics_sim.config.scene import SceneConfig, PartConfig
+        config = SimConfig(
+            backend=NewtonRigidConfig(),
+            scene=SceneConfig(parts=[PartConfig(...), ...]),
+        )
     """
 
     output: str = "output"
@@ -375,5 +373,15 @@ class SimConfig(BaseModel):
     time: TimeConfig = Field(default_factory=TimeConfig)
     preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
     camera: CameraConfig = Field(default_factory=CameraConfig)
-    objects: list[ObjectConfig]
+    scene: "SceneConfig"
     boundary_conditions: list[BoundaryCondition] = Field(default_factory=list)
+
+    def as_scene(self) -> "SceneConfig":
+        """Return the scene configuration (identity for now).
+
+        Historically this method also accepted a legacy ``objects`` list
+        and upgraded it to a SceneConfig; both have been removed, but the
+        method is kept so call sites (``assembler.py``, ``scene_setup.py``)
+        don't have to special-case the transition.
+        """
+        return self.scene

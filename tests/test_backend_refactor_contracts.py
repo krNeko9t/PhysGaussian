@@ -158,3 +158,33 @@ def test_raster_backends_no_longer_accept_sh_degree_wiring():
     assert "lambda: create_raster_backend(\"gsplat\")" in registries_src
     assert "lambda: create_raster_backend(\"diffrast\")" in registries_src
     assert "def create_raster_backend(name: str)" in backend_src
+
+
+def test_backends_implement_apply_constraints_and_pre_step():
+    """Source-level check that VBD and MPM backends override the new hooks."""
+    vbd_src = _read("physics_sim/backend/newton_vbd/solver.py")
+    mpm_src = _read("physics_sim/backend/newton_mpm/solver.py")
+    for src in (vbd_src, mpm_src):
+        assert "def apply_constraints(self" in src
+        assert "def pre_step(self" in src
+        assert "ResolvedPinToWorld" in src
+        assert "ResolvedPinToBody" in src
+
+
+def test_sim_loop_fires_pre_step_per_substep():
+    src = _read("physics_sim/stages/sim_loop.py")
+    assert "backend.pre_step(substep_dt, frame)" in src
+
+
+def test_backend_init_calls_apply_constraints_after_finalize():
+    src = _read("physics_sim/stages/backend_init.py")
+    idx_fin = src.index("backend.finalize()")
+    idx_apply = src.index("backend.apply_constraints(")
+    assert idx_fin < idx_apply
+
+
+def test_pin_kernel_is_shared_module():
+    assert (REPO_ROOT / "physics_sim/backend/newton_common/pin_kernel.py").exists()
+    for bk in ("newton_vbd", "newton_mpm"):
+        src = _read(f"physics_sim/backend/{bk}/solver.py")
+        assert "newton_common.pin_kernel" in src

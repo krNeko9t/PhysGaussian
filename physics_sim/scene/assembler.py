@@ -1,7 +1,8 @@
 """Scene assembler: reads config + PLY files and produces list[SceneObject].
 
 Consumes the Pydantic-based :class:`~physics_sim.config.models.SimConfig`
-where each object is a typed ``ObjectConfig``.
+via ``cfg.as_scene()``, which returns a ``SceneConfig`` with ``parts``
+and ``constraints``.
 
 Coordinate alignment
 --------------------
@@ -25,6 +26,7 @@ from physics_sim.config.models import (
     PlySource,
     SimConfig,
 )
+from physics_sim.config.scene import CollideOnly
 from physics_sim.render.interfaces import SceneAssetLoader
 from physics_sim.render.types import GaussianAsset
 from physics_sim.coord import (
@@ -70,8 +72,16 @@ def assemble_scene(
     source_axes = SourceAxes.from_config(pp.source_up, pp.source_front)
     global_opacity_threshold = pp.opacity_threshold
 
-    if not cfg.objects:
-        raise ValueError("Config must declare at least one object.")
+    scene = cfg.as_scene()
+    if not scene.parts:
+        raise ValueError("Config must declare at least one part.")
+
+    # Derive per-part role from scene + material.  A part referenced
+    # by a CollideOnly constraint becomes "collider_only"; a part with
+    # no material is "render_only"; everything else is "dynamic".
+    collide_only_names = {
+        c.part for c in scene.constraints if isinstance(c, CollideOnly)
+    }
 
     ply_cache: dict[str, GaussianAsset] = {}
     id_map_cache: dict[str, np.ndarray] = {}
@@ -101,9 +111,14 @@ def assemble_scene(
 
     result: list[SceneObject] = []
 
-    for obj_cfg in cfg.objects:
+    for obj_cfg in scene.parts:
         name = obj_cfg.name
-        role = obj_cfg.role
+        if name in collide_only_names:
+            role = "collider_only"
+        elif obj_cfg.material is None:
+            role = "render_only"
+        else:
+            role = "dynamic"
         source = obj_cfg.source
 
         print(f"  [assembler] Processing '{name}' (role={role}, source={source.type})")

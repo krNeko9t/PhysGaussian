@@ -1,7 +1,7 @@
 """Material preset factories.
 
 Each function returns a plain ``dict`` that is stored as
-``ObjectConfig.material``.  The function signature exposes commonly
+``PartConfig.material``.  The function signature exposes commonly
 tuned parameters for IDE auto-complete; ``**kw`` passes through any
 backend-specific extras.
 """
