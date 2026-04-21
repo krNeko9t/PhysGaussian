@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from physics_sim.backend.registry import create_backend
-from physics_sim.backend.spec import MaterialSetupSpec, ObjectRuntimeInfo
+from physics_sim.backend.spec import MaterialSetupSpec, PartRuntimeInfo
 from physics_sim.config.models import SimConfig
 from physics_sim.coord import (
     E_GRAVITY_SHAPE,
@@ -36,19 +36,19 @@ if TYPE_CHECKING:
 LOGGER = get_logger(__name__)
 
 
-def _resolve_gravity(objects_runtime: list[ObjectRuntimeInfo]) -> tuple[float, float, float]:
-    """Read ``g_magnitude`` from the first dynamic object and form ``[0, -g, 0]``."""
+def _resolve_gravity(parts_runtime: list[PartRuntimeInfo]) -> tuple[float, float, float]:
+    """Read ``g_magnitude`` from the first dynamic part and form ``[0, -g, 0]``."""
     default_magnitude = 9.8
-    if not objects_runtime:
+    if not parts_runtime:
         return tuple(gravity_vector(default_magnitude, device="cpu").tolist())
 
-    info = objects_runtime[0]
+    info = parts_runtime[0]
     magnitude = abs(float(info.material.g_magnitude))
     if not np.isfinite(magnitude):
         raise gravity_contract_error(
             E_GRAVITY_SHAPE,
             backend="backend_init",
-            config_path=f"objects_runtime[0].material.g_magnitude",
+            config_path="parts_runtime[0].material.g_magnitude",
             material_name=info.name,
             raw_g=info.material.g_magnitude,
             detail="g_magnitude must be finite",
@@ -80,8 +80,8 @@ def init_backend(
         )
 
     material_spec = MaterialSetupSpec(
-        gravity=_resolve_gravity(scene_data.objects_runtime),
-        per_object=list(scene_data.objects_runtime),
+        gravity=_resolve_gravity(scene_data.parts_runtime),
+        per_part=list(scene_data.parts_runtime),
     )
     backend.set_material(material_spec)
 

@@ -35,6 +35,7 @@ from physics_sim.config.scene import (
     ProximitySelector,
     SceneConfig,
 )
+from physics_sim.backend.spec import PartRuntimeInfo
 from physics_sim.scene.objects import SceneObject
 
 
@@ -83,10 +84,10 @@ class _PartLookup:
 
 def _build_part_lookup(
     scene_objects: Sequence[SceneObject],
-    objects_runtime: Sequence,  # list[ObjectRuntimeInfo-or-PartRuntimeInfo]
+    parts_runtime: Sequence[PartRuntimeInfo],
 ) -> dict[str, _PartLookup]:
     """Index scene objects by name, reading positions to CPU once."""
-    offset_by_name = {info.name: info.particle_indices[0] for info in objects_runtime
+    offset_by_name = {info.name: info.particle_indices[0] for info in parts_runtime
                       if info.particle_indices}
     out: dict[str, _PartLookup] = {}
     for obj in scene_objects:
@@ -174,7 +175,7 @@ def _resolve_to_global(
 def resolve_constraints(
     scene: SceneConfig,
     scene_objects: Sequence[SceneObject],
-    objects_runtime: Sequence,  # list[ObjectRuntimeInfo-like]
+    parts_runtime: Sequence[PartRuntimeInfo],
 ) -> list[ResolvedConstraint]:
     """Translate every ``ConstraintConfig`` in *scene* to a ``ResolvedConstraint``.
 
@@ -185,11 +186,11 @@ def resolve_constraints(
     scene_objects : list[SceneObject]
         All assembled parts (sim + static + collider), positions in internal
         Y-up coords.  Used to look up positions for ProximitySelector.
-    objects_runtime : list[ObjectRuntimeInfo]
-        Per-sim-object runtime descriptors (provides ``particle_indices``
+    parts_runtime : list[PartRuntimeInfo]
+        Per-sim-part runtime descriptors (provides ``particle_indices``
         = global offset in the concatenated model).
     """
-    parts = _build_part_lookup(scene_objects, objects_runtime)
+    parts = _build_part_lookup(scene_objects, parts_runtime)
 
     out: list[ResolvedConstraint] = []
     for i, c in enumerate(scene.constraints):

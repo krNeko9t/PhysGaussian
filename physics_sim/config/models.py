@@ -375,13 +375,3 @@ class SimConfig(BaseModel):
     camera: CameraConfig = Field(default_factory=CameraConfig)
     scene: "SceneConfig"
     boundary_conditions: list[BoundaryCondition] = Field(default_factory=list)
-
-    def as_scene(self) -> "SceneConfig":
-        """Return the scene configuration (identity for now).
-
-        Historically this method also accepted a legacy ``objects`` list
-        and upgraded it to a SceneConfig; both have been removed, but the
-        method is kept so call sites (``assembler.py``, ``scene_setup.py``)
-        don't have to special-case the transition.
-        """
-        return self.scene

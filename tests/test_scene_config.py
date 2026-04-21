@@ -169,7 +169,8 @@ def test_simconfig_requires_scene():
 
 def test_simconfig_scene_ok():
     cfg = SimConfig(backend=NewtonVBDConfig(), scene=_tiny_scene())
-    assert cfg.as_scene() is cfg.scene
+    assert cfg.scene is not None
+    assert [p.name for p in cfg.scene.parts] == ["soft"]
 
 
 def test_vbd_rigid_body_kinematic_field_default_false():

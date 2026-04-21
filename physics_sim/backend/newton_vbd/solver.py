@@ -244,7 +244,7 @@ class NewtonVBDBackend(PhysicsBackend):
         setup = self._require_setup("set_material")
         setup.gravity = tuple(float(x) for x in spec.gravity)
 
-        if not spec.per_object:
+        if not spec.per_part:
             # No per-object definitions → single default rigid body.
             base_cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.5)
             self._create_rigid_body(
@@ -255,7 +255,7 @@ class NewtonVBDBackend(PhysicsBackend):
             )
             return
 
-        for info in spec.per_object:
+        for info in spec.per_part:
             material = info.material
             if not isinstance(material, VBDMaterial):
                 detail = (
@@ -432,14 +432,18 @@ class NewtonVBDBackend(PhysicsBackend):
                             "VBDMaterial part"
                         ),
                     )
+                # CollideOnly semantically = "this body only participates as a
+                # collider, not under dynamics".  Force-zero its mass/inertia
+                # post-finalize so the user doesn't need to also flip
+                # VBDRigidBody.kinematic=True.  (The kinematic flag remains
+                # available for bodies that must be kinematic independent of
+                # any constraint — e.g. externally driven via body_q.)
                 if not info.kinematic:
-                    raise configuration_error(
-                        owner="newton_vbd",
-                        operation="apply_constraints",
-                        expected=(
-                            f"CollideOnly part '{c.part_name}' must have "
-                            "VBDRigidBody.kinematic=True to stay fixed"
-                        ),
+                    self._zero_body_mass(rt, info.body_idx)
+                    info.kinematic = True
+                    LOGGER.info(
+                        "[NewtonVBD] CollideOnly '%s' → auto-kinematized "
+                        "(body_inv_mass=0)", c.part_name,
                     )
                 continue
 
@@ -586,6 +590,23 @@ class NewtonVBDBackend(PhysicsBackend):
         LOGGER.info(
             "[NewtonVBD] Froze %d tet vertices (mass=0)", int(vert_indices.size),
         )
+
+    def _zero_body_mass(self, rt: _Runtime, body_idx: int) -> None:
+        """Post-finalize: zero mass/inertia of a body to make it kinematic.
+
+        Used by CollideOnly's apply_constraints branch so users don't need
+        to also flip VBDRigidBody.kinematic=True at config time.
+        """
+        for name in ("body_mass", "body_inv_mass"):
+            arr = getattr(rt.model, name)
+            a_np = arr.numpy()
+            a_np[body_idx] = 0.0
+            setattr(rt.model, name, wp.array(a_np, dtype=float, device=self._device))
+        for name in ("body_inertia", "body_inv_inertia"):
+            arr = getattr(rt.model, name)
+            a_np = arr.numpy()
+            a_np[body_idx] = np.zeros((3, 3), dtype=a_np.dtype)
+            setattr(rt.model, name, wp.array(a_np, dtype=wp.mat33, device=self._device))
 
     def get_state(self) -> SimulationState:
         rt = self._require_runtime("get_state")

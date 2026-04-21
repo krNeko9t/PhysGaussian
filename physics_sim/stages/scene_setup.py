@@ -13,7 +13,7 @@ from typing import Optional
 
 import torch
 
-from physics_sim.backend.spec import ObjectRuntimeInfo
+from physics_sim.backend.spec import PartRuntimeInfo
 from physics_sim.config.models import SimConfig
 from physics_sim.coord import SourceAxes
 from physics_sim.render.interfaces import SceneAssetLoader
@@ -28,7 +28,7 @@ from physics_sim.scene import SceneObject, assemble_scene
 __all__ = [
     "CoordContext",
     "DynamicSceneInit",
-    "ObjectRuntimeInfo",
+    "PartRuntimeInfo",
     "RenderSetup",
     "SceneData",
     "StaticRenderChunk",
@@ -103,7 +103,7 @@ class SceneData:
     gs_type: str
     gs_num: int
 
-    objects_runtime: list[ObjectRuntimeInfo]
+    parts_runtime: list[PartRuntimeInfo]
     dynamic_init: DynamicSceneInit
     static_render: Optional[StaticRenderChunk]
     render_setup: RenderSetup
@@ -121,7 +121,7 @@ def _estimate_volumes(pos: torch.Tensor, n_grid: int) -> torch.Tensor:
     return torch.full((pos.shape[0],), float(dx ** 3), device=pos.device)
 
 
-def _build_objects_runtime(sim_objects: list[SceneObject]) -> list[ObjectRuntimeInfo]:
+def _build_parts_runtime(sim_objects: list[SceneObject]) -> list[PartRuntimeInfo]:
     info = []
     offset = 0
     for obj in sim_objects:
@@ -131,7 +131,7 @@ def _build_objects_runtime(sim_objects: list[SceneObject]) -> list[ObjectRuntime
                 "dynamic objects require a MaterialSpec"
             )
         n = obj.n_particles
-        info.append(ObjectRuntimeInfo(
+        info.append(PartRuntimeInfo(
             name=obj.name,
             particle_indices=list(range(offset, offset + n)),
             material=obj.material,
@@ -256,17 +256,17 @@ def setup_scene(
 
     if sim_objects:
         dynamic_init = _build_dynamic_init(sim_objects, device, n_grid)
-        objects_runtime = _build_objects_runtime(sim_objects)
+        parts_runtime = _build_parts_runtime(sim_objects)
     else:
         dynamic_init = _empty_dynamic_init(device, sh_degree, sh_channels)
-        objects_runtime = []
+        parts_runtime = []
 
     # Resolve scene-graph constraints into concrete particle-index sets.
-    scene = cfg.as_scene()
+    scene = cfg.scene
     resolved_constraints = resolve_constraints(
         scene=scene,
         scene_objects=objects,
-        objects_runtime=objects_runtime,
+        parts_runtime=parts_runtime,
     )
 
     # Static chunks: render_only objects + collider_only objects that render
@@ -289,7 +289,7 @@ def setup_scene(
         collider_objects=collider_objects,
         gs_type=gs_type,
         gs_num=dynamic_init.n_particles,
-        objects_runtime=objects_runtime,
+        parts_runtime=parts_runtime,
         resolved_constraints=resolved_constraints,
         dynamic_init=dynamic_init,
         static_render=static_render,

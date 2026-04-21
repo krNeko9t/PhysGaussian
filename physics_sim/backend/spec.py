@@ -14,10 +14,10 @@ from physics_sim.config.models import MaterialSpec
 
 
 @dataclass
-class ObjectRuntimeInfo:
-    """Per-object runtime descriptor.
+class PartRuntimeInfo:
+    """Per-part runtime descriptor.
 
-    Single source of truth for downstream "by-object" lookups.
+    Single source of truth for downstream "by-part" lookups.
     ``particle_indices`` is a contiguous range built from the concatenation
     order of ``sim_objects`` in ``DynamicSceneInit``.
     """
@@ -25,11 +25,6 @@ class ObjectRuntimeInfo:
     particle_indices: list[int]
     material: MaterialSpec
     initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
-
-
-# New preferred name for the same type; kept as an alias until the
-# ``SimConfig.objects`` legacy path is removed (Phase I).
-PartRuntimeInfo = ObjectRuntimeInfo
 
 
 @dataclass
@@ -41,4 +36,4 @@ class MaterialSetupSpec:
     ``BackendConfig`` and are consumed directly at backend construction.
     """
     gravity: tuple[float, float, float]
-    per_object: list[ObjectRuntimeInfo] = field(default_factory=list)
+    per_part: list[PartRuntimeInfo] = field(default_factory=list)

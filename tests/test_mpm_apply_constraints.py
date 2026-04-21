@@ -16,7 +16,7 @@ wp = pytest.importorskip("warp")
 newton = pytest.importorskip("newton")
 
 from physics_sim.backend.newton_mpm.solver import NewtonMPMBackend  # noqa: E402
-from physics_sim.backend.spec import MaterialSetupSpec, ObjectRuntimeInfo  # noqa: E402
+from physics_sim.backend.spec import MaterialSetupSpec, PartRuntimeInfo  # noqa: E402
 from physics_sim.config.models import NewtonMPMConfig, MPMMaterial  # noqa: E402
 from physics_sim.scene.constraint_resolver import (  # noqa: E402
     ResolvedCollideOnly, ResolvedPinToBody, ResolvedPinToWorld,
@@ -36,7 +36,7 @@ def _make_mpm_backend(n_side: int = 4) -> tuple[NewtonMPMBackend, np.ndarray]:
     be.initialize(positions, volumes, covariances)
     be.set_material(MaterialSetupSpec(
         gravity=(0.0, -9.8, 0.0),
-        per_object=[ObjectRuntimeInfo(
+        per_part=[PartRuntimeInfo(
             name="blob",
             particle_indices=list(range(positions.shape[0])),
             material=MPMMaterial.jelly(),

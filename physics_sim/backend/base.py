@@ -96,21 +96,15 @@ class PhysicsBackend(ABC):
         """Translate scene-graph constraints into backend-specific setup.
 
         Called once after :meth:`finalize` and before the first :meth:`step`.
-        Default implementation accepts ``ResolvedCollideOnly`` silently
-        (its semantics overlap with the legacy ``collider_objects`` list
-        that every backend already consumes via set_boundary_conditions).
-        Any other constraint kind raises NotImplementedError.
+        Default raises for any non-empty constraint list: every backend
+        that declares itself capable of a given constraint kind must
+        override this method.  An empty list is a no-op.
         """
-        from physics_sim.scene.constraint_resolver import ResolvedCollideOnly
-
-        unsupported = [
-            type(c).__name__ for c in constraints
-            if not isinstance(c, ResolvedCollideOnly)
-        ]
-        if unsupported:
+        if constraints:
+            names = sorted({type(c).__name__ for c in constraints})
             raise NotImplementedError(
-                f"{type(self).__name__} received constraints {sorted(set(unsupported))} "
-                "but does not implement apply_constraints()"
+                f"{type(self).__name__} received constraints {names} but does "
+                "not override apply_constraints()"
             )
 
     def pre_step(self, dt: float, frame: int) -> None:
