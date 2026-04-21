@@ -24,6 +24,7 @@ from typing import Sequence, Union
 
 import numpy as np
 import torch
+from scipy.spatial import cKDTree
 
 from physics_sim.config.scene import (
     BoxSelector,
@@ -110,13 +111,14 @@ def _resolve_selector(
         ref = parts[selector.to_surface_of].positions
         if src.size == 0 or ref.size == 0:
             return np.zeros(0, dtype=np.int64)
-        # Min distance from each src point to any ref point (brute O(N*M)).
-        # For large scenes we'd want a KD-tree; fine for current scale.
-        d2 = np.sum(
-            (src[:, None, :] - ref[None, :, :]) ** 2, axis=2,
-        )  # (N_src, N_ref)
-        min_d = np.sqrt(d2.min(axis=1))
-        return np.nonzero(min_d <= selector.max_distance)[0].astype(np.int64)
+        # KD-tree: for each src point, find its nearest ref neighbour in
+        # O(log M) rather than O(M).  Points with no neighbour within
+        # ``max_distance`` come back with distance = +inf.
+        tree = cKDTree(ref)
+        dists, _ = tree.query(
+            src, k=1, distance_upper_bound=float(selector.max_distance),
+        )
+        return np.nonzero(np.isfinite(dists))[0].astype(np.int64)
 
     if isinstance(selector, BoxSelector):
         if selector.space != "world":

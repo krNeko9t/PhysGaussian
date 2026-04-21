@@ -259,3 +259,38 @@ def test_selector_on_collider_only_part_rejected(pot_and_branches):
     )
     with pytest.raises(ValueError, match="not a simulated part"):
         resolve_constraints(scene, scene_objects, objs_runtime)
+
+
+# ── Scale / performance regression ─────────────────────────────────
+
+def test_proximity_selector_scales_to_hundred_thousand_points():
+    """Regression guard: O(N*M) brute force on this size would timeout /
+    blow memory.  With cKDTree it should finish in well under a second."""
+    import time
+    rng = np.random.default_rng(0)
+    n_src, n_ref = 100_000, 50_000
+    src = rng.random((n_src, 3)) * 10.0
+    # Reference cloud near origin: any src within 0.5 of origin should match.
+    ref = rng.random((n_ref, 3)) * 0.5
+    scene_objects = [
+        _FakeSceneObject("src", src),
+        _FakeSceneObject("ref", ref),
+    ]
+    objs_runtime = [_FakeRuntimeInfo("src", list(range(n_src)))]
+    scene = SceneConfig(
+        parts=[
+            PartConfig(name="src", source=PlySource(ply_path="a.ply"),
+                       material=VBDMaterial(body=VBDSoftBody())),
+            PartConfig(name="ref", source=PlySource(ply_path="b.ply")),
+        ],
+        constraints=[PinToWorld(particles=ProximitySelector(
+            part="src", to_surface_of="ref", max_distance=0.1,
+        ))],
+    )
+    t0 = time.perf_counter()
+    resolved = resolve_constraints(scene, scene_objects, objs_runtime)
+    dt = time.perf_counter() - t0
+    # On CI (no GPU, modest CPU) this should be <1s.  Brute force on this
+    # size would allocate a ~40 GB matrix and never finish.
+    assert dt < 5.0, f"ProximitySelector took {dt:.2f}s — did it regress to brute force?"
+    assert resolved[0].particle_indices.size > 0

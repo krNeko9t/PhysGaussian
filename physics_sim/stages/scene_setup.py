@@ -104,11 +104,11 @@ class SceneData:
     gs_num: int
 
     objects_runtime: list[ObjectRuntimeInfo]
-    resolved_constraints: list[ResolvedConstraint]
     dynamic_init: DynamicSceneInit
     static_render: Optional[StaticRenderChunk]
     render_setup: RenderSetup
     coord: CoordContext
+    resolved_constraints: list[ResolvedConstraint] = field(default_factory=list)
 
 
 def _estimate_volumes(pos: torch.Tensor, n_grid: int) -> torch.Tensor:

@@ -520,13 +520,15 @@ class NewtonVBDBackend(PhysicsBackend):
         consumed: set[int] = set()
 
         for soft in rt.soft_bodies:
-            soft_gs = set(int(i) for i in soft.particle_indices)
-            hit = sorted(gs_set & soft_gs)
+            # Build one dict per soft body: gs_index -> local_pos (O(N) total).
+            # Previously we did `soft.particle_indices.index(gi)` per hit,
+            # which is O(N*M) and blew up on alocasia-scale clouds.
+            gi_to_local = {int(gi): lp for lp, gi in enumerate(soft.particle_indices)}
+            hit = [gi for gi in gs_set if gi in gi_to_local]
             if not hit:
                 continue
-            # index into the soft body's per-particle arrays
-            local_pos = [soft.particle_indices.index(gi) for gi in hit]
-            for lp in local_pos:
+            for gi in hit:
+                lp = gi_to_local[gi]
                 tet_id = int(soft.tet_ids[lp])
                 for v in soft.tet_cells[tet_id]:
                     tet_vert_ids.add(int(v) + soft.vert_offset)
