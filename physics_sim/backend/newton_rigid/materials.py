@@ -7,8 +7,8 @@ from typing import Any
 
 import newton
 
+from physics_sim.backend.spec import ObjectRuntimeInfo
 from physics_sim.config.models import RigidMaterial
-from physics_sim.coord import E_GRAVITY_MISSING, gravity_contract_error, normalize_internal_gravity
 from physics_sim.errors import configuration_error
 
 
@@ -20,30 +20,6 @@ class BodySpec:
     name: str
     material: RigidMaterial
     initial_velocity: tuple[float, float, float] | None = None
-
-
-def resolve_gravity(material_params: dict[str, Any]) -> tuple[float, float, float]:
-    if "g" not in material_params:
-        raise gravity_contract_error(
-            E_GRAVITY_MISSING,
-            backend="newton_rigid",
-            config_path="material.g",
-            detail="set_material() missing required gravity vector",
-            suggestion="pass g as [0, -|g|, 0], usually from backend_init._resolve_gravity",
-        )
-    return normalize_internal_gravity(
-        material_params.get("g"),
-        backend="newton_rigid",
-        config_path="material.g",
-        allow_scalar=False,
-    )
-
-
-def resolve_solver_options(material_params: dict[str, Any]) -> tuple[int, float]:
-    solver_opts = material_params.get("newton_solver_opts", {})
-    iterations = int(solver_opts.get("iterations", 10))
-    relaxation = float(solver_opts.get("contact_relaxation", 0.8))
-    return iterations, relaxation
 
 
 def build_body_shape_config(
@@ -69,12 +45,11 @@ def build_body_shape_config(
 
 
 def iter_body_specs(
-    material_params: dict[str, Any],
     *,
+    per_object: list[ObjectRuntimeInfo],
     n_particles: int,
 ) -> list[BodySpec]:
-    per_object = material_params.get("per_object")
-    if per_object is None:
+    if not per_object:
         # Empty per_object → single body covering all particles with default material.
         return [
             BodySpec(
@@ -83,15 +58,6 @@ def iter_body_specs(
                 material=RigidMaterial(),
             )
         ]
-
-    if not isinstance(per_object, list):
-        detail = f"per_object_type={type(per_object).__name__}"
-        raise configuration_error(
-            owner="newton_rigid",
-            operation="set_material",
-            expected="material.per_object must be a list",
-            detail=detail,
-        )
 
     specs: list[BodySpec] = []
     for info in per_object:
@@ -104,10 +70,10 @@ def iter_body_specs(
                 expected="newton_rigid requires RigidMaterial per object",
                 detail=detail,
             )
-        initial_velocity = info.initial_velocity
-        iv = tuple(float(v) for v in initial_velocity) if any(
-            float(v) != 0.0 for v in initial_velocity
-        ) else None
+        iv_raw = info.initial_velocity
+        iv: tuple[float, float, float] | None = None
+        if any(float(v) != 0.0 for v in iv_raw):
+            iv = (float(iv_raw[0]), float(iv_raw[1]), float(iv_raw[2]))
         specs.append(
             BodySpec(
                 particle_indices=list(info.particle_indices),

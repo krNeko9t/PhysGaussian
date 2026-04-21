@@ -8,7 +8,11 @@ and return SimulationState from get_state().
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
+
 import torch
+
+from physics_sim.backend.spec import MaterialSetupSpec
+from physics_sim.config.models import BoundaryCondition, TimeConfig
 
 
 @dataclass
@@ -31,7 +35,13 @@ class SimulationState:
 
 
 class PhysicsBackend(ABC):
-    """Interface that every physics backend must implement."""
+    """Interface that every physics backend must implement.
+
+    Solver numerical options (``n_grid``, ``grid_lim``,
+    ``solver_iterations``, etc.) are consumed directly from the typed
+    ``BackendConfig`` passed to each backend's constructor — they do not
+    flow through this interface.
+    """
 
     @abstractmethod
     def initialize(
@@ -39,25 +49,27 @@ class PhysicsBackend(ABC):
         positions: torch.Tensor,
         volumes: torch.Tensor,
         covariances: torch.Tensor,
-        **kwargs,
+        *,
+        init_quats: Optional[torch.Tensor] = None,
+        init_scales: Optional[torch.Tensor] = None,
     ) -> None:
         """Load initial particle data into the backend.
 
-        Args:
-            positions:   (N, 3) initial particle positions.
-            volumes:     (N,)   per-particle volumes.
-            covariances: (N, 6) upper-triangle covariance matrices.
-            **kwargs:    backend-specific options (e.g. n_grid, grid_lim).
+        ``init_quats`` / ``init_scales`` are only used by 2DGS scenes.
         """
         ...
 
     @abstractmethod
-    def set_material(self, material_params: dict) -> None:
-        """Configure material parameters (Young's modulus, Poisson ratio, etc.)."""
+    def set_material(self, spec: MaterialSetupSpec) -> None:
+        """Configure gravity and per-object material parameters."""
         ...
 
     @abstractmethod
-    def set_boundary_conditions(self, bc_params: list, time_params: dict) -> None:
+    def set_boundary_conditions(
+        self,
+        bcs: list[BoundaryCondition],
+        time: TimeConfig,
+    ) -> None:
         """Register boundary conditions for the simulation."""
         ...
 
@@ -84,9 +96,5 @@ class PhysicsBackend(ABC):
         ...
 
     def get_diagnostics(self) -> Optional[dict]:
-        """Optional diagnostics hook consumed by the stage loop.
-
-        Backends that do not expose runtime diagnostics should keep
-        the default ``None`` implementation.
-        """
+        """Optional diagnostics hook consumed by the stage loop."""
         return None

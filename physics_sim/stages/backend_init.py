@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from physics_sim.backend.registry import create_backend
+from physics_sim.backend.spec import MaterialSetupSpec, ObjectRuntimeInfo
 from physics_sim.config.models import SimConfig
 from physics_sim.coord import (
     E_GRAVITY_SHAPE,
@@ -30,16 +31,16 @@ from physics_sim.stages.boundary_normalization import normalize_boundary_conditi
 
 if TYPE_CHECKING:
     from physics_sim.backend.base import PhysicsBackend
-    from physics_sim.stages.scene_setup import ObjectRuntimeInfo, SceneData
+    from physics_sim.stages.scene_setup import SceneData
 
 LOGGER = get_logger(__name__)
 
 
-def _resolve_gravity(objects_runtime: list[ObjectRuntimeInfo]) -> list[float]:
+def _resolve_gravity(objects_runtime: list[ObjectRuntimeInfo]) -> tuple[float, float, float]:
     """Read ``g_magnitude`` from the first dynamic object and form ``[0, -g, 0]``."""
     default_magnitude = 9.8
     if not objects_runtime:
-        return gravity_vector(default_magnitude, device="cpu").tolist()
+        return tuple(gravity_vector(default_magnitude, device="cpu").tolist())
 
     info = objects_runtime[0]
     magnitude = abs(float(info.material.g_magnitude))
@@ -53,42 +54,7 @@ def _resolve_gravity(objects_runtime: list[ObjectRuntimeInfo]) -> list[float]:
             detail="g_magnitude must be finite",
             suggestion="set g_magnitude to a finite number, e.g. 9.8",
         )
-    return gravity_vector(magnitude, device="cpu").tolist()
-
-
-def _build_material_params(cfg: SimConfig, scene_data: SceneData) -> dict:
-    backend_cfg = cfg.backend
-    params: dict = {}
-    params.setdefault("n_grid", getattr(backend_cfg, "n_grid", 200))
-    params.setdefault("grid_lim", getattr(backend_cfg, "grid_lim", 2.0))
-
-    if hasattr(backend_cfg, "solver_iterations") and backend_cfg.solver_iterations is not None:
-        params["newton_solver_opts"] = {"iterations": backend_cfg.solver_iterations}
-        if hasattr(backend_cfg, "contact_relaxation"):
-            params["newton_solver_opts"]["contact_relaxation"] = backend_cfg.contact_relaxation
-
-    if scene_data.objects_runtime:
-        params["per_object"] = list(scene_data.objects_runtime)
-
-    # Gravity is normalized exactly once at stage boundary.
-    params["g"] = _resolve_gravity(scene_data.objects_runtime)
-    return params
-
-
-def _collect_raw_boundary_conditions(cfg: SimConfig) -> list[dict]:
-    raw: list[dict] = []
-    for bc in cfg.boundary_conditions:
-        raw.append(bc.model_dump() if hasattr(bc, "model_dump") else dict(bc))
-    return raw
-
-
-def _build_time_params(cfg: SimConfig) -> dict[str, float | int]:
-    tc = cfg.time
-    return {
-        "substep_dt": tc.substep_dt,
-        "frame_dt": tc.frame_dt,
-        "frame_num": tc.frame_num,
-    }
+    return tuple(gravity_vector(magnitude, device="cpu").tolist())
 
 
 def init_backend(
@@ -97,35 +63,34 @@ def init_backend(
     device: str = "cuda:0",
 ) -> PhysicsBackend:
     """Create, configure, and finalize the physics backend."""
-    backend_cfg = cfg.backend
-    bt = backend_cfg.type
+    bt = cfg.backend.type
     LOGGER.info("Initialising backend: %s", bt)
-    backend = create_backend(backend_cfg, device=device)
+    backend = create_backend(cfg.backend, device=device)
 
-    init_kwargs = backend_cfg.model_dump(exclude={"type"}, exclude_none=True)
     dyn = scene_data.dynamic_init
-    if scene_data.gs_type == "2dgs" and scene_data.gs_num > 0:
-        init_kwargs["init_quats"] = dyn.quats
-        init_kwargs["init_scales"] = dyn.scales
     if scene_data.gs_num > 0:
+        init_quats = dyn.quats if scene_data.gs_type == "2dgs" else None
+        init_scales = dyn.scales if scene_data.gs_type == "2dgs" else None
         backend.initialize(
             dyn.pos,
             dyn.vol,
             dyn.cov,
-            **init_kwargs,
+            init_quats=init_quats,
+            init_scales=init_scales,
         )
 
-    material_params = _build_material_params(cfg, scene_data)
-    backend.set_material(material_params)
+    material_spec = MaterialSetupSpec(
+        gravity=_resolve_gravity(scene_data.objects_runtime),
+        per_object=list(scene_data.objects_runtime),
+    )
+    backend.set_material(material_spec)
 
-    raw_bc = _collect_raw_boundary_conditions(cfg)
-    normalized_bc = normalize_boundary_conditions(
-        raw_boundary_conditions=raw_bc,
+    normalized_bcs = normalize_boundary_conditions(
+        raw_boundary_conditions=list(cfg.boundary_conditions),
         collider_objects=scene_data.collider_objects,
         source_axes=scene_data.coord.source_axes,
     )
-    backend.set_boundary_conditions(normalized_bc, _build_time_params(cfg))
+    backend.set_boundary_conditions(normalized_bcs, cfg.time)
     backend.finalize()
 
     return backend
-

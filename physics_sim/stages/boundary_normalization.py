@@ -1,7 +1,10 @@
 """Boundary-condition normalization at stage boundary.
 
 This module converts all user/collider boundary conditions into the
-internal coordinate contract consumed by backends.
+internal coordinate contract consumed by backends. Inputs and outputs
+are typed Pydantic ``BoundaryCondition`` instances; after normalization
+``SurfaceCollider.space`` is ``"internal"`` and ``point``/``normal`` are
+expressed in the internal Y-up frame.
 """
 
 from __future__ import annotations
@@ -11,6 +14,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from physics_sim.config.models import (
+    BoundaryCondition,
+    SurfaceCollider,
+)
 from physics_sim.coord import SourceAxes, align_directions, align_positions
 from physics_sim.geometry.plane_fit import fit_plane_svd
 from physics_sim.logging_utils import get_logger
@@ -18,23 +25,27 @@ from physics_sim.logging_utils import get_logger
 LOGGER = get_logger(__name__)
 
 
-def _to_internal_surface_collider(bc: dict[str, Any], source_axes: SourceAxes) -> dict[str, Any]:
-    """Convert one surface_collider BC to internal coordinates."""
-    converted = dict(bc)
-    point_src = torch.tensor(bc["point"], device="cuda", dtype=torch.float32).reshape(1, 3)
-    normal_src = torch.tensor(bc["normal"], device="cuda", dtype=torch.float32).reshape(1, 3)
+def _transform_surface_collider(
+    bc: SurfaceCollider, source_axes: SourceAxes,
+) -> SurfaceCollider:
+    """Transform a world-space surface_collider to internal coordinates."""
+    point_src = torch.tensor(bc.point, device="cuda", dtype=torch.float32).reshape(1, 3)
+    normal_src = torch.tensor(bc.normal, device="cuda", dtype=torch.float32).reshape(1, 3)
     point_int = align_positions(point_src, source_axes)[0]
     normal_int = align_directions(normal_src, source_axes)[0]
     normal_int = normal_int / (torch.norm(normal_int) + 1e-12)
-    converted["point"] = [float(x) for x in point_int.cpu().tolist()]
-    converted["normal"] = [float(x) for x in normal_int.cpu().tolist()]
-    converted.pop("space", None)
-    return converted
+    return bc.model_copy(update={
+        "point": tuple(float(x) for x in point_int.cpu().tolist()),
+        "normal": tuple(float(x) for x in normal_int.cpu().tolist()),
+        "space": "internal",
+    })
 
 
-def resolve_collider_boundary_conditions(collider_objects, source_axes: SourceAxes) -> list[dict[str, Any]]:
+def resolve_collider_boundary_conditions(
+    collider_objects, source_axes: SourceAxes,
+) -> list[BoundaryCondition]:
     """Convert collider_only objects into normalized internal BCs."""
-    bc_list: list[dict[str, Any]] = []
+    bc_list: list[BoundaryCondition] = []
     for obj in collider_objects:
         col = obj.collider
         if col is None:
@@ -47,27 +58,17 @@ def resolve_collider_boundary_conditions(collider_objects, source_axes: SourceAx
                 f"(got {col.type!r})"
             )
 
-        surface = col.surface
-        friction = float(col.friction)
-        start_time = col.start_time
-        end_time = col.end_time
-
         if col.point is not None and col.normal is not None:
-            bc_list.append(
-                _to_internal_surface_collider(
-                    {
-                        "type": "surface_collider",
-                        "space": "world",
-                        "point": list(col.point),
-                        "normal": list(col.normal),
-                        "surface": surface,
-                        "friction": friction,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                    },
-                    source_axes=source_axes,
-                )
+            world_bc = SurfaceCollider(
+                point=col.point,
+                normal=col.normal,
+                surface=col.surface,
+                friction=float(col.friction),
+                space="world",
+                start_time=col.start_time,
+                end_time=col.end_time,
             )
+            bc_list.append(_transform_surface_collider(world_bc, source_axes))
             continue
 
         pts = obj.positions.detach().cpu().numpy()
@@ -99,42 +100,43 @@ def resolve_collider_boundary_conditions(collider_objects, source_axes: SourceAx
             res.normal.tolist(),
         )
         bc_list.append(
-            {
-                "type": "surface_collider",
-                "point": res.point.tolist(),
-                "normal": res.normal.tolist(),
-                "surface": surface,
-                "friction": friction,
-                "start_time": start_time,
-                "end_time": end_time,
-            }
+            SurfaceCollider(
+                point=tuple(float(x) for x in res.point.tolist()),
+                normal=tuple(float(x) for x in res.normal.tolist()),
+                surface=col.surface,
+                friction=float(col.friction),
+                space="internal",
+                start_time=col.start_time,
+                end_time=col.end_time,
+            )
         )
     return bc_list
 
 
 def normalize_boundary_conditions(
     *,
-    raw_boundary_conditions: list[dict[str, Any]],
+    raw_boundary_conditions: list[BoundaryCondition],
     collider_objects,
     source_axes: SourceAxes,
-) -> list[dict[str, Any]]:
-    """Normalize user BCs and collider BCs into one internal-only BC list."""
-    merged = [dict(bc) for bc in raw_boundary_conditions]
-    merged.extend(resolve_collider_boundary_conditions(collider_objects, source_axes))
+) -> list[BoundaryCondition]:
+    """Normalize user BCs and collider BCs into one internal-only BC list.
 
-    normalized: list[dict[str, Any]] = []
-    for bc in merged:
-        space = bc.get("space", "")
-        if space == "world" and bc.get("type") == "surface_collider":
-            normalized.append(_to_internal_surface_collider(bc, source_axes))
-            continue
-        if space in ("internal", ""):
-            cleaned = dict(bc)
-            cleaned.pop("space", None)
-            normalized.append(cleaned)
-            continue
-        raise ValueError(
-            f"unsupported boundary space={space!r} for type={bc.get('type')!r}; "
-            "expected 'world' or 'internal'"
-        )
+    After this call:
+    - ``SurfaceCollider`` entries have ``space="internal"`` and their
+      ``point``/``normal`` expressed in the internal Y-up frame.
+    - ``BoundingBox`` / ``ReleaseParticlesSequentially`` pass through
+      unchanged (no spatial coordinates on BoundingBox; release params
+      are already in the internal convention).
+    """
+    normalized: list[BoundaryCondition] = []
+    for bc in raw_boundary_conditions:
+        if isinstance(bc, SurfaceCollider):
+            if bc.space == "world":
+                normalized.append(_transform_surface_collider(bc, source_axes))
+            else:
+                normalized.append(bc)
+        else:
+            normalized.append(bc)
+
+    normalized.extend(resolve_collider_boundary_conditions(collider_objects, source_axes))
     return normalized

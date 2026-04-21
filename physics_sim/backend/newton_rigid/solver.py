@@ -7,17 +7,21 @@ gravity, contacts, and friction.  ``get_state()`` broadcasts each body's
 rigid transform (R, t) to all of its Gaussians.
 
 Lifecycle (called by the pipeline):
-    initialize  → store particles, create ModelBuilder
-    set_material → create bodies + shapes per object, set gravity
-    set_boundary_conditions → add ground planes / walls
-    finalize    → finalize model, create solver + states + collision pipeline
-    step        → clear forces, collide, solver step, swap states
-    get_state   → apply rigid transforms to original particles → SimulationState
+    initialize  → construct ``_Setup`` (builder + particle data)
+    set_material → fill setup.bodies + setup.gravity
+    set_boundary_conditions → fill setup.plane_equations
+    finalize    → drain ``_Setup`` into ``_Runtime`` (model/solver/states);
+                  initial_velocity is consumed once here and discarded.
+    step/get_state → operate on ``_Runtime`` only
+
+Phase C decomposition (option α): the backend class holds a mutable
+``_Setup`` while being configured and, after ``finalize()``, a
+``_Runtime`` with only the fields required for stepping / diagnostics.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -35,10 +39,15 @@ from physics_sim.backend.newton_rigid.collider_builders import (
 from physics_sim.backend.newton_rigid.materials import (
     build_body_shape_config,
     iter_body_specs,
-    resolve_gravity,
-    resolve_solver_options,
 )
 from physics_sim.backend.newton_rigid.state_export import export_rigid_state
+from physics_sim.backend.spec import MaterialSetupSpec
+from physics_sim.config.models import (
+    BoundaryCondition,
+    BoundingBox,
+    NewtonRigidConfig,
+    TimeConfig,
+)
 from physics_sim.errors import configuration_error, lifecycle_error
 from physics_sim.logging_utils import get_logger
 
@@ -56,65 +65,93 @@ class _BodyInfo:
     particle_indices: list[int]
     init_local_pos: torch.Tensor  # (N, 3) positions in body-local frame
     init_cov_3x3: torch.Tensor   # (N, 3, 3) initial covariances
-    initial_velocity: Optional[tuple[float, float, float]] = None  # linear velocity [vx, vy, vz]
+    initial_velocity: Optional[tuple[float, float, float]] = None
     init_quats: Optional[torch.Tensor] = None   # (N, 4) wxyz — for 2DGS
     init_scales: Optional[torch.Tensor] = None   # (N, 2|3) — for 2DGS
+
+
+# ── Setup / Runtime state containers ─────────────────────────────────────
+
+
+@dataclass
+class _Setup:
+    """Mutable configuration-phase state (``initialize`` → ``finalize``)."""
+
+    builder: newton.ModelBuilder
+    init_positions: torch.Tensor
+    init_covariances: torch.Tensor
+    init_quats: Optional[torch.Tensor]
+    init_scales: Optional[torch.Tensor]
+    n_particles: int
+    bbox_lo: np.ndarray
+    bbox_hi: np.ndarray
+    bodies: list[_BodyInfo] = field(default_factory=list)
+    gravity: Optional[tuple[float, float, float]] = None
+    plane_equations: list[tuple[list[float], float]] = field(default_factory=list)
+
+
+@dataclass
+class _Runtime:
+    """Immutable-layout runtime state produced by ``finalize``."""
+
+    model: "newton.Model"
+    solver: SolverXPBD
+    state_0: "newton.State"
+    state_1: "newton.State"
+    control: "newton.Control"
+    collision_pipeline: "newton.CollisionPipeline"
+    contacts: object
+    bodies: list[_BodyInfo]
+    plane_equations: list[tuple[list[float], float]]
+    n_particles: int
+    init_scales: Optional[torch.Tensor]
+    has_init_quats: bool
+    last_valid_body_q: Optional[np.ndarray] = None
 
 
 # ── Backend ──────────────────────────────────────────────────────────────
 
 
 class NewtonRigidBackend(PhysicsBackend):
-    """Newton XPBD rigid-body physics backend for 3DGS scenes.
+    """Newton XPBD rigid-body physics backend for 3DGS scenes."""
 
-    Each object becomes a separate rigid body with a convex-hull
-    collision shape.  Gravity, ground planes, and inter-body contacts
-    are handled by Newton's XPBD solver.
-    """
-
-    def __init__(self, device: str = "cuda:0"):
+    def __init__(self, *, cfg: NewtonRigidConfig, device: str = "cuda:0"):
+        self._cfg = cfg
         self._device = device
-        self._builder: Optional[newton.ModelBuilder] = None
-        self._model = None
-        self._solver = None
-        self._state_0 = None
-        self._state_1 = None
-        self._control = None
-        self._collision_pipeline = None
-        self._contacts = None
+        self._setup: Optional[_Setup] = None
+        self._runtime: Optional[_Runtime] = None
 
-        # Particle data
-        self._init_positions: Optional[torch.Tensor] = None
-        self._init_covariances: Optional[torch.Tensor] = None
-        self._n_particles: int = 0
+        # Cfg-derived constants consumed at setup time.
+        self._solver_iterations: int = int(cfg.solver_iterations)
+        self._solver_relaxation: float = float(cfg.contact_relaxation)
+        self._collision_geo = normalize_collision_geo(cfg.collision_geometry)
+        self._use_sdf = bool(cfg.use_sdf)
+        self._sdf_resolution = int(cfg.sdf_resolution)
+        self._sdf_narrow_band: tuple[float, float] = (-0.01, 0.01)
+        self._alpha: float | None = None
+        self._max_triangles: int = 300
 
-        # Per-body info
-        self._bodies: list[_BodyInfo] = []
+    # ── Lifecycle helpers ────────────────────────────────────────────
 
-        # Freeze-on-divergence: last valid body poses
-        self._last_valid_body_q: Optional[np.ndarray] = None
-
-        # Deferred configuration
-        self._gravity: tuple[float, float, float] | None = None
-        self._solver_iterations: int = 10
-        self._solver_relaxation: float = 0.8
-
-        # Recorded plane equations for diagnostics: list of (normal_3, d)
-        self._plane_equations: list[tuple[list[float], float]] = []
-        self._bbox_lo: np.ndarray | None = None
-        self._bbox_hi: np.ndarray | None = None
-
-    # ── PhysicsBackend interface ─────────────────────────────────────
-
-    def _require_builder(self, operation: str) -> newton.ModelBuilder:
-        builder = self._builder
-        if builder is None:
+    def _require_setup(self, operation: str) -> _Setup:
+        if self._setup is None:
             raise lifecycle_error(
                 owner="newton_rigid",
                 operation=operation,
                 expected="initialize() must run before this operation",
             )
-        return builder
+        return self._setup
+
+    def _require_runtime(self, operation: str) -> _Runtime:
+        if self._runtime is None:
+            raise lifecycle_error(
+                owner="newton_rigid",
+                operation=operation,
+                expected="finalize() must run before this operation",
+            )
+        return self._runtime
+
+    # ── PhysicsBackend interface ─────────────────────────────────────
 
     def initialize(
         self,
@@ -122,52 +159,18 @@ class NewtonRigidBackend(PhysicsBackend):
         volumes: torch.Tensor,
         covariances: torch.Tensor,
         *,
-        n_grid: int = 100,
-        grid_lim: float = 2.0,
-        **kwargs,
+        init_quats: Optional[torch.Tensor] = None,
+        init_scales: Optional[torch.Tensor] = None,
     ) -> None:
-        """Store initial particle data and create ModelBuilder.
+        """Construct ``_Setup`` from initial particle data.
 
-        For rigid body simulation, *volumes* and *n_grid* are not used
-        (Newton computes mass/inertia from the shape + density).
+        For rigid body simulation, ``volumes`` is not used (Newton
+        computes mass/inertia from the shape + density).
         """
-        self._init_positions = positions.clone().to(self._device)
-        self._init_covariances = covariances.clone().to(self._device)
-        self._n_particles = positions.shape[0]
-        # Compute bounding box from actual particle positions (not grid_lim)
         pos_np = positions.detach().cpu().numpy()
-        self._bbox_lo = pos_np.min(axis=0)
-        self._bbox_hi = pos_np.max(axis=0)
-
-        # 2DGS support: store per-particle quats & scales for direct output
-        iq = kwargs.get("init_quats")
-        self._init_quats = iq.clone().to(self._device) if iq is not None else None
-        isc = kwargs.get("init_scales")
-        self._init_scales = isc.clone().to(self._device) if isc is not None else None
-
-        # ── Collision geometry config ───────────────────────────────
-        # Supported: "obb", "ellipsoid", "convex_hull", "alpha_shape"
-        raw_collision_geo = kwargs.get("collision_geometry", "obb")
-        self._collision_geo = normalize_collision_geo(raw_collision_geo)
-        # Alpha shape specific: alpha parameter and max triangle count
-        self._alpha = kwargs.get("alpha", None)
-        self._max_triangles = int(kwargs.get("max_triangles", 300))
-        # SDF collision: Newton auto-generates an SDF from the mesh and
-        # uses distance-field queries instead of triangle intersection.
-        # This makes mesh quality (non-manifold, non-watertight) far less
-        # critical and is the approach used in Newton's own example_sdf.
-        self._use_sdf = bool(kwargs.get("use_sdf", False))
-        self._sdf_resolution = int(kwargs.get("sdf_resolution", 64))
-        self._sdf_narrow_band = kwargs.get(
-            "sdf_narrow_band", (-0.01, 0.01)
-        )
-        # Create ModelBuilder (bodies & shapes added in set_material)
-        self._builder = newton.ModelBuilder()
-        # Contact margin: start detecting contacts before actual penetration.
-        # A small positive margin prevents deep interpenetration that causes
-        # sudden explosive correction forces (Newton example_sdf uses 0.01).
-        contact_margin = kwargs.get("contact_margin", 0.01)
-        self._builder.default_shape_cfg.contact_margin = contact_margin
+        builder = newton.ModelBuilder()
+        contact_margin = 0.01 if self._cfg.contact_margin is None else float(self._cfg.contact_margin)
+        builder.default_shape_cfg.contact_margin = contact_margin
         sdf_str = (
             f", use_sdf=True (res={self._sdf_resolution})"
             if self._use_sdf else ""
@@ -179,44 +182,53 @@ class NewtonRigidBackend(PhysicsBackend):
             contact_margin,
         )
 
-    def set_material(self, material_params: dict) -> None:
-        """Create rigid bodies from per-object info (or single body).
+        self._setup = _Setup(
+            builder=builder,
+            init_positions=positions.clone().to(self._device),
+            init_covariances=covariances.clone().to(self._device),
+            init_quats=init_quats.clone().to(self._device) if init_quats is not None else None,
+            init_scales=init_scales.clone().to(self._device) if init_scales is not None else None,
+            n_particles=int(positions.shape[0]),
+            bbox_lo=pos_np.min(axis=0),
+            bbox_hi=pos_np.max(axis=0),
+        )
 
-        Also configures gravity and solver parameters.
-        """
-        self._require_builder("set_material")
-
-        self._gravity = resolve_gravity(material_params)
-        self._solver_iterations, self._solver_relaxation = resolve_solver_options(material_params)
-        specs = iter_body_specs(material_params, n_particles=self._n_particles)
-        for spec in specs:
-            cfg = build_body_shape_config(
-                material=spec.material,
+    def set_material(self, spec: MaterialSetupSpec) -> None:
+        """Create rigid bodies from per-object info and record gravity."""
+        setup = self._require_setup("set_material")
+        setup.gravity = tuple(float(x) for x in spec.gravity)
+        specs = iter_body_specs(per_object=spec.per_object, n_particles=setup.n_particles)
+        for body in specs:
+            shape_cfg = build_body_shape_config(
+                material=body.material,
                 use_sdf=self._use_sdf,
                 sdf_resolution=self._sdf_resolution,
                 sdf_narrow_band=self._sdf_narrow_band,
             )
             self._create_body(
-                particle_indices=spec.particle_indices,
-                shape_cfg=cfg,
-                name=spec.name,
-                collision_geo=spec.material.collision_geometry,
-                initial_velocity=spec.initial_velocity,
+                setup=setup,
+                particle_indices=body.particle_indices,
+                shape_cfg=shape_cfg,
+                name=body.name,
+                collision_geo=body.material.collision_geometry,
+                initial_velocity=body.initial_velocity,
             )
 
     def set_boundary_conditions(
-        self, bc_params: list, time_params: dict
+        self,
+        bcs: list[BoundaryCondition],
+        time: TimeConfig,
     ) -> None:
         """Add collision planes for ground / walls."""
-        builder = self._require_builder("set_boundary_conditions")
+        setup = self._require_setup("set_boundary_conditions")
         new_planes = register_boundary_conditions(
-            builder=builder,
-            bc_params=bc_params,
-            bbox_lo=self._bbox_lo,
-            bbox_hi=self._bbox_hi,
+            builder=setup.builder,
+            bc_params=bcs,
+            bbox_lo=setup.bbox_lo,
+            bbox_hi=setup.bbox_hi,
         )
-        base_idx = len(self._plane_equations)
-        self._plane_equations.extend(new_planes)
+        base_idx = len(setup.plane_equations)
+        setup.plane_equations.extend(new_planes)
         for idx, (normal, d_value) in enumerate(new_planes, start=base_idx):
             LOGGER.info(
                 "[NewtonRigid] Plane #%s: normal=[%.6f, %.6f, %.6f], d=%.6f",
@@ -226,20 +238,19 @@ class NewtonRigidBackend(PhysicsBackend):
                 normal[2],
                 d_value,
             )
-        if any(isinstance(bc, dict) and bc.get("type") == "bounding_box" for bc in bc_params):
-            lo = self._bbox_lo
-            hi = self._bbox_hi
-            if lo is not None and hi is not None:
-                LOGGER.info(
-                    f"[NewtonRigid] Bounding box "
-                    f"[{lo[0]:.2f},{lo[1]:.2f},{lo[2]:.2f}] – "
-                    f"[{hi[0]:.2f},{hi[1]:.2f},{hi[2]:.2f}]"
-                )
+        if any(isinstance(bc, BoundingBox) for bc in bcs):
+            lo = setup.bbox_lo
+            hi = setup.bbox_hi
+            LOGGER.info(
+                f"[NewtonRigid] Bounding box "
+                f"[{lo[0]:.2f},{lo[1]:.2f},{lo[2]:.2f}] – "
+                f"[{hi[0]:.2f},{hi[1]:.2f},{hi[2]:.2f}]"
+            )
 
     def finalize(self) -> None:
-        """Finalize the Newton model and create solver + states."""
-        builder = self._require_builder("finalize")
-        if self._gravity is None:
+        """Drain ``_Setup`` into ``_Runtime`` (model/solver/states)."""
+        setup = self._require_setup("finalize")
+        if setup.gravity is None:
             detail = "gravity missing; call set_material() before finalize()"
             LOGGER.error(
                 "[NewtonRigid] backend=newton_rigid operation=finalize detail=%s",
@@ -253,40 +264,35 @@ class NewtonRigidBackend(PhysicsBackend):
             )
 
         # ── Finalize model ──────────────────────────────────────────
-        self._model = builder.finalize(device=self._device)
-        self._model.set_gravity(self._gravity)
-        LOGGER.info("[NewtonRigid] gravity=%s", self._gravity)
+        model = setup.builder.finalize(device=self._device)
+        model.set_gravity(setup.gravity)
+        LOGGER.info("[NewtonRigid] gravity=%s", setup.gravity)
 
-        # Limit contact buffer to prevent excessive memory allocation
-        self._model.rigid_contact_max = 100000
+        # Limit contact buffer to prevent excessive memory allocation.
+        model.rigid_contact_max = 100000
 
         # ── Create solver ───────────────────────────────────────────
-        # rigid_contact_relaxation < 1.0 prevents over-correction and
-        # oscillation at contacts (Newton's example_sdf uses 0.8).
-        relaxation = self._solver_relaxation
-        self._solver = SolverXPBD(
-            self._model,
+        solver = SolverXPBD(
+            model,
             iterations=self._solver_iterations,
-            rigid_contact_relaxation=relaxation,
+            rigid_contact_relaxation=self._solver_relaxation,
         )
         LOGGER.info(
             f"[NewtonRigid] SolverXPBD: iterations={self._solver_iterations}, "
-            f"contact_relaxation={relaxation}"
+            f"contact_relaxation={self._solver_relaxation}"
         )
 
         # ── Create double-buffered states + control ─────────────────
-        self._state_0 = self._model.state()
-        self._state_1 = self._model.state()
-        self._control = self._model.control()
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
 
-        # ── Apply initial velocities ──────────────────────────────────
+        # ── Consume initial velocities once and clear on bodies ─────
         # body_qd is (n_bodies, 6): [vx, vy, vz, wx, wy, wz]
-        # Note: .numpy() returns a copy, so we must use .assign() to write back
-        has_initial_vel = any(b.initial_velocity is not None for b in self._bodies)
-        if has_initial_vel:
-            qd_0 = self._state_0.body_qd.numpy()
-            qd_1 = self._state_1.body_qd.numpy()
-            for body in self._bodies:
+        if any(b.initial_velocity is not None for b in setup.bodies):
+            qd_0 = state_0.body_qd.numpy()
+            qd_1 = state_1.body_qd.numpy()
+            for body in setup.bodies:
                 if body.initial_velocity is not None:
                     vx, vy, vz = body.initial_velocity
                     qd_0[body.body_idx, :3] = [vx, vy, vz]
@@ -295,47 +301,51 @@ class NewtonRigidBackend(PhysicsBackend):
                         f"[NewtonRigid] Set initial velocity for body {body.body_idx}: "
                         f"({vx}, {vy}, {vz})"
                     )
-            self._state_0.body_qd.assign(qd_0)
-            self._state_1.body_qd.assign(qd_1)
+                    body.initial_velocity = None  # consumed
+            state_0.body_qd.assign(qd_0)
+            state_1.body_qd.assign(qd_1)
 
         # ── Collision pipeline ──────────────────────────────────────
-        # Newton ≥1.1: unified pipeline is `CollisionPipeline`; broad phase is a string.
-        self._collision_pipeline = newton.CollisionPipeline(
-            self._model,
+        collision_pipeline = newton.CollisionPipeline(
+            model,
             reduce_contacts=True,
             broad_phase="sap",
         )
-        self._contacts = self._model.collide(
-            self._state_0,
-            collision_pipeline=self._collision_pipeline,
-        )
+        contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
 
-        # Release the builder (no longer needed)
-        self._builder = None
+        self._runtime = _Runtime(
+            model=model,
+            solver=solver,
+            state_0=state_0,
+            state_1=state_1,
+            control=control,
+            collision_pipeline=collision_pipeline,
+            contacts=contacts,
+            bodies=setup.bodies,
+            plane_equations=setup.plane_equations,
+            n_particles=setup.n_particles,
+            init_scales=setup.init_scales,
+            has_init_quats=setup.init_quats is not None,
+        )
+        # Release setup-only data (builder, init_positions, init_covariances).
+        self._setup = None
 
     def step(self, dt: float, frame: int) -> None:
         """Advance the rigid body simulation by one substep."""
-        self._state_0.clear_forces()
-        self._contacts = self._model.collide(
-            self._state_0,
-            collision_pipeline=self._collision_pipeline,
-        )
-        self._solver.step(
-            self._state_0,
-            self._state_1,
-            self._control,
-            self._contacts,
-            dt,
-        )
+        rt = self._require_runtime("step")
+        rt.state_0.clear_forces()
+        rt.contacts = rt.model.collide(rt.state_0, collision_pipeline=rt.collision_pipeline)
+        rt.solver.step(rt.state_0, rt.state_1, rt.control, rt.contacts, dt)
         # Swap states
-        self._state_0, self._state_1 = self._state_1, self._state_0
+        rt.state_0, rt.state_1 = rt.state_1, rt.state_0
 
     def get_diagnostics(self) -> dict:
         """Return per-body position, velocity, and plane distances for debugging."""
-        body_q = self._state_0.body_q.numpy()   # (n_bodies, 7)
-        body_qd = self._state_0.body_qd.numpy()  # (n_bodies, 6)
+        rt = self._require_runtime("get_diagnostics")
+        body_q = rt.state_0.body_q.numpy()   # (n_bodies, 7)
+        body_qd = rt.state_0.body_qd.numpy()  # (n_bodies, 6)
         diag = {"bodies": []}
-        for body in self._bodies:
+        for body in rt.bodies:
             bq = body_q[body.body_idx]
             bqd = body_qd[body.body_idx]
             pos = bq[:3].tolist()
@@ -343,7 +353,7 @@ class NewtonRigidBackend(PhysicsBackend):
             vel = bqd[:3].tolist()
             ang_vel = bqd[3:6].tolist()
             plane_dists = []
-            for pi, (n, d) in enumerate(self._plane_equations):
+            for pi, (n, d) in enumerate(rt.plane_equations):
                 signed_dist = n[0] * pos[0] + n[1] * pos[1] + n[2] * pos[2] + d
                 plane_dists.append((pi, signed_dist))
             diag["bodies"].append(dict(
@@ -355,14 +365,15 @@ class NewtonRigidBackend(PhysicsBackend):
         return diag
 
     def get_state(self) -> SimulationState:
-        state, self._last_valid_body_q = export_rigid_state(
-            state_0=self._state_0,
-            bodies=self._bodies,
-            n_particles=self._n_particles,
+        rt = self._require_runtime("get_state")
+        state, rt.last_valid_body_q = export_rigid_state(
+            state_0=rt.state_0,
+            bodies=rt.bodies,
+            n_particles=rt.n_particles,
             device=self._device,
-            init_scales=self._init_scales,
-            has_init_quats=self._init_quats is not None,
-            last_valid_body_q=self._last_valid_body_q,
+            init_scales=rt.init_scales,
+            has_init_quats=rt.has_init_quats,
+            last_valid_body_q=rt.last_valid_body_q,
         )
         return state
 
@@ -370,55 +381,15 @@ class NewtonRigidBackend(PhysicsBackend):
 
     def _create_body(
         self,
+        *,
+        setup: _Setup,
         particle_indices: list[int],
         shape_cfg: newton.ModelBuilder.ShapeConfig,
-        name: str = "body",
-        collision_geo: str | None = None,
-        initial_velocity: list | tuple | None = None,
+        name: str,
+        collision_geo: str | None,
+        initial_velocity: tuple[float, float, float] | None,
     ) -> None:
-        """Create one rigid body from a subset of particles.
-
-        ``collision_geo`` overrides the global ``self._collision_geo``
-        for this particular body (enables per-object config).
-
-        ``initial_velocity`` is [vx, vy, vz] in MPM space (applied in finalize).
-        """
-        init_vel_tuple = None
-        if initial_velocity is not None:
-            if not isinstance(initial_velocity, (list, tuple)):
-                detail = (
-                    f"body={name} initial_velocity_type="
-                    f"{type(initial_velocity).__name__}"
-                )
-                LOGGER.error(
-                    "[NewtonRigid] backend=newton_rigid operation=_create_body "
-                    "detail=%s",
-                    detail,
-                )
-                raise configuration_error(
-                    owner="newton_rigid",
-                    operation="_create_body",
-                    expected="initial_velocity must be [vx, vy, vz]",
-                    detail=detail,
-                )
-            if len(initial_velocity) != 3:
-                detail = (
-                    f"body={name} initial_velocity={initial_velocity!r} "
-                    "must have 3 values"
-                )
-                LOGGER.error(
-                    "[NewtonRigid] backend=newton_rigid operation=_create_body "
-                    "detail=%s",
-                    detail,
-                )
-                raise configuration_error(
-                    owner="newton_rigid",
-                    operation="_create_body",
-                    expected="initial_velocity must be [vx, vy, vz]",
-                    detail=detail,
-                )
-            init_vel_tuple = tuple(float(v) for v in initial_velocity)
-        builder = self._require_builder("_create_body")
+        """Create one rigid body from a subset of particles."""
         if len(particle_indices) == 0:
             detail = f"body={name} particle_count=0"
             LOGGER.error(
@@ -434,11 +405,11 @@ class NewtonRigidBackend(PhysicsBackend):
 
         geo = normalize_collision_geo(collision_geo or self._collision_geo)
         built = create_rigid_body(
-            builder=builder,
-            init_positions=self._init_positions,
-            init_covariances=self._init_covariances,
-            init_quats=self._init_quats,
-            init_scales=self._init_scales,
+            builder=setup.builder,
+            init_positions=setup.init_positions,
+            init_covariances=setup.init_covariances,
+            init_quats=setup.init_quats,
+            init_scales=setup.init_scales,
             device=self._device,
             particle_indices=particle_indices,
             shape_cfg=shape_cfg,
@@ -447,13 +418,13 @@ class NewtonRigidBackend(PhysicsBackend):
             alpha=self._alpha,
             max_triangles=self._max_triangles,
         )
-        self._bodies.append(
+        setup.bodies.append(
             _BodyInfo(
                 body_idx=built.body_idx,
                 particle_indices=particle_indices,
                 init_local_pos=built.init_local_pos,
                 init_cov_3x3=built.init_cov_3x3,
-                initial_velocity=init_vel_tuple,
+                initial_velocity=initial_velocity,
                 init_quats=built.init_quats,
                 init_scales=built.init_scales,
             )

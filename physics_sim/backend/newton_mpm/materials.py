@@ -1,4 +1,4 @@
-"""Material resolution and application for Newton MPM backend."""
+"""Material application for Newton MPM backend."""
 
 from __future__ import annotations
 
@@ -8,26 +8,12 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+from physics_sim.backend.spec import MaterialSetupSpec
 from physics_sim.config.models import MPMMaterial
-from physics_sim.coord import (
-    E_GRAVITY_MISSING,
-    gravity_contract_error,
-    normalize_internal_gravity,
-)
 from physics_sim.errors import configuration_error
 from physics_sim.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
-
-_SOLVER_OPT_TYPES = {
-    "max_iterations": int,
-    "tolerance": float,
-    "solver": str,
-    "grid_type": str,
-    "transfer_scheme": str,
-    "air_drag": float,
-    "grid_padding": int,
-}
 
 
 def friction_from_angle(friction_angle_deg: float) -> float:
@@ -109,7 +95,7 @@ def apply_material_to_model(
     *,
     model: Any,
     volumes: np.ndarray,
-    material_params: dict[str, Any],
+    spec: MaterialSetupSpec,
     device: str,
 ) -> None:
     """Apply gravity and per-particle MPM material fields.
@@ -118,23 +104,9 @@ def apply_material_to_model(
     :class:`MPMMaterial` defaults so that filled particles (from
     particle_filling) still have valid material parameters.
     """
-    if "g" not in material_params:
-        raise gravity_contract_error(
-            E_GRAVITY_MISSING,
-            backend="newton_mpm",
-            config_path="material.g",
-            detail="set_material() missing required gravity vector",
-            suggestion="pass g as [0, -|g|, 0], usually from backend_init._resolve_gravity",
-        )
-    g = normalize_internal_gravity(
-        material_params.get("g"),
-        backend="newton_mpm",
-        config_path="material.g",
-        allow_scalar=False,
-    )
-    model.set_gravity(g)
+    model.set_gravity(tuple(float(x) for x in spec.gravity))
 
-    # Fill defaults for all particles.
+    # Fill defaults for all particles first.
     default = MPMMaterial()
     _apply_mpm_params_to_indices(
         model=model,
@@ -144,8 +116,7 @@ def apply_material_to_model(
         device=device,
     )
 
-    per_object = material_params.get("per_object") or []
-    for info in per_object:
+    for info in spec.per_object:
         if not isinstance(info.material, MPMMaterial):
             detail = f"object={info.name} material_type={type(info.material).__name__}"
             raise configuration_error(
@@ -171,65 +142,3 @@ def apply_material_to_model(
             float(info.material.nu),
             resolve_friction(info.material),
         )
-
-
-def apply_solver_options(
-    *,
-    solver_opts: Any,
-    material_params: dict[str, Any],
-) -> None:
-    """Apply Newton solver options encoded in material params."""
-    per_object = material_params.get("per_object") or []
-    rpic = 0.0
-    if per_object:
-        first = per_object[0]
-        if isinstance(first.material, MPMMaterial):
-            rpic = float(first.material.rpic_damping)
-    solver_opts.transfer_scheme = "pic" if rpic < 0 else "apic"
-
-    newton_opts = material_params.get("newton_solver_opts", {})
-    if not isinstance(newton_opts, dict):
-        detail = f"newton_solver_opts_type={type(newton_opts).__name__}"
-        raise configuration_error(
-            owner="newton_mpm",
-            operation="set_material",
-            expected="newton_solver_opts must be dict",
-            detail=detail,
-        )
-
-    available_opts = {
-        name
-        for name in dir(solver_opts)
-        if not name.startswith("_") and not callable(getattr(solver_opts, name))
-    }
-    for key, val in newton_opts.items():
-        if key not in available_opts:
-            detail = (
-                f"unknown newton_solver_opts key={key!r} "
-                f"available={sorted(available_opts)}"
-            )
-            raise configuration_error(
-                owner="newton_mpm",
-                operation="set_material",
-                expected="newton_solver_opts keys must match SolverImplicitMPM.Config",
-                detail=detail,
-            )
-        cast = _SOLVER_OPT_TYPES.get(key)
-        if cast is None:
-            current = getattr(solver_opts, key)
-            cast = type(current) if current is not None else type(val)
-        try:
-            cast_val = cast(val)
-        except (TypeError, ValueError) as exc:
-            detail = (
-                f"solver option {key!r} expects {cast.__name__}, "
-                f"got value={val!r}"
-            )
-            raise configuration_error(
-                owner="newton_mpm",
-                operation="set_material",
-                expected=f"newton_solver_opts.{key} must be {cast.__name__}",
-                detail=detail,
-            ) from exc
-        setattr(solver_opts, key, cast_val)
-        LOGGER.info("[NewtonMPM] solver.%s=%s", key, cast_val)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pytest
@@ -55,16 +54,16 @@ def test_solver_contract_rejects_missing_or_scalar_gravity():
         )
 
 
-def test_solver_files_enforce_contract_without_z_up_defaults():
-    solver_paths = (
-        "physics_sim/backend/newton_rigid/materials.py",
-        "physics_sim/backend/newton_vbd/solver.py",
-        "physics_sim/backend/newton_mpm/materials.py",
-    )
-    for rel_path in solver_paths:
-        src = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
-        assert "normalize_internal_gravity(" in src
-        assert "E_GRAVITY_MISSING" in src
-        assert "(0.0, 0.0, -9.8)" not in src
-        assert "[0.0, 0.0, -9.8]" not in src
+def test_gravity_contract_enforced_at_stage_boundary():
+    """Gravity validation lives in backend_init.py after Phase B.
+
+    Backends receive gravity as a typed tuple on MaterialSetupSpec;
+    they no longer parse raw dict values so the per-backend contract
+    checks disappeared from solver source.
+    """
+    src = (REPO_ROOT / "physics_sim/stages/backend_init.py").read_text(encoding="utf-8")
+    assert "gravity_contract_error(" in src
+    assert "E_GRAVITY_SHAPE" in src
+    assert "(0.0, 0.0, -9.8)" not in src
+    assert "[0.0, 0.0, -9.8]" not in src
 

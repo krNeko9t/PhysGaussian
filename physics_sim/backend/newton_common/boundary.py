@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
+
+from physics_sim.config.models import SurfaceCollider
 
 
 def resolve_surface_friction(
@@ -34,14 +35,11 @@ def plane_from_point_normal(
 
 
 def surface_plane_from_bc(
-    bc: Mapping[str, Any],
+    bc: SurfaceCollider,
 ) -> tuple[tuple[float, float, float, float], float]:
     """Build plane tuple and friction coefficient from a surface-collider BC."""
-    plane = plane_from_point_normal(normal=bc["normal"], point=bc["point"])
-    mu = resolve_surface_friction(
-        surface=str(bc.get("surface", "slip")),
-        friction=bc.get("friction"),
-    )
+    plane = plane_from_point_normal(normal=bc.normal, point=bc.point)
+    mu = resolve_surface_friction(surface=bc.surface, friction=bc.friction)
     return plane, mu
 
 
@@ -63,4 +61,5 @@ def build_bounding_box_planes(
         (0.0, 0.0, 1.0, -(z0 - m)),
         (0.0, 0.0, -1.0, z1 + m),
     ]
+
 

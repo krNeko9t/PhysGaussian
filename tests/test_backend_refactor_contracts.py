@@ -78,7 +78,6 @@ def test_surface_friction_resolution_logic_is_centralized():
 def test_material_friction_resolution_has_single_path():
     src = _read("physics_sim/backend/newton_mpm/materials.py")
     assert "def resolve_friction(" in src
-    assert "def apply_solver_options(" in src
     # Typed dispatch: read material.friction / material.friction_angle directly.
     assert "material.friction is not None" in src
     assert "material.friction_angle is not None" in src

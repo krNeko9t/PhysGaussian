@@ -13,25 +13,22 @@ from typing import Optional
 
 import torch
 
-from physics_sim.config.models import MaterialSpec, SimConfig
+from physics_sim.backend.spec import ObjectRuntimeInfo
+from physics_sim.config.models import SimConfig
 from physics_sim.coord import SourceAxes
 from physics_sim.render.interfaces import SceneAssetLoader
 from physics_sim.sh_contract import sh_coeff_count
 from physics_sim.scene import SceneObject, assemble_scene
 
 
-@dataclass
-class ObjectRuntimeInfo:
-    """Per-object runtime descriptor.
-
-    Single source of truth for downstream "by-object" lookups.
-    ``particle_indices`` is always a contiguous range built from the
-    concatenation order of ``sim_objects`` in :class:`DynamicSceneInit`.
-    """
-    name: str
-    particle_indices: list[int]
-    material: MaterialSpec
-    initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+__all__ = [
+    "CoordContext",
+    "DynamicSceneInit",
+    "ObjectRuntimeInfo",
+    "SceneData",
+    "StaticRenderChunk",
+    "setup_scene",
+]
 
 
 @dataclass
