@@ -396,26 +396,45 @@ class NewtonMPMBackend(PhysicsBackend):
             )
 
     def _freeze_particles(self, rt: _Runtime, indices: np.ndarray) -> None:
-        """Set ``particle_mass`` / ``particle_inv_mass`` to 0 for given indices.
+        """Fully pin a set of MPM particles in place.
 
-        MPM's kernels treat particles with mass=0 as kinematic (infinite
-        inverse mass → velocity zeroed during integration, strains frozen
-        during rasterization).  This is the sole mechanism for pinning.
+        newton's implicit MPM has TWO gates that control whether a particle
+        moves under the solver (verified against the official solver kernels):
+
+          1. ``particle_mass == 0`` → the particle acts as an "infinite mass"
+             boundary condition on the background grid (its P2G contribution
+             prescribes grid velocity at its location).  But the per-particle
+             advection does NOT check mass.
+          2. ``~ParticleFlags.ACTIVE`` → the particle is skipped in
+             ``advect_particles`` / ``update_particle_strains`` / collision
+             kernels entirely.
+
+        Both are needed for a reliable pin: mass=0 locks the grid BC, clearing
+        ACTIVE freezes the particle's own q/qd/strain updates.  Setting only
+        mass=0 (the naive pattern) leaves particles free to drift under
+        advection, which caused the "alocasia branches freefall" bug.
+
+        Important: we mutate the existing wp.arrays in place rather than
+        replacing them.  SolverImplicitMPM was already constructed at
+        finalize() and may cache views onto the original arrays; an
+        attribute reassignment would silently have no effect on the solver.
         """
         if indices.size == 0:
             return
-        mass_np = rt.model.particle_mass.numpy()
-        inv_np = rt.model.particle_inv_mass.numpy()
-        mass_np[indices] = 0.0
-        inv_np[indices] = 0.0
-        rt.model.particle_mass = wp.array(
-            mass_np, dtype=float, device=self._device,
-        )
-        rt.model.particle_inv_mass = wp.array(
-            inv_np, dtype=float, device=self._device,
-        )
+        idx_wp = wp.array(indices.astype(np.int32), dtype=int, device=self._device)
+        # In-place zero of mass and inv_mass (matches newton's own
+        # example_mpm_beam_twist pattern).
+        rt.model.particle_mass[idx_wp].fill_(0.0)
+        rt.model.particle_inv_mass[idx_wp].fill_(0.0)
+        # Clear the ACTIVE flag for these particles.  Done on host
+        # (flags array is typically small) to keep things simple.
+        flags_np = rt.model.particle_flags.numpy()
+        active_bit = int(newton.ParticleFlags.ACTIVE)
+        flags_np[indices] &= ~active_bit
+        rt.model.particle_flags.assign(flags_np)
         LOGGER.info(
-            "[NewtonMPM] Froze %d particles (mass=0)", int(indices.size),
+            "[NewtonMPM] Pinned %d particles (mass=0 + ACTIVE cleared)",
+            int(indices.size),
         )
 
     # ------------------------------------------------------------------
