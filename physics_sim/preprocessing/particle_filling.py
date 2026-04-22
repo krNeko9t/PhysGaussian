@@ -428,6 +428,12 @@ def fill_particles(
         new_origin = torch.tensor([boundary[0], boundary[2], boundary[4]]).cuda()
         pos = pos - new_origin
 
+    from taichi.lang import impl as _ti_impl_fill
+
+    _rt_fill = _ti_impl_fill.get_runtime()
+    if _rt_fill is None or getattr(_rt_fill, "prog", None) is None:
+        ti.init(arch=ti.cuda, device_memory_GB=8.0)
+
     ti_pos = ti.Vector.field(n=3, dtype=float, shape=pos.shape[0])
     ti_opacity = ti.field(dtype=float, shape=opacity.shape[0])
     ti_cov = ti.Vector.field(n=6, dtype=float, shape=cov.shape[0])

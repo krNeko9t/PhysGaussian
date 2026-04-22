@@ -157,13 +157,13 @@ def test_scene_config_fill_group_validator_requires_consistent_cfg():
 
     part_a = PartConfig(
         name="a",
-        source=PlySource(path="/tmp/a.ply"),
+        source=PlySource(ply_path="/tmp/a.ply"),
         fill_group="plant",
         particle_filling=FillingConfig(n_grid=64),
     )
     part_b = PartConfig(
         name="b",
-        source=PlySource(path="/tmp/b.ply"),
+        source=PlySource(ply_path="/tmp/b.ply"),
         fill_group="plant",
         particle_filling=FillingConfig(n_grid=128),
     )
@@ -180,13 +180,13 @@ def test_scene_config_fill_group_validator_accepts_matching_cfgs():
     parts = [
         PartConfig(
             name="a",
-            source=PlySource(path="/tmp/a.ply"),
+            source=PlySource(ply_path="/tmp/a.ply"),
             fill_group="plant",
             particle_filling=shared,
         ),
         PartConfig(
             name="b",
-            source=PlySource(path="/tmp/b.ply"),
+            source=PlySource(ply_path="/tmp/b.ply"),
             fill_group="plant",
             particle_filling=shared,
         ),
