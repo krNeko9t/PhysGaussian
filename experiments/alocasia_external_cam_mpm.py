@@ -22,6 +22,7 @@ Making it a real MPM collider requires Phase F2 (setup_collider).
 
 from physics_sim.config.models import (
     CameraConfig,
+    FillingConfig,
     MPMMaterial,
     NewtonMPMConfig,
     NoneBackendConfig,
@@ -80,7 +81,16 @@ config = SimConfig(
                 # to change branch behaviour.  jelly is the softest elastic
                 # preset; foam is slightly stiffer; plasticine deforms
                 # permanently when the stress crosses yield.
-                material=MPMMaterial.jelly(density=300.0, E=1e5, nu=0.3),
+                material=MPMMaterial.jelly(
+                    density=300.0, E=1e6, nu=0.3, yield_stress=1e5,
+                ),
+                # 3DGS inputs are shell-only — fill the interior so pinned
+                # roots can actually support the cantilevered branch mass.
+                particle_filling=FillingConfig(
+                    n_grid=128,
+                    max_particles_num=300_000,
+                    max_particles_per_cell=2,
+                ),
             ),
             PartConfig(
                 name="alocasia_foreground_static",

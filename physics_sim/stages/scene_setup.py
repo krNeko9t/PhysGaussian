@@ -21,6 +21,7 @@ from physics_sim.scene.constraint_resolver import (
     ResolvedConstraint,
     resolve_constraints,
 )
+from physics_sim.scene.filling import estimate_volumes_occupancy, fill_scene_objects
 from physics_sim.sh_contract import sh_coeff_count
 from physics_sim.scene import SceneObject, assemble_scene
 
@@ -162,13 +163,19 @@ def _build_dynamic_init(
     sim_objects: list[SceneObject],
     device: str,
     n_grid: int,
+    *,
+    filled: bool = False,
 ) -> DynamicSceneInit:
     pos = torch.cat([o.positions for o in sim_objects], dim=0).to(device)
     cov = torch.cat([o.covariances for o in sim_objects], dim=0).to(device)
+    vol = (
+        estimate_volumes_occupancy(pos, n_grid)
+        if filled else _estimate_volumes(pos, n_grid)
+    )
     return DynamicSceneInit(
         pos=pos,
         cov=cov,
-        vol=_estimate_volumes(pos, n_grid),
+        vol=vol,
         shs=torch.cat([o.shs for o in sim_objects], dim=0),
         opacity=torch.cat([o.opacities for o in sim_objects], dim=0),
         quats=torch.cat([o.quats for o in sim_objects], dim=0),
@@ -193,13 +200,7 @@ def _build_render_setup(
     dynamic_init: DynamicSceneInit,
     static_render: Optional[StaticRenderChunk],
 ) -> RenderSetup:
-    """Pre-concatenate the frame-invariant render inputs.
-
-    ``opacity`` and ``shs`` never change during simulation — the per-frame
-    loop only needs to concatenate the dynamic particles' positions /
-    covariances / rotations with the static ones.  Concatenating these
-    twice-per-frame was wasteful; merging once here removes that work.
-    """
+    """Pre-concatenate the frame-invariant (opacity + SH) render inputs once."""
     if static_render is None or static_render.n_particles == 0:
         return RenderSetup(
             opacity_all=dynamic_init.opacity,
@@ -242,6 +243,7 @@ def setup_scene(
     )
 
     objects = assemble_scene(cfg, loader, config_dir=config_dir)
+    objects, filled = fill_scene_objects(objects)
 
     sim_objects = [o for o in objects if o.role == "dynamic"]
     static_objects = [o for o in objects if o.role == "render_only"]
@@ -255,7 +257,7 @@ def setup_scene(
     n_grid = getattr(cfg.backend, "n_grid", 200)
 
     if sim_objects:
-        dynamic_init = _build_dynamic_init(sim_objects, device, n_grid)
+        dynamic_init = _build_dynamic_init(sim_objects, device, n_grid, filled=filled)
         parts_runtime = _build_parts_runtime(sim_objects)
     else:
         dynamic_init = _empty_dynamic_init(device, sh_degree, sh_channels)
@@ -269,12 +271,11 @@ def setup_scene(
         parts_runtime=parts_runtime,
     )
 
-    # Static chunks: render_only objects + collider_only objects that render
-    static_chunks = list(static_objects)
-    for obj in collider_objects:
-        render_flag = obj.collider.render if obj.collider is not None else True
-        if render_flag and obj.n_particles > 0:
-            static_chunks.append(obj)
+    # Static chunks: render_only + collider_only parts whose collider renders.
+    static_chunks = list(static_objects) + [
+        o for o in collider_objects
+        if (o.collider is None or o.collider.render) and o.n_particles > 0
+    ]
 
     static_render = _build_static_render(static_chunks)
     render_setup = _build_render_setup(dynamic_init, static_render)

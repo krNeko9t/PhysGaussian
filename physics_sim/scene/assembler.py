@@ -226,6 +226,7 @@ def assemble_scene(
             material=obj_cfg.material,
             initial_velocity=obj_cfg.initial_velocity,
             particle_filling=obj_cfg.particle_filling,
+            fill_group=obj_cfg.fill_group,
             collider=obj_cfg.collider,
             gs_type=gs_type,
         ))

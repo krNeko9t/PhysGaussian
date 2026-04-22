@@ -37,6 +37,7 @@ class SceneObject:
     initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     particle_filling: Optional[FillingConfig] = None
+    fill_group: Optional[str] = None
     collider: Optional[ColliderConfig] = None
 
     gs_type: str = "3dgs"

@@ -48,6 +48,10 @@ class PartConfig(BaseModel):
     initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
     material: MaterialSpec | None = None
     particle_filling: FillingConfig | None = None
+    # Parts sharing the same fill_group are unioned before filling so the
+    # interior of a logically-single body isn't torn apart by seams.
+    # None = the part stands alone (still filled if particle_filling is set).
+    fill_group: str | None = None
     collider: ColliderConfig | None = None
     opacity_threshold: float | None = None
 
@@ -190,6 +194,26 @@ class SceneConfig(BaseModel):
                     f"constraint[{i}] PinToBody.body='{c.body}' must be a rigid part; "
                     f"got material type {type(mat).__name__}."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _check_fill_group_consistency(self) -> "SceneConfig":
+        groups: dict[str, list[PartConfig]] = {}
+        for p in self.parts:
+            if p.fill_group is None:
+                continue
+            groups.setdefault(p.fill_group, []).append(p)
+        for name, members in groups.items():
+            filled = [m for m in members if m.particle_filling is not None]
+            if not filled:
+                continue
+            ref_cfg = filled[0].particle_filling
+            for m in filled[1:]:
+                if m.particle_filling != ref_cfg:
+                    raise ValueError(
+                        f"fill_group '{name}': parts must share the same FillingConfig; "
+                        f"part '{m.name}' differs from '{filled[0].name}'"
+                    )
         return self
 
 
