@@ -6,9 +6,11 @@ toward the denser face-adjacent neighbor cell, and falls back to uniform
 when neighbors on both sides are equally dense.
 
 Skipped without taichi + CUDA.
-"""
 
-from __future__ import annotations
+Note: Avoid ``from __future__ import annotations`` here: Taichi reads kernel
+parameter annotations at import time; postponed annotations (PEP 563) store
+strings, which fail ``Kernel.extract_arguments`` validation.
+"""
 
 import pytest
 
@@ -45,6 +47,7 @@ def _run_bias_kernel(grid_density, floor: float):
             offsets[idx] = _density_biased_cell_offset(
                 grid_density, ci, cj, ck, fl,
             )
+
     _sample(floor)
     return offsets.to_numpy()
 
