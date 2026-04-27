@@ -146,6 +146,72 @@ def densify_grids_range(
                         ti.atomic_add(grid_density[i + dx, j + dy, k + dz], density)
 
 
+# ── Density-biased placement (Stage-2 helpers) ────────────────────────────
+#
+# Uniform [0,1)^3 sampling in a surface cell can place particles on the
+# empty side of that cell (outside the object along the normal).  These
+# helpers bias each axis independently toward the denser face-adjacent
+# neighbor: interior cells (both sides equally dense) stay near uniform;
+# surface cells cluster inward.  Floor = current cell's ``density_thres``
+# caps the bias and avoids zero denominators.
+
+
+@ti.func
+def _neighbor_density_or_zero(
+    grid_density: ti.template(), i: int, j: int, k: int,
+) -> float:
+    """Safe read of ``grid_density[i,j,k]``; 0 if out of bounds."""
+    nx = grid_density.shape[0]
+    ny = grid_density.shape[1]
+    nz = grid_density.shape[2]
+    d = 0.0
+    if 0 <= i and i < nx and 0 <= j and j < ny and 0 <= k and k < nz:
+        d = grid_density[i, j, k]
+    return d
+
+
+@ti.func
+def _axis_biased_offset(d_pos: float, d_neg: float, floor: float) -> float:
+    """Return an offset in ``[0, 1)`` biased toward the denser side.
+
+    With equal ``d_pos``/``d_neg`` the draw is uniform; as one side
+    dominates, the probability of landing in that half approaches 1.
+    """
+    denom = d_pos + d_neg + 2.0 * floor
+    p_pos = (d_pos + floor) / denom
+    sub = 0.0
+    if ti.random() < p_pos:
+        sub = 0.5
+    return sub + ti.random() * 0.5
+
+
+@ti.func
+def _density_biased_cell_offset(
+    grid_density: ti.template(),
+    i: int, j: int, k: int,
+    floor: float,
+):
+    """Sample a 3D offset in ``[0, 1)^3`` for cell (i,j,k), biased toward
+    denser face-neighbor cells on each axis independently.
+    """
+    di = _axis_biased_offset(
+        _neighbor_density_or_zero(grid_density, i + 1, j, k),
+        _neighbor_density_or_zero(grid_density, i - 1, j, k),
+        floor,
+    )
+    dj = _axis_biased_offset(
+        _neighbor_density_or_zero(grid_density, i, j + 1, k),
+        _neighbor_density_or_zero(grid_density, i, j - 1, k),
+        floor,
+    )
+    dk = _axis_biased_offset(
+        _neighbor_density_or_zero(grid_density, i, j, k + 1),
+        _neighbor_density_or_zero(grid_density, i, j, k - 1),
+        floor,
+    )
+    return ti.Vector([di, dj, dk])
+
+
 @ti.kernel
 def fill_dense_grids(
     grid: ti.template(),
@@ -165,8 +231,10 @@ def fill_dense_grids(
                 tmp_start_idx = ti.atomic_add(new_start_idx, diff)
                 for index in range(tmp_start_idx, tmp_start_idx + diff):
                     if index < new_particles.shape[0]:
-                        di, dj, dk = ti.random(), ti.random(), ti.random()
-                        new_particles[index] = ti.Vector([i + di, j + dj, k + dk]) * grid_dx
+                        off = _density_biased_cell_offset(
+                            grid_density, i, j, k, density_thres,
+                        )
+                        new_particles[index] = (ti.Vector([i, j, k]) + off) * grid_dx
     return new_start_idx
 
 
@@ -197,8 +265,10 @@ def fill_dense_grids_range(
                 tmp_start_idx = ti.atomic_add(new_start_idx, diff)
                 for index in range(tmp_start_idx, tmp_start_idx + diff):
                     if index < new_particles.shape[0]:
-                        di, dj, dk = ti.random(), ti.random(), ti.random()
-                        new_particles[index] = ti.Vector([i + di, j + dj, k + dk]) * grid_dx
+                        off = _density_biased_cell_offset(
+                            grid_density, i, j, k, density_thres,
+                        )
+                        new_particles[index] = (ti.Vector([i, j, k]) + off) * grid_dx
     return new_start_idx
 
 
