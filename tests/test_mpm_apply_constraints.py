@@ -57,8 +57,12 @@ def test_mpm_pin_to_world_zeros_mass():
     rt = be._runtime
     mass = rt.model.particle_mass.numpy()
     inv_mass = rt.model.particle_inv_mass.numpy()
+    flags = rt.model.particle_flags.numpy()
+    density = rt.solver._mpm_model.particle_density.numpy()
     assert np.allclose(mass[gs_indices], 0.0)
     assert np.allclose(inv_mass[gs_indices], 0.0)
+    assert np.allclose(density[gs_indices], 0.0)
+    assert np.all(flags[gs_indices] & int(newton.ParticleFlags.ACTIVE))
 
 
 def test_mpm_pin_to_world_freezes_positions():

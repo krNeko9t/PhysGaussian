@@ -25,6 +25,7 @@ from physics_sim.backend.base import PhysicsBackend, SimulationState
 from physics_sim.backend.newton_common.pin_kernel import (
     PinToBodyHook,
     launch_pin_hook,
+    launch_pin_to_world,
 )
 from physics_sim.backend.newton_mpm.boundary_conditions import (
     BoundaryConditionRuntime,
@@ -87,6 +88,14 @@ class _Runtime:
     out_scales_wp: Optional["wp.array"]
     num_scales: int
     bc_runtime: BoundaryConditionRuntime
+    pinned_indices: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.int64)
+    )
+    pinned_world_positions: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 3), dtype=np.float32)
+    )
+    pinned_indices_wp: Optional["wp.array"] = None
+    pinned_world_positions_wp: Optional["wp.array"] = None
     time: float = 0.0
     substep_dt: float = 0.0
     frames_dirty: bool = False
@@ -298,6 +307,7 @@ class NewtonMPMBackend(PhysicsBackend):
     def step(self, dt: float, frame: int) -> None:
         """Advance simulation by one substep."""
         rt = self._require_runtime("step")
+        self._enforce_pin_to_world(rt)
         rt.bc_runtime.apply_velocity_bcs(
             state=rt.state_0,
             time_now=rt.time,
@@ -315,6 +325,7 @@ class NewtonMPMBackend(PhysicsBackend):
         rt.solver.step(rt.state_0, rt.state_1, rt.control, None, dt)
         # Swap states (defer update_particle_frames to get_state for performance)
         rt.state_0, rt.state_1 = rt.state_1, rt.state_0
+        self._enforce_pin_to_world(rt)
         rt.substep_dt = dt
         rt.frames_dirty = True
         rt.time += dt
@@ -398,21 +409,14 @@ class NewtonMPMBackend(PhysicsBackend):
     def _freeze_particles(self, rt: _Runtime, indices: np.ndarray) -> None:
         """Fully pin a set of MPM particles in place.
 
-        newton's implicit MPM has TWO gates that control whether a particle
-        moves under the solver (verified against the official solver kernels):
+        Newton's implicit MPM treats ``particle_mass == 0`` as a kinematic
+        boundary condition during transfers: those particles contribute
+        infinite mass and prescribe grid velocity.  They must remain ACTIVE;
+        inactive particles are excluded from transfers entirely and therefore
+        cannot support neighbouring material.
 
-          1. ``particle_mass == 0`` → the particle acts as an "infinite mass"
-             boundary condition on the background grid (its P2G contribution
-             prescribes grid velocity at its location).  But the per-particle
-             advection does NOT check mass.
-          2. ``~ParticleFlags.ACTIVE`` → the particle is skipped in
-             ``advect_particles`` / ``update_particle_strains`` / collision
-             kernels entirely.
-
-        Both are needed for a reliable pin: mass=0 locks the grid BC, clearing
-        ACTIVE freezes the particle's own q/qd/strain updates.  Setting only
-        mass=0 (the naive pattern) leaves particles free to drift under
-        advection, which caused the "alocasia branches freefall" bug.
+        Mass alone does not stop per-particle advection, so ``step`` also
+        rewrites pinned q/qd before and after every solver substep.
 
         Important: we mutate the existing wp.arrays in place rather than
         replacing them.  SolverImplicitMPM was already constructed at
@@ -421,20 +425,63 @@ class NewtonMPMBackend(PhysicsBackend):
         """
         if indices.size == 0:
             return
+        pinned_pos = rt.state_0.particle_q.numpy()[indices]
         idx_wp = wp.array(indices.astype(np.int32), dtype=int, device=self._device)
         # In-place zero of mass and inv_mass (matches newton's own
         # example_mpm_beam_twist pattern).
         rt.model.particle_mass[idx_wp].fill_(0.0)
         rt.model.particle_inv_mass[idx_wp].fill_(0.0)
-        # Clear the ACTIVE flag for these particles.  Done on host
-        # (flags array is typically small) to keep things simple.
+        # Keep ACTIVE set so zero-density particles participate in P2G as
+        # kinematic grid boundary conditions.
         flags_np = rt.model.particle_flags.numpy()
         active_bit = int(newton.ParticleFlags.ACTIVE)
-        flags_np[indices] &= ~active_bit
+        flags_np[indices] |= active_bit
         rt.model.particle_flags.assign(flags_np)
+        self._refresh_solver_particle_material(rt)
+        combined_indices = np.concatenate([rt.pinned_indices, indices])
+        combined_positions = np.concatenate([
+            rt.pinned_world_positions,
+            pinned_pos.astype(np.float32),
+        ])
+        unique_indices, first = np.unique(combined_indices, return_index=True)
+        rt.pinned_indices = unique_indices.astype(np.int64)
+        rt.pinned_world_positions = combined_positions[first].astype(np.float32)
+        rt.pinned_indices_wp = wp.array(
+            rt.pinned_indices.astype(np.int32),
+            dtype=int,
+            device=self._device,
+        )
+        rt.pinned_world_positions_wp = wp.array(
+            rt.pinned_world_positions,
+            dtype=wp.vec3,
+            device=self._device,
+        )
+        self._enforce_pin_to_world(rt)
         LOGGER.info(
-            "[NewtonMPM] Pinned %d particles (mass=0 + ACTIVE cleared)",
+            "[NewtonMPM] Pinned %d particles (mass=0 + ACTIVE kept)",
             int(indices.size),
+        )
+
+    def _refresh_solver_particle_material(self, rt: _Runtime) -> None:
+        """Refresh Newton's cached MPM density after post-finalize mass edits."""
+        mpm_model = getattr(rt.solver, "_mpm_model", None)
+        if mpm_model is None:
+            raise lifecycle_error(
+                owner="newton_mpm",
+                operation="apply_constraints",
+                expected="SolverImplicitMPM exposes _mpm_model for density refresh",
+            )
+        mpm_model.setup_particle_material()
+
+    def _enforce_pin_to_world(self, rt: _Runtime) -> None:
+        if rt.pinned_indices_wp is None or rt.pinned_world_positions_wp is None:
+            return
+        launch_pin_to_world(
+            rt.pinned_indices_wp,
+            rt.pinned_world_positions_wp,
+            particle_q=rt.state_0.particle_q,
+            particle_qd=rt.state_0.particle_qd,
+            device=self._device,
         )
 
     # ------------------------------------------------------------------

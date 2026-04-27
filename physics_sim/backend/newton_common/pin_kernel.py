@@ -58,6 +58,20 @@ def pin_particles_to_body_kernel(
     particle_qd[pi] = v_lin + wp.cross(omega, r)
 
 
+@wp.kernel
+def pin_particles_to_world_kernel(
+    particle_indices: wp.array(dtype=int),
+    world_positions: wp.array(dtype=wp.vec3),
+    particle_q: wp.array(dtype=wp.vec3),
+    particle_qd: wp.array(dtype=wp.vec3),
+):
+    """Overwrite particle q/qd to fixed world positions."""
+    tid = wp.tid()
+    pi = particle_indices[tid]
+    particle_q[pi] = world_positions[tid]
+    particle_qd[pi] = wp.vec3(0.0, 0.0, 0.0)
+
+
 # ── Hook payload ────────────────────────────────────────────────────
 
 @dataclass
@@ -130,6 +144,30 @@ def launch_pin_hook(
             body_q,
             body_qd,
             body_com,
+            particle_q,
+            particle_qd,
+        ],
+        device=device,
+    )
+
+
+def launch_pin_to_world(
+    particle_indices: wp.array,
+    world_positions: wp.array,
+    *,
+    particle_q: wp.array,
+    particle_qd: wp.array,
+    device: str,
+) -> None:
+    """Launch a fixed-world-position pin kernel."""
+    if particle_indices.shape[0] == 0:
+        return
+    wp.launch(
+        kernel=pin_particles_to_world_kernel,
+        dim=particle_indices.shape[0],
+        inputs=[
+            particle_indices,
+            world_positions,
             particle_q,
             particle_qd,
         ],
