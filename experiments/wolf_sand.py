@@ -17,8 +17,8 @@ from physics_sim.config.scene import PartConfig, SceneConfig
 
 config = SimConfig(
     output="output/wolf_sand",
-    backend=NewtonMPMConfig(n_grid=200),
-    time=TimeConfig(substep_dt=2e-5, frame_dt=4e-2, frame_num=50),
+    backend=NewtonMPMConfig(n_grid=64),
+    time=TimeConfig(substep_dt=2e-5, frame_dt=4e-2, frame_num=60),
     preprocess=PreprocessConfig(source_up="+Z", source_front="-Y"),
     camera=CameraConfig(),
     boundary_conditions=[
@@ -45,18 +45,20 @@ config = SimConfig(
                 source=PlySource(
                     ply_path="model/wolf_whitebg-trained/point_cloud/iteration_30000/point_cloud.ply",
                 ),
-                material=MPMMaterial.sand(
-                    density=2000,
-                    E=5e7,
-                    nu=0.3,
-                    friction_angle=30,
-                ),
+                # material=MPMMaterial.sand(
+                #     density=2000,
+                #     E=5e7,
+                #     nu=0.3,
+                #     friction_angle=30,
+                # ),
+                material=MPMMaterial.jelly(),
                 particle_filling=FillingConfig(
+                    n_grid = 128,
                     threshold_mode = 'quantile',
                     density_threshold=0.9,
-                    search_threshold=0.3,
-                    max_particles_num=2_000_000,
-                    max_particles_per_cell=2,
+                    search_threshold=0.1,
+                    max_particles_num=1_000_000,
+                    max_particles_per_cell=1,
                 ),
             )
         ]

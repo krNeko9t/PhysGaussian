@@ -118,7 +118,6 @@ class FillingConfig(BaseModel):
         default_factory=lambda: [0.2, 1.8, 0.2, 1.8, 0.2, 1.8],
     )
     smooth: bool = False
-    visualize: bool = False
 
     @field_validator("void_probe_skip_axis", mode="before")
     @classmethod
