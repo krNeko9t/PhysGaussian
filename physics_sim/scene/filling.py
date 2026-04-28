@@ -182,6 +182,7 @@ def _run_fill_particles(
         grid_dx=1.0,  # overridden inside fill_particles when boundary is set
         density_thres=cfg.density_threshold,
         search_thres=cfg.search_threshold,
+        threshold_mode=cfg.threshold_mode,
         max_particles_per_cell=cfg.max_particles_per_cell,
         search_exclude_dir=cfg.search_exclude_direction,
         ray_cast_dir=cfg.ray_cast_direction,

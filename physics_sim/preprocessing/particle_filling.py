@@ -13,6 +13,9 @@ import numpy as np
 import taichi as ti
 import mcubes
 
+from physics_sim.preprocessing.filling_threshold_calib import (
+    resolve_absolute_thresholds_from_quantiles,
+)
 from physics_sim.preprocessing.particle_filling_chunks import (
     run_dense_fill_stage,
     run_densify_stage,
@@ -393,6 +396,7 @@ def fill_particles(
     grid_dx: float,
     density_thres=2.0,
     search_thres=1.0,
+    threshold_mode: str = "absolute",
     max_particles_per_cell=1,
     search_exclude_dir=5,
     ray_cast_dir=4,
@@ -405,6 +409,13 @@ def fill_particles(
     sync_each_chunk: bool = True,
 ):
     """Fill internal voids of a Gaussian point cloud with additional particles.
+
+    ``threshold_mode``:
+        ``absolute`` — ``density_thres`` / ``search_thres`` are direct cutoffs in
+        ``grid_density`` units.
+        ``quantile`` — both arguments are ``q`` in ``(0, 1)``; after densify,
+        absolute cutoffs are taken from ``np.quantile`` over occupied voxels
+        (``grid > 0``, else ``grid_density > 0``).
 
     Returns:
         torch.Tensor of shape (N_original + N_filled, 3) on CUDA.
@@ -464,6 +475,23 @@ def fill_particles(
         grid_dx=grid_dx,
         densify_r_cap=densify_r_cap,
     )
+
+    if threshold_mode == "quantile":
+        density_thres, search_thres = resolve_absolute_thresholds_from_quantiles(
+            grid.to_numpy(),
+            grid_density.to_numpy(),
+            density_thres,
+            search_thres,
+        )
+        if progress:
+            print(
+                f"[particle_filling] quantile calibration: "
+                f"density_thres={density_thres:.6g} search_thres={search_thres:.6g}"
+            )
+    elif threshold_mode != "absolute":
+        raise ValueError(
+            f"threshold_mode must be 'absolute' or 'quantile', got {threshold_mode!r}"
+        )
 
     # 2. fill dense grids
     grid_total = grid_n * grid_n * grid_n

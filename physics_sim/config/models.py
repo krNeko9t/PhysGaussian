@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 if TYPE_CHECKING:
     from physics_sim.config.scene import SceneConfig
@@ -90,8 +90,15 @@ class ColliderConfig(BaseModel):
 
 class FillingConfig(BaseModel):
     n_grid: int = 128
-    density_threshold: float = 20.0
-    search_threshold: float = 0.2
+    density_threshold: float = Field(
+        default=20.0,
+        description="absolute: same units as grid_density; quantile: q in (0,1) for np.quantile on occupied cells",
+    )
+    search_threshold: float = Field(
+        default=0.2,
+        description="absolute: same units as grid_density; quantile: q in (0,1) for np.quantile on occupied cells",
+    )
+    threshold_mode: Literal["absolute", "quantile"] = "absolute"
     search_exclude_direction: int = -1
     ray_cast_direction: int = 4
     max_particles_num: int = 500_000
@@ -99,8 +106,22 @@ class FillingConfig(BaseModel):
     boundary: list[float] = Field(
         default_factory=lambda: [0.2, 1.8, 0.2, 1.8, 0.2, 1.8],
     )
-    smooth: bool = True
+    smooth: bool = False
     visualize: bool = False
+
+    @model_validator(mode="after")
+    def _quantile_thresholds_in_open_unit_interval(self) -> FillingConfig:
+        if self.threshold_mode != "quantile":
+            return self
+        for name, val in (
+            ("density_threshold", self.density_threshold),
+            ("search_threshold", self.search_threshold),
+        ):
+            if not (0.0 < val < 1.0):
+                raise ValueError(
+                    f"FillingConfig.{name} must lie in (0, 1) when threshold_mode='quantile', got {val!r}"
+                )
+        return self
 
 
 # ── Material specs (per-backend discriminated union) ─────────────────

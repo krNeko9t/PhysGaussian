@@ -52,13 +52,11 @@ config = SimConfig(
                     friction_angle=30,
                 ),
                 particle_filling=FillingConfig(
-                    density_threshold=100.0,
-                    search_threshold=1.0,
-                    search_exclude_direction=2,
+                    threshold_mode = 'quantile',
+                    density_threshold=0.999999,
+                    search_threshold=0.9,
                     max_particles_num=2_000_000,
-                    max_particles_per_cell=1,
-                    boundary=[0.4, 1.6, 0.4, 1.6, 0.4, 1.6],
-                    visualize=True,
+                    max_particles_per_cell=2,
                 ),
             )
         ]
