@@ -16,6 +16,10 @@ import mcubes
 from physics_sim.preprocessing.filling_threshold_calib import (
     resolve_absolute_thresholds_from_quantiles,
 )
+from physics_sim.preprocessing.internal_fill_axis import (
+    void_fill_ray_axis_to_dir_index,
+    void_probe_skip_axis_to_dir_index,
+)
 from physics_sim.preprocessing.particle_filling_chunks import (
     run_dense_fill_stage,
     run_densify_stage,
@@ -207,6 +211,7 @@ def fill_dense_grids_range(
 
 @ti.func
 def collision_search(grid, grid_density, index, dir_type, size, threshold) -> bool:
+    # dir_type: 0..5 => +X,-X,+Y,-Y,+Z,-Z (internal grid axes)
     dir = ti.Vector([0, 0, 0])
     if dir_type == 0:   dir[0] = 1
     elif dir_type == 1: dir[0] = -1
@@ -398,8 +403,8 @@ def fill_particles(
     search_thres=1.0,
     threshold_mode: str = "absolute",
     max_particles_per_cell=1,
-    search_exclude_dir=5,
-    ray_cast_dir=4,
+    void_probe_skip_axis: str | None = None,
+    void_fill_ray_axis: str = "+Z",
     boundary: list = None,
     smooth: bool = False,
     progress: bool = True,
@@ -417,9 +422,16 @@ def fill_particles(
         absolute cutoffs are taken from ``np.quantile`` over occupied voxels
         (``grid > 0``, else ``grid_density > 0``).
 
+    ``void_probe_skip_axis`` / ``void_fill_ray_axis`` use internal signed axes
+    (``+Z``, ``-Y``, …) or aliases ``up``/``down``/``left``/``right``; see
+    ``internal_fill_axis``.
+
     Returns:
         torch.Tensor of shape (N_original + N_filled, 3) on CUDA.
     """
+    search_exclude_dir = void_probe_skip_axis_to_dir_index(void_probe_skip_axis)
+    ray_cast_dir = void_fill_ray_axis_to_dir_index(void_fill_ray_axis)
+
     pos_clone = pos.clone()
     if boundary is not None:
         if len(boundary) != 6:

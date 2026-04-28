@@ -53,8 +53,8 @@ config = SimConfig(
                 ),
                 particle_filling=FillingConfig(
                     threshold_mode = 'quantile',
-                    density_threshold=0.999999,
-                    search_threshold=0.9,
+                    density_threshold=0.9,
+                    search_threshold=0.3,
                     max_particles_num=2_000_000,
                     max_particles_per_cell=2,
                 ),

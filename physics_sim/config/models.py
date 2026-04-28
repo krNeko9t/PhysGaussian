@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Literal, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 if TYPE_CHECKING:
     from physics_sim.config.scene import SceneConfig
@@ -99,8 +99,19 @@ class FillingConfig(BaseModel):
         description="absolute: same units as grid_density; quantile: q in (0,1) for np.quantile on occupied cells",
     )
     threshold_mode: Literal["absolute", "quantile"] = "absolute"
-    search_exclude_direction: int = -1
-    ray_cast_direction: int = 4
+    void_probe_skip_axis: str | None = Field(
+        default='down',
+        description=(
+            "Internal signed axis (+X/-Y/…) or alias (up/down/left/right): "
+            "six-neighbor shell probe skips this direction. None = use all six."
+        ),
+    )
+    void_fill_ray_axis: str = Field(
+        default="up",
+        description=(
+            "Internal signed axis (or alias) along which internal void-fill rays march."
+        ),
+    )
     max_particles_num: int = 500_000
     max_particles_per_cell: int = 4
     boundary: list[float] = Field(
@@ -108,6 +119,26 @@ class FillingConfig(BaseModel):
     )
     smooth: bool = False
     visualize: bool = False
+
+    @field_validator("void_probe_skip_axis", mode="before")
+    @classmethod
+    def _normalize_void_probe_skip_axis(cls, v: object) -> str | None:
+        from physics_sim.preprocessing.internal_fill_axis import normalize_fill_axis_optional
+
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return normalize_fill_axis_optional(v)
+        raise TypeError(f"void_probe_skip_axis must be str | None, got {type(v).__name__}")
+
+    @field_validator("void_fill_ray_axis", mode="before")
+    @classmethod
+    def _normalize_void_fill_ray_axis(cls, v: object) -> str:
+        from physics_sim.preprocessing.internal_fill_axis import normalize_fill_axis
+
+        if isinstance(v, str):
+            return normalize_fill_axis(v)
+        raise TypeError(f"void_fill_ray_axis must be str, got {type(v).__name__}")
 
     @model_validator(mode="after")
     def _quantile_thresholds_in_open_unit_interval(self) -> FillingConfig:
