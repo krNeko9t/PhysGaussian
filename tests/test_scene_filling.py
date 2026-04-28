@@ -41,6 +41,7 @@ def _make_obj(
         shs=torch.zeros(n, 16, 3),
         quats=torch.zeros(n, 4),
         scales=torch.zeros(n, 3),
+        volumes=torch.zeros(n),
         fill_group=fill_group,
         particle_filling=particle_filling,
     )
@@ -225,9 +226,15 @@ def test_apply_particle_filling_end_to_end():
         shs=torch.zeros(n, 16, 3, device="cuda:0"),
         quats=torch.zeros(n, 4, device="cuda:0"),
         scales=torch.zeros(n, 3, device="cuda:0"),
+        volumes=torch.zeros(n, device="cuda:0"),
         particle_filling=FillingConfig(
             n_grid=32, max_particles_num=50_000, max_particles_per_cell=1,
         ),
     )
     out = apply_particle_filling([obj])
     assert out[0].n_particles >= n  # may fill, may not depending on density; must not shrink
+    # V₀ is rewritten at filling's exit — shape matches and values are positive
+    # when any particles landed in a populated cell.
+    assert out[0].volumes.shape == (out[0].n_particles,)
+    if out[0].n_particles > n:
+        assert (out[0].volumes > 0).any()

@@ -9,6 +9,11 @@ reassigned to their owning part via nearest-neighbor.
 Attribute inheritance (SH / opacity / covariance / quat / scale) is
 pluggable via :class:`FillStrategy`.  The default is nearest-neighbor.
 
+V₀ semantics: filling is a resampling stage, so at its exit the whole
+group's V₀ is re-estimated via the occupancy estimator (dense-cloud
+appropriate).  Source-inherited volumes on new particles are only
+placeholders that survive one hop before being overwritten.
+
 This module only consumes scene-layer objects and the preprocessing
 filling utility — it must not import backend or render internals.
 """
@@ -23,6 +28,7 @@ import torch
 from physics_sim.config.models import FillingConfig
 from physics_sim.errors import configuration_error
 from physics_sim.scene.objects import SceneObject
+from physics_sim.scene.volumes import estimate_volume_occupancy
 
 
 # ── Nearest-neighbor helper (pure torch, chunked) ───────────────────────
@@ -97,20 +103,6 @@ def _derive_boundary(pos: torch.Tensor, margin_frac: float = 0.05) -> list[float
     ]
 
 
-def estimate_volumes_occupancy(pos: torch.Tensor, n_grid: int) -> torch.Tensor:
-    """Per-particle volume ``dx^3 / cells_occupancy`` — correct for dense-filled clouds."""
-    from physics_sim.preprocessing.particle_filling import get_particle_volume
-
-    lo = pos.min(dim=0).values
-    hi = pos.max(dim=0).values
-    extent = (hi - lo).max().item()
-    if extent < 1e-8:
-        extent = 1.0
-    dx = extent / max(n_grid, 1)
-    vol = get_particle_volume(pos - lo, grid_n=n_grid, grid_dx=dx)
-    return vol.to(pos.device)
-
-
 def _group_objects(sim_objects: list[SceneObject]) -> list[list[int]]:
     """Partition indices by ``fill_group``.  None → single-member group."""
     groups: list[list[int]] = []
@@ -161,6 +153,7 @@ def _concat_group_sources(members: list[SceneObject]) -> dict[str, torch.Tensor]
         "shs": torch.cat([m.shs for m in members], dim=0),
         "quats": torch.cat([m.quats for m in members], dim=0),
         "scales": torch.cat([m.scales for m in members], dim=0),
+        "volumes": torch.cat([m.volumes for m in members], dim=0),
         "part_id": torch.cat(part_ids, dim=0),
     }
 
@@ -213,7 +206,23 @@ def _partition_back(
             shs=torch.cat([m.shs, new_attrs["shs"][mask]], dim=0),
             quats=torch.cat([m.quats, new_attrs["quats"][mask]], dim=0),
             scales=torch.cat([m.scales, new_attrs["scales"][mask]], dim=0),
+            volumes=torch.cat([m.volumes, new_attrs["volumes"][mask]], dim=0),
         ))
+    return out
+
+
+def _reestimate_group_volumes(
+    members: list[SceneObject], n_grid: int,
+) -> list[SceneObject]:
+    """Overwrite each member's ``volumes`` with a group-wide occupancy estimate."""
+    group_pos = torch.cat([m.positions for m in members], dim=0)
+    group_vol = estimate_volume_occupancy(group_pos, n_grid)
+    out: list[SceneObject] = []
+    off = 0
+    for m in members:
+        n = m.n_particles
+        out.append(replace(m, volumes=group_vol[off:off + n]))
+        off += n
     return out
 
 
@@ -230,7 +239,8 @@ def _fill_group(
     new_attrs = strategy.inherit(
         src_pos=src["pos"], src_attrs=src_attrs, new_pos=new_pos,
     )
-    return _partition_back(members, new_pos, new_attrs)
+    updated = _partition_back(members, new_pos, new_attrs)
+    return _reestimate_group_volumes(updated, cfg.n_grid)
 
 
 # ── Entry point ─────────────────────────────────────────────────────────
@@ -262,16 +272,15 @@ def apply_particle_filling(
 def fill_scene_objects(
     objects: list[SceneObject],
     strategy: FillStrategy | None = None,
-) -> tuple[list[SceneObject], bool]:
+) -> list[SceneObject]:
     """Apply filling to the ``dynamic`` entries of ``objects`` and splice back.
 
-    Returns the (possibly) updated list plus a ``filled`` flag so the caller
-    can switch volume estimators accordingly.  When no dynamic part declared
-    filling, the original list is returned with ``filled=False``.
+    Filled parts have their ``volumes`` recomputed group-wide via the
+    occupancy estimator at the filling stage's exit.
     """
     dynamic = [o for o in objects if o.role == "dynamic"]
     if not any(o.particle_filling is not None for o in dynamic):
-        return list(objects), False
+        return list(objects)
     filled_dyn = apply_particle_filling(dynamic, strategy)
     it = iter(filled_dyn)
-    return [next(it) if o.role == "dynamic" else o for o in objects], True
+    return [next(it) if o.role == "dynamic" else o for o in objects]

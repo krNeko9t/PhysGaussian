@@ -32,6 +32,7 @@ class SceneObject:
     shs: torch.Tensor             # (N, C, 3)
     quats: torch.Tensor           # (N, 4) wxyz
     scales: torch.Tensor          # (N, 2|3)
+    volumes: torch.Tensor         # (N,) per-particle reference volume V₀
 
     material: Optional[MaterialSpec] = None
     initial_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)

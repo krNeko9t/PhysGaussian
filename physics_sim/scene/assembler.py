@@ -36,6 +36,7 @@ from physics_sim.coord import (
 )
 from physics_sim.scene.objects import SceneObject
 from physics_sim.scene.point_selector import PointSelectorResolver
+from physics_sim.scene.volumes import estimate_volume_ellipsoid
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -214,6 +215,10 @@ def assemble_scene(
 
         print(f"    -> {name}: {pos.shape[0]} GS particles (gs_type={gs_type})")
 
+        # V₀ from GS scale (ellipsoid estimator).  Filling, if configured
+        # on this part, will recompute V₀ group-wide at its exit.
+        volumes = estimate_volume_ellipsoid(scales)
+
         result.append(SceneObject(
             name=name,
             role=role,
@@ -223,6 +228,7 @@ def assemble_scene(
             shs=shs,
             quats=quats,
             scales=scales,
+            volumes=volumes,
             material=obj_cfg.material,
             initial_velocity=obj_cfg.initial_velocity,
             particle_filling=obj_cfg.particle_filling,

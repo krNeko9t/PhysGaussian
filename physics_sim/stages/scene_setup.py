@@ -21,7 +21,8 @@ from physics_sim.scene.constraint_resolver import (
     ResolvedConstraint,
     resolve_constraints,
 )
-from physics_sim.scene.filling import estimate_volumes_occupancy, fill_scene_objects
+from physics_sim.scene.filling import fill_scene_objects
+from physics_sim.scene.volumes import sanity_check_volumes
 from physics_sim.sh_contract import sh_coeff_count
 from physics_sim.scene import SceneObject, assemble_scene
 
@@ -112,16 +113,6 @@ class SceneData:
     resolved_constraints: list[ResolvedConstraint] = field(default_factory=list)
 
 
-def _estimate_volumes(pos: torch.Tensor, n_grid: int) -> torch.Tensor:
-    lo = pos.min(dim=0)[0]
-    hi = pos.max(dim=0)[0]
-    extent = (hi - lo).max().item()
-    if extent < 1e-8:
-        extent = 1.0
-    dx = extent / max(n_grid, 1)
-    return torch.full((pos.shape[0],), float(dx ** 3), device=pos.device)
-
-
 def _build_parts_runtime(sim_objects: list[SceneObject]) -> list[PartRuntimeInfo]:
     info = []
     offset = 0
@@ -162,16 +153,11 @@ def _empty_dynamic_init(
 def _build_dynamic_init(
     sim_objects: list[SceneObject],
     device: str,
-    n_grid: int,
-    *,
-    filled: bool = False,
 ) -> DynamicSceneInit:
     pos = torch.cat([o.positions for o in sim_objects], dim=0).to(device)
     cov = torch.cat([o.covariances for o in sim_objects], dim=0).to(device)
-    vol = (
-        estimate_volumes_occupancy(pos, n_grid)
-        if filled else _estimate_volumes(pos, n_grid)
-    )
+    vol = torch.cat([o.volumes for o in sim_objects], dim=0).to(device)
+    sanity_check_volumes(vol, pos, name="dynamic_init")
     return DynamicSceneInit(
         pos=pos,
         cov=cov,
@@ -243,7 +229,7 @@ def setup_scene(
     )
 
     objects = assemble_scene(cfg, loader, config_dir=config_dir)
-    objects, filled = fill_scene_objects(objects)
+    objects = fill_scene_objects(objects)
 
     sim_objects = [o for o in objects if o.role == "dynamic"]
     static_objects = [o for o in objects if o.role == "render_only"]
@@ -254,10 +240,8 @@ def setup_scene(
 
     gs_type = (sim_objects or objects)[0].gs_type
 
-    n_grid = getattr(cfg.backend, "n_grid", 200)
-
     if sim_objects:
-        dynamic_init = _build_dynamic_init(sim_objects, device, n_grid, filled=filled)
+        dynamic_init = _build_dynamic_init(sim_objects, device)
         parts_runtime = _build_parts_runtime(sim_objects)
     else:
         dynamic_init = _empty_dynamic_init(device, sh_degree, sh_channels)
