@@ -45,7 +45,7 @@ backend = NewtonMPMConfig(
 )
 
 config = SimConfig(
-    output="output/alocasia_external_cam_mpm",
+    output="output/alocasia_mpm_429",
     backend=backend,
     time=TimeConfig(
         substep_dt=1e-3,

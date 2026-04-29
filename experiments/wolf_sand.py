@@ -51,15 +51,17 @@ config = SimConfig(
                 #     nu=0.3,
                 #     friction_angle=30,
                 # ),
-                material=MPMMaterial.jelly(),
-                particle_filling=FillingConfig(
-                    n_grid = 128,
-                    threshold_mode = 'quantile',
-                    density_threshold=0.9,
-                    search_threshold=0.1,
-                    max_particles_num=1_000_000,
-                    max_particles_per_cell=1,
+                material=MPMMaterial.jelly(
+                    density=300.0, E=1e6, nu=0.3, yield_stress=1e5,
                 ),
+                # particle_filling=FillingConfig(
+                #     n_grid = 128,
+                #     threshold_mode = 'quantile',
+                #     density_threshold=0.9,
+                #     search_threshold=0.1,
+                #     max_particles_num=1_000_000,
+                #     max_particles_per_cell=1,
+                # ),
             )
         ]
     ),

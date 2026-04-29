@@ -31,6 +31,15 @@ from physics_sim.sh_contract import flatten_sh_coeffs, restore_sh_coeffs
 DEFAULT_DENSIFY_R_CAP = 8
 
 
+def _ensure_taichi_cuda_initialized() -> None:
+    """Idempotent Taichi init for CUDA kernels (matches pipeline / fill_particles)."""
+    from taichi.lang import impl as _ti_impl
+
+    _rt = _ti_impl.get_runtime()
+    if _rt is None or getattr(_rt, "prog", None) is None:
+        ti.init(arch=ti.cuda, device_memory_GB=8.0)
+
+
 # ── Taichi kernels ────────────────────────────────────────────────────────
 
 @ti.func
@@ -350,24 +359,30 @@ def internal_filling_range(
 
 
 @ti.kernel
-def assign_particle_to_grid(pos: ti.template(), grid: ti.template(), grid_dx: float):
+def assign_particle_to_grid(
+    pos: ti.template(), grid: ti.template(), grid_dx: float, grid_n: ti.i32
+):
     for pi in range(pos.shape[0]):
         p = pos[pi]
-        i = ti.floor(p[0] / grid_dx, dtype=int)
-        j = ti.floor(p[1] / grid_dx, dtype=int)
-        k = ti.floor(p[2] / grid_dx, dtype=int)
+        i = ti.min(ti.floor(p[0] / grid_dx, dtype=int), grid_n - 1)
+        j = ti.min(ti.floor(p[1] / grid_dx, dtype=int), grid_n - 1)
+        k = ti.min(ti.floor(p[2] / grid_dx, dtype=int), grid_n - 1)
         ti.atomic_add(grid[i, j, k], 1)
 
 
 @ti.kernel
 def compute_particle_volume(
-    pos: ti.template(), grid: ti.template(), particle_vol: ti.template(), grid_dx: float
+    pos: ti.template(),
+    grid: ti.template(),
+    particle_vol: ti.template(),
+    grid_dx: float,
+    grid_n: ti.i32,
 ):
     for pi in range(pos.shape[0]):
         p = pos[pi]
-        i = ti.floor(p[0] / grid_dx, dtype=int)
-        j = ti.floor(p[1] / grid_dx, dtype=int)
-        k = ti.floor(p[2] / grid_dx, dtype=int)
+        i = ti.min(ti.floor(p[0] / grid_dx, dtype=int), grid_n - 1)
+        j = ti.min(ti.floor(p[1] / grid_dx, dtype=int), grid_n - 1)
+        k = ti.min(ti.floor(p[2] / grid_dx, dtype=int), grid_n - 1)
         particle_vol[pi] = (grid_dx * grid_dx * grid_dx) / grid[i, j, k]
 
 
@@ -375,14 +390,15 @@ def compute_particle_volume(
 
 def get_particle_volume(pos, grid_n: int, grid_dx: float, uniform: bool = False):
     """Compute per-particle volume based on grid occupancy."""
+    _ensure_taichi_cuda_initialized()
     ti_pos = ti.Vector.field(n=3, dtype=float, shape=pos.shape[0])
     ti_pos.from_torch(pos.reshape(-1, 3))
 
     grid = ti.field(dtype=int, shape=(grid_n, grid_n, grid_n))
     particle_vol = ti.field(dtype=float, shape=pos.shape[0])
 
-    assign_particle_to_grid(ti_pos, grid, grid_dx)
-    compute_particle_volume(ti_pos, grid, particle_vol, grid_dx)
+    assign_particle_to_grid(ti_pos, grid, grid_dx, int(grid_n))
+    compute_particle_volume(ti_pos, grid, particle_vol, grid_dx, int(grid_n))
 
     if uniform:
         vol = particle_vol.to_torch()
@@ -451,11 +467,7 @@ def fill_particles(
         new_origin = torch.tensor([boundary[0], boundary[2], boundary[4]]).cuda()
         pos = pos - new_origin
 
-    from taichi.lang import impl as _ti_impl_fill
-
-    _rt_fill = _ti_impl_fill.get_runtime()
-    if _rt_fill is None or getattr(_rt_fill, "prog", None) is None:
-        ti.init(arch=ti.cuda, device_memory_GB=8.0)
+    _ensure_taichi_cuda_initialized()
 
     ti_pos = ti.Vector.field(n=3, dtype=float, shape=pos.shape[0])
     ti_opacity = ti.field(dtype=float, shape=opacity.shape[0])
